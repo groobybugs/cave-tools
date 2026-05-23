@@ -1,0 +1,60 @@
+{
+  "name": "@groobybugs/cave-tools",
+  "version": "0.1.0",
+  "description": "A caveman needs their tools. Token-compression MCP server for any agent.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "cave-tools": "./dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "check": "tsc --noEmit",
+    "start": "node dist/cli.js",
+    "mcp": "node dist/cli.js mcp",
+    "prepack": "pnpm run build"
+  },
+  "keywords": [
+    "mcp",
+    "agent",
+    "compression",
+    "tokens",
+    "caveman",
+    "cli"
+  ],
+  "author": {
+    "name": "groobybugs",
+    "email": "groobybugs299@hotmail.com",
+    "url": "https://github.com/groobybugs"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/groobybugs/cave-tools#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/groobybugs/cave-tools.git"
+  },
+  "bugs": {
+    "url": "https://github.com/groobybugs/cave-tools/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "pnpm@10.33.4",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
