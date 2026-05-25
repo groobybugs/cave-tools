@@ -6,8 +6,6 @@ Cave Tools is a standalone MCP server extracted from [Caveman Code](https://gith
 
 Published package: [`@groobybugs/cave-tools`](https://www.npmjs.com/package/@groobybugs/cave-tools)
 
-Source repo: [`groobybugs/cave-tools`](https://github.com/groobybugs/cave-tools)
-
 Keep your favorite agent. Give it better tools.
 
 ## What This Is
