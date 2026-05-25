@@ -102,7 +102,7 @@ All tool names use the MCP names exported by the server.
 
 | Tool              | Purpose                                                                                   | Caveman Code parity                                                 |
 | ----------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `cave__read`      | Read files with dedup + Flint Chipper.                                                    | Based on `read`, plus standalone dedup cache.                       |
+| `cave__read`      | Read files with dedup + Flint Chipper. Reads images (`.png/.jpg/.jpeg/.gif/.webp/.bmp/.svg`) as MCP image content (base64, up to 5 MB). | Based on `read`, plus standalone dedup cache + image support.       |
 | `cave__bash`      | Run shell commands with RTK rewrite + Stone Tablet + Flint Chipper.                       | Based on `bash` compression behavior, not permission/TUI handling.  |
 | `cave__grep`      | Search file contents with `rg --json`, match limits, context lines, long-line truncation. | Based on `grep`.                                                    |
 | `cave__find`      | Find files by glob with `fd` when available, Node fallback, relative paths, result limit. | Based on `find`.                                                    |
@@ -127,6 +127,121 @@ Use this instruction block in agent rules:
 - Use `cave__status` to check RTK availability, cache state, and budget settings when the user asks about savings.
 - These tools are the compression layer. Do not wrap them in extra Python/scripts; pass file paths, search patterns, or commands directly.
 ```
+
+## Enforcing Cave Tools (Hooks / Permissions)
+
+Instruction blocks are advisory — agents may still reach for the built-in `Read`, `Grep`, `Glob`, or `Bash` tools out of habit. To make Cave Tools the only viable path, use the host's hook / permission system to block the built-ins. Output flows back through `cave__*` automatically because the agent has nowhere else to go.
+
+### Claude Code (`~/.claude/settings.json`)
+
+Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting with status `2` and emitting a message to stderr.
+
+1. Register the hook in `~/.claude/settings.json`:
+
+   ```json
+   {
+     "hooks": {
+       "PreToolUse": [
+         {
+           "matcher": "Read|Grep|Glob",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "/home/you/.claude/hooks/cave-tools-redirect.sh",
+               "timeout": 3
+             }
+           ]
+         },
+         {
+           "matcher": "Bash",
+           "hooks": [
+             { "type": "command", "command": "rtk hook claude" }
+           ]
+         }
+       ]
+     }
+   }
+   ```
+
+   The `Bash` matcher is optional — it preserves RTK rewriting on built-in Bash. `cave__bash` already calls `rtk` internally, so falling all the way back to `cave__bash` is even better.
+
+2. Drop this hook script at `~/.claude/hooks/cave-tools-redirect.sh` and make it executable (`chmod +x`):
+
+   ```bash
+   #!/usr/bin/env bash
+   INPUT=$(cat)
+
+   TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
+   FPATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
+
+   case "$TOOL" in
+     Read)
+       # Allow built-in Read for binary formats cave__read returns as base64 image blocks.
+       case "$FPATH" in
+         *.png|*.jpg|*.jpeg|*.gif|*.webp|*.bmp|*.svg|*.pdf) exit 0 ;;
+       esac
+       echo "BLOCKED: Use cave__read instead of Read. Cave-tools provides dedup + Flint Chipper compression." >&2
+       exit 2
+       ;;
+     Grep)
+       echo "BLOCKED: Use cave__grep instead of Grep. Cave-tools provides ripgrep with Flint Chipper budgets." >&2
+       exit 2
+       ;;
+     Glob)
+       echo "BLOCKED: Use cave__find instead of Glob. Cave-tools provides fd-based search with compression." >&2
+       exit 2
+       ;;
+   esac
+
+   exit 0
+   ```
+
+   Since `0.2.0`, `cave__read` returns image files as MCP `image` content blocks; you can drop the image allowlist branch if you want every read to flow through Cave Tools.
+
+3. Restart Claude Code. Built-in `Read`, `Grep`, and `Glob` now exit with a helpful error pointing the agent at `cave__read` / `cave__grep` / `cave__find`. The harness retries with the suggested tool automatically.
+
+### opencode (`~/.config/opencode/opencode.json`)
+
+opencode does not have hooks, but its `permission` config can `deny` built-in tools. Combine with the MCP server registration shown above:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "cave-tools": {
+      "type": "local",
+      "command": ["cave-tools", "mcp"],
+      "enabled": true
+    }
+  },
+  "permission": {
+    "read": "deny",
+    "grep": "deny",
+    "glob": "deny",
+    "bash": "ask"
+  },
+  "instructions": ["~/.config/opencode/AGENTS.md"]
+}
+```
+
+Then drop the same instruction block from "Usage Guidance For Agents" into `~/.config/opencode/AGENTS.md` so the model knows what to use instead. `bash` is set to `ask` rather than `deny` so the agent can still escape-hatch when `cave__bash` cannot handle a case (background processes, interactive stdin); flip to `"deny"` if you want hard enforcement.
+
+opencode evaluates patterns last-match-wins, so you can grant exceptions:
+
+```json
+"permission": {
+  "read": {
+    "*": "deny",
+    "*.png": "allow",
+    "*.jpg": "allow"
+  }
+}
+```
+
+### Other MCP clients
+
+Cursor, Kiro, Gemini CLI, and Antigravity expose tool toggles in their UI rather than a deny config — disable the built-in `Read`/`Grep`/`Glob`/`Bash` there and rely on the instruction block to point the model at `cave__*`.
+
 
 ## Tool Examples
 
