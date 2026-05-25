@@ -1,5 +1,6 @@
 import type { ToolResult } from "../types.js";
-import { readFileSync } from "fs";
+import { readFileSync, statSync } from "fs";
+import { extname } from "path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   isFileUnchanged,
@@ -7,12 +8,26 @@ import {
   applyBudget,
 } from "../compression/utils.js";
 
+const IMAGE_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".svg": "image/svg+xml",
+};
+
+// Hard cap to avoid blowing up the MCP transport with multi-MB base64 payloads.
+// Anthropic image input cap is 5 MB; we mirror that.
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
 export const readTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__read",
   description:
-    "Read a file with dedup + Flint Chipper compression. Returns a stub if the file hasn't changed since the last read in the same session.",
+    "Read a file with dedup + Flint Chipper compression. Returns a stub if the file hasn't changed since the last read in the same session. Image files (.png, .jpg, .jpeg, .gif, .webp, .bmp, .svg) are returned as image content blocks (base64); offset/limit are ignored for images.",
   inputSchema: {
     type: "object",
     properties: {
@@ -22,12 +37,12 @@ export const readTool: Tool & {
       },
       offset: {
         type: "number",
-        description: "Line number to start reading from (1-indexed)",
+        description: "Line number to start reading from (1-indexed). Ignored for images.",
         default: 1,
       },
       limit: {
         type: "number",
-        description: "Maximum number of lines to read",
+        description: "Maximum number of lines to read. Ignored for images.",
         default: 200,
       },
     },
@@ -38,6 +53,68 @@ export const readTool: Tool & {
     const offset = Number(args.offset) || 1;
     const limit = Number(args.limit) || 200;
 
+    const ext = extname(filePath).toLowerCase();
+    const imageMime = IMAGE_MIME[ext];
+
+    // --- Image branch -----------------------------------------------------
+    if (imageMime) {
+      try {
+        if (isFileUnchanged(filePath)) {
+          return {
+            content: [
+              { type: "text", text: "<image unchanged since last read>" },
+            ],
+          };
+        }
+
+        const size = statSync(filePath).size;
+        if (size > MAX_IMAGE_BYTES) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Image too large (${size} bytes, max ${MAX_IMAGE_BYTES}). Resize or crop before reading.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // SVG: send as text (it's just XML), keeps the image route for raster only.
+        if (ext === ".svg") {
+          const svg = readFileSync(filePath, "utf-8");
+          updateFileCache(filePath);
+          return {
+            content: [{ type: "text", text: svg }],
+          };
+        }
+
+        const buf = readFileSync(filePath);
+        updateFileCache(filePath);
+
+        return {
+          content: [
+            {
+              type: "image",
+              data: buf.toString("base64"),
+              mimeType: imageMime,
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error reading image: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    // --- Text branch (original behavior) ---------------------------------
     if (isFileUnchanged(filePath)) {
       return {
         content: [
