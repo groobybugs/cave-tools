@@ -1,5 +1,6 @@
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { writeFileSync } from "fs";
 import { invalidateFileCache } from "../compression/utils.js";
 
 export const writeTool: Tool & {
@@ -7,14 +8,18 @@ export const writeTool: Tool & {
 } = {
   name: "cave__write",
   description:
-    "Invalidate the dedup cache after file edits. Call this after editing or writing a file so subsequent cave__read calls return fresh content.",
+    "Write file content and/or invalidate the dedup cache. With `content`, writes (creates/overwrites) the single file in `file_paths` then invalidates it. Without `content`, only invalidates the cache for the listed paths (call after editing a file outside Cave Tools so cave__read returns fresh content).",
   inputSchema: {
     type: "object",
     properties: {
       file_paths: {
         type: "array",
         items: { type: "string" },
-        description: "Array of absolute file paths to invalidate in the cache",
+        description: "Absolute file paths. When `content` is given, must be exactly one path.",
+      },
+      content: {
+        type: "string",
+        description: "Optional. If provided, written to the single file in `file_paths` (create/overwrite).",
       },
     },
     required: ["file_paths"],
@@ -23,6 +28,34 @@ export const writeTool: Tool & {
     const paths = Array.isArray(args.file_paths)
       ? args.file_paths.map(String)
       : [String(args.file_paths)];
+
+    if (typeof args.content === "string") {
+      if (paths.length !== 1) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Error: `content` requires exactly one path in `file_paths`",
+            },
+          ],
+          isError: true,
+        };
+      }
+      try {
+        writeFileSync(paths[0], args.content, "utf-8");
+      } catch {
+        return {
+          content: [{ type: "text", text: `Error: cannot write ${paths[0]}` }],
+          isError: true,
+        };
+      }
+      invalidateFileCache(paths[0]);
+      return {
+        content: [
+          { type: "text", text: `Wrote ${args.content.length} chars to ${paths[0]}` },
+        ],
+      };
+    }
 
     for (const filePath of paths) {
       invalidateFileCache(filePath);

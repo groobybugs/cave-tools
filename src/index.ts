@@ -15,6 +15,7 @@ import { configureTool } from "./tools/configure.js";
 import { grepTool } from "./tools/grep.js";
 import { findTool } from "./tools/find.js";
 import { lsTool } from "./tools/ls.js";
+import { editTool } from "./tools/edit.js";
 
 const server = new Server(
   {
@@ -35,6 +36,7 @@ const tools: Tool[] = [
   findTool,
   lsTool,
   writeTool,
+  editTool,
   compressTool,
   statusTool,
   configureTool,
@@ -58,6 +60,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ) as Promise<CallToolResult>;
     case "cave__write":
       return writeTool.handler(
+        args as Record<string, unknown>,
+      ) as Promise<CallToolResult>;
+    case "cave__edit":
+      return editTool.handler(
         args as Record<string, unknown>,
       ) as Promise<CallToolResult>;
     case "cave__compress":

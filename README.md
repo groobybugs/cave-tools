@@ -2,7 +2,7 @@
 
 > A caveman needs their tools.
 
-Cave Tools is a standalone MCP server extracted from [Caveman Code](https://github.com/JuliusBrussee/caveman-code). It gives any MCP-capable agent the token-saving file and shell tools from Caveman Code without adopting the full Caveman Code TUI or agent runtime.
+Cave Tools is a standalone MCP server extracted from [Caveman Code](https://github.com/JuliusBrussee/caveman-code). It gives any MCP-capable agent its token-saving file and shell tools — no TUI or agent runtime required.
 
 Published package: [`@groobybugs/cave-tools`](https://www.npmjs.com/package/@groobybugs/cave-tools)
 
@@ -18,8 +18,6 @@ Cave Tools implements the portable compression/tool layer from Caveman Code:
 | Stone Tablet  | Compresses large JSON/XML output while preserving useful structure.                                                          |
 | Flint Chipper | Strips ANSI, collapses blank lines, and applies per-tool line budgets.                                                       |
 | Read Dedup    | Fingerprints files per session. Re-reading unchanged files returns a stub instead of full content.                           |
-
-This is not the full Caveman Code agent. It does not implement subagents, memory, editing, planning, or the TUI. It implements MCP tools that other agents can call.
 
 ## Install
 
@@ -105,7 +103,8 @@ All tool names use the MCP names exported by the server.
 | `cave__grep`      | Search file contents with `rg --json`, match limits, context lines, long-line truncation. | Based on `grep`.                                                    |
 | `cave__find`      | Find files by glob with `fd` when available, Node fallback, relative paths, result limit. | Based on `find`.                                                    |
 | `cave__ls`        | List directory entries, sorted, directories suffixed with `/`.                            | Based on `ls`.                                                      |
-| `cave__write`     | Invalidate read dedup cache after edits/writes.                                           | Cave Tools-specific cache tool, not Caveman Code's file-write tool. |
+| `cave__edit`      | Exact string replacement in a file (like built-in Edit). Auto-invalidates dedup cache.    | Cave Tools-specific edit tool.                                      |
+| `cave__write`     | Write file content (create/overwrite) and/or invalidate the read dedup cache.             | Cave Tools-specific write/cache tool.                               |
 | `cave__compress`  | Compress arbitrary text through Stone Tablet + Flint Chipper.                             | Cave Tools-specific helper.                                         |
 | `cave__status`    | Show RTK availability, cache stats, and budgets.                                          | Cave Tools-specific helper.                                         |
 | `cave__configure` | Change line budgets for the current MCP session.                                          | Cave Tools-specific helper.                                         |
@@ -194,13 +193,18 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
    exit 0
    ```
 
-   Since `0.2.0`, `cave__read` returns image files as MCP `image` content blocks; you can drop the image allowlist branch if you want every read to flow through Cave Tools.
+   Since `0.2.0`, `cave__read` reads images (and PDFs) as MCP `image` content blocks, so the `*.png|*.jpg|...` allowlist branch above is **optional** — delete it to route every read through Cave Tools. Keep or extend the allowlist only if you deliberately want certain formats handled by the built-in `Read` instead.
 
 3. Restart Claude Code. Built-in `Read`, `Grep`, and `Glob` now exit with a helpful error pointing the agent at `cave__read` / `cave__grep` / `cave__find`. The harness retries with the suggested tool automatically.
 
 ### opencode (`~/.config/opencode/opencode.json`)
 
-opencode does not have hooks, but its `permission` config can `deny` built-in tools. Combine with the MCP server registration shown above:
+opencode does not have hooks. Two options:
+
+- **Rules only (simplest):** register the MCP server and point opencode at a global rules file via `instructions` (or `~/.config/opencode/AGENTS.md`, loaded automatically) with no `permission` block. Rules are advisory — the model follows them, nothing hard-blocks the built-ins. Enough for most setups.
+- **Hard enforcement:** add a `permission` block that denies the built-ins.
+
+Combine the MCP registration with whichever you choose:
 
 ```json
 {
@@ -224,7 +228,7 @@ opencode does not have hooks, but its `permission` config can `deny` built-in to
 
 Then drop the same instruction block from "Usage Guidance For Agents" into `~/.config/opencode/AGENTS.md` so the model knows what to use instead. `bash` is set to `ask` rather than `deny` so the agent can still escape-hatch when `cave__bash` cannot handle a case (background processes, interactive stdin); flip to `"deny"` if you want hard enforcement.
 
-opencode evaluates patterns last-match-wins, so you can grant exceptions:
+Since `cave__read` handles images itself, read exceptions are usually unnecessary. To force certain formats through the built-in `Read`, opencode evaluates patterns last-match-wins, so you can carve out exclusions:
 
 ```json
 "permission": {
@@ -236,9 +240,17 @@ opencode evaluates patterns last-match-wins, so you can grant exceptions:
 }
 ```
 
+### Antigravity 2.0 / Gemini CLI
+
+Antigravity and Gemini CLI have no `deny`/hook system — enforcement is the global rules file plus the UI tool toggles.
+
+- Add global rules at `~/.gemini/GEMINI.md` (Antigravity's native global rules — three-dot menu in the Agent chat → **+ Global** creates it) and/or the cross-tool `~/.gemini/AGENTS.md`.
+- These files do **not** support `@file` imports — inline the rules directly. A bare `@RTK.md` line is silently ignored, so paste the actual content.
+- Optionally disable the built-in `Read`/`Grep`/`Glob`/`Bash` in the IDE tool toggles so the model falls back to `cave__*`.
+
 ### Other MCP clients
 
-Cursor, Kiro, Gemini CLI, and Antigravity expose tool toggles in their UI rather than a deny config — disable the built-in `Read`/`Grep`/`Glob`/`Bash` there and rely on the instruction block to point the model at `cave__*`.
+Cursor and Kiro expose tool toggles in their UI rather than a deny config — disable the built-in `Read`/`Grep`/`Glob`/`Bash` there and rely on the instruction block to point the model at `cave__*`.
 
 
 ## Tool Examples
@@ -293,7 +305,7 @@ Invalidate cache after edits:
 
 ## Relationship To Caveman Code
 
-Cave Tools is a fork/extraction of the tool layer from [Caveman Code](https://github.com/JuliusBrussee/caveman-code).
+Cave Tools is a fork/extraction of the tool layer from [Caveman Code](https://github.com/JuliusBrussee/caveman-code). It does not implement subagents, memory, editing, planning, or the TUI — only MCP tools other agents can call.
 
 Use Caveman Code if you want the full coding agent. Use Cave Tools if you want the compression tools inside Claude Code, Gemini CLI, Antigravity, Kiro CLI, Cursor, opencode, Codex, or another MCP client.
 
