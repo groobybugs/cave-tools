@@ -1,6 +1,6 @@
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { setBudget, getAllBudgets } from "../compression/utils.js";
+import { resetCache, resetStats, setBudget } from "../compression/utils.js";
 
 type ConfigAction = "set_budget" | "reset_cache" | "reset_stats";
 
@@ -60,23 +60,24 @@ export const configureTool: Tool & {
       }
 
       case "reset_cache": {
-        // In a real implementation, clear the fileCache
+        resetCache();
         return {
           content: [
             {
               type: "text",
-              text: "Cache reset (not yet implemented in this version)",
+              text: "Cache reset",
             },
           ],
         };
       }
 
       case "reset_stats": {
+        resetStats();
         return {
           content: [
             {
               type: "text",
-              text: "Statistics reset (not yet implemented in this version)",
+              text: "Statistics reset",
             },
           ],
         };
