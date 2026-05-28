@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import { spawnSync } from "child_process";
-import { readFileSync, writeFileSync, mkdirSync, rmSync, statSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -13,6 +13,9 @@ let cacheMisses = 0;
 let dedupSavedChars = 0;
 const sessionStart = Date.now();
 const sessionPid = process.pid;
+
+// Stub returned by cave__read on a dedup hit (mirror of read.ts).
+const READ_STUB = "<file unchanged since last read>";
 
 interface ToolSavings {
   calls: number;
@@ -113,6 +116,43 @@ export function getStatsSessionsDir(): string {
   return SESSIONS_DIR;
 }
 
+/**
+ * Delete per-session stat files whose owning process is no longer alive.
+ * Keeps the sessions dir from accumulating stale stats (which would inflate
+ * global totals). Never removes the current session's own file.
+ */
+export function pruneDeadSessions(): number {
+  let removed = 0;
+  let names: string[];
+  try {
+    names = readdirSync(SESSIONS_DIR);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const pid = parseInt(name.slice(0, -".json".length), 10);
+    if (!Number.isFinite(pid) || pid === sessionPid) continue;
+    let alive: boolean;
+    try {
+      process.kill(pid, 0);
+      alive = true;
+    } catch (e) {
+      // EPERM = process exists but we can't signal it -> still alive.
+      alive = (e as NodeJS.ErrnoException)?.code === "EPERM";
+    }
+    if (!alive) {
+      try {
+        rmSync(join(SESSIONS_DIR, name), { force: true });
+        removed++;
+      } catch {
+        // Non-fatal: best-effort cleanup.
+      }
+    }
+  }
+  return removed;
+}
+
 export function getFileHash(filePath: string): string | null {
   try {
     const content = readFileSync(filePath, "utf-8");
@@ -123,20 +163,21 @@ export function getFileHash(filePath: string): string | null {
 }
 
 export function isFileUnchanged(filePath: string): boolean {
-  const currentHash = getFileHash(filePath);
-  if (!currentHash) return false;
+  let content: string;
+  try {
+    content = readFileSync(filePath, "utf-8");
+  } catch {
+    return false;
+  }
+  const currentHash = createHash("sha256").update(content).digest("hex");
   const cachedHash = fileCache.get(filePath);
   const unchanged = cachedHash !== undefined && cachedHash === currentHash;
   if (unchanged) {
     cacheHits++;
-    try {
-      dedupSavedChars += Math.max(
-        0,
-        statSync(filePath).size - "<file unchanged since last read>".length,
-      );
-    } catch {
-      // Non-fatal: cache hit stats still useful without size estimate.
-    }
+    // Credit only what a real cave__read would have emitted (budget-capped),
+    // not the full file size — otherwise large files inflate dedup savings.
+    const wouldEmit = budgetedText(content, "read").length;
+    dedupSavedChars += Math.max(0, wouldEmit - READ_STUB.length);
     persistStats();
   }
   return unchanged;
@@ -278,17 +319,21 @@ export function truncateLines(
   );
 }
 
-export function applyBudget(text: string, toolName: string): string {
-  const rawLength = text.length;
+export function budgetedText(text: string, toolName: string): string {
   const budget = getBudget(toolName);
-  let result = stripAnsi(text);
-  result = collapseBlankLines(result);
-  result = truncateLines(
-    result,
+  const stripped = stripAnsi(text);
+  const collapsed = collapseBlankLines(stripped);
+  return truncateLines(
+    collapsed,
     budget.maxLines,
     budget.headLines,
     budget.tailLines,
   );
+}
+
+export function applyBudget(text: string, toolName: string): string {
+  const rawLength = text.length;
+  const result = budgetedText(text, toolName);
   const tool = savingsByTool[toolName] || {
     calls: 0,
     rawChars: 0,

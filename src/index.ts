@@ -16,6 +16,7 @@ import { grepTool } from "./tools/grep.js";
 import { findTool } from "./tools/find.js";
 import { lsTool } from "./tools/ls.js";
 import { editTool } from "./tools/edit.js";
+import { pruneDeadSessions } from "./compression/utils.js";
 
 const server = new Server(
   {
@@ -96,6 +97,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 export async function startServer(): Promise<void> {
+  pruneDeadSessions();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Cave Tools MCP server running on stdio");

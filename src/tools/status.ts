@@ -24,10 +24,9 @@ export const statusTool: Tool & {
     const savings = getSavingsStats();
     const budgets = getAllBudgets();
     const rtkAvailable = isRtkAvailable();
-    const overallPct = reductionPercent(
+    const compressionPct = reductionPercent(
       savings.rawChars,
-      savings.savedChars,
-      savings.dedupSavedChars,
+      savings.compressionSavedChars,
     );
 
     const report = [
@@ -41,16 +40,19 @@ export const statusTool: Tool & {
       `  Cache misses:  ${stats.misses}`,
       `  Hit rate:      ${(stats.hitRate * 100).toFixed(1)}%`,
       "",
-      "Token Savings:",
-      `  Calls:                  ${savings.totalCalls}`,
-      `  Raw chars:              ${savings.rawChars}`,
-      `  Compressed chars:       ${savings.compressedChars}`,
-      `  Compression saved chars: ${savings.compressionSavedChars}`,
-      `  Dedup saved chars:      ${savings.dedupSavedChars}`,
-      `  Saved chars:            ${savings.savedChars}`,
-      `  Estimated tokens saved: ${savings.estimatedTokensSaved}`,
-      `  Reduction:              ${overallPct.toFixed(1)}%`,
-      `  Efficiency meter: ${efficiencyMeter(overallPct)} ${overallPct.toFixed(1)}%`,
+      "Compression (output trimming):",
+      `  Calls:            ${savings.totalCalls}`,
+      `  Raw chars:        ${savings.rawChars}`,
+      `  Compressed chars: ${savings.compressedChars}`,
+      `  Saved chars:      ${savings.compressionSavedChars}`,
+      `  Reduction:        ${compressionPct.toFixed(1)}%`,
+      `  Meter: ${efficiencyMeter(compressionPct)} ${compressionPct.toFixed(1)}%`,
+      "",
+      "Dedup (avoided re-reads):",
+      `  Cache hits:    ${stats.hits}`,
+      `  Chars avoided: ${savings.dedupSavedChars} (budget-capped)`,
+      "",
+      `Total est. tokens saved: ${savings.estimatedTokensSaved}`,
       "",
       "Budget Configuration:",
       ...Object.entries(budgets).map(

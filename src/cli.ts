@@ -4,6 +4,7 @@ import { startServer } from "./index.js";
 import {
   getAllBudgets,
   getStatsSessionsDir,
+  pruneDeadSessions,
   reductionPercent,
   efficiencyMeter,
   isRtkAvailable,
@@ -105,6 +106,7 @@ if (args[0] === "mcp" || args.length === 0) {
     process.exit(1);
   });
 } else if (args[0] === "status") {
+  pruneDeadSessions();
   const rtkAvailable = isRtkAvailable();
   const sessions = readSessionStats();
   const liveSessions = sessions.filter((s) => isProcessAlive(s.pid));
@@ -143,10 +145,9 @@ if (args[0] === "mcp" || args.length === 0) {
   );
   const cacheTotal = totals.hits + totals.misses;
   const hitRate = cacheTotal > 0 ? totals.hits / cacheTotal : 0;
-  const overallPct = reductionPercent(
+  const compressionPct = reductionPercent(
     totals.rawChars,
-    totals.savedChars,
-    totals.dedupSavedChars,
+    totals.compressionSavedChars,
   );
 
   const lines = [
@@ -162,21 +163,26 @@ if (args[0] === "mcp" || args.length === 0) {
     const ageStr = age < 60 ? `${age}s ago` : `${Math.round(age / 60)}m ago`;
     lines.push(
       "Global Session Stats:",
-      `  Sessions:               ${visibleSessions.length} (${liveSessions.length} live)`,
-      `  Files tracked:          ${totals.filesTracked}`,
-      `  Cache hits:             ${totals.hits}`,
-      `  Cache misses:           ${totals.misses}`,
-      `  Hit rate:               ${(hitRate * 100).toFixed(1)}%`,
-      `  Compression calls:      ${totals.calls}`,
-      `  Raw chars:              ${totals.rawChars}`,
-      `  Compressed chars:       ${totals.compressedChars}`,
-      `  Compression saved chars: ${totals.compressionSavedChars}`,
-      `  Dedup saved chars:      ${totals.dedupSavedChars}`,
-      `  Saved chars:            ${totals.savedChars}`,
-      `  Estimated tokens saved: ${Math.round(totals.savedChars / 4)}`,
-      `  Reduction:              ${overallPct.toFixed(1)}%`,
-      `  Efficiency meter: ${efficiencyMeter(overallPct)} ${overallPct.toFixed(1)}%`,
-      `  Last update:            ${ageStr}`,
+      `  Sessions:      ${visibleSessions.length} (${liveSessions.length} live)`,
+      `  Files tracked: ${totals.filesTracked}`,
+      `  Cache hits:    ${totals.hits}`,
+      `  Cache misses:  ${totals.misses}`,
+      `  Hit rate:      ${(hitRate * 100).toFixed(1)}%`,
+      `  Last update:   ${ageStr}`,
+      "",
+      "Compression (output trimming):",
+      `  Calls:            ${totals.calls}`,
+      `  Raw chars:        ${totals.rawChars}`,
+      `  Compressed chars: ${totals.compressedChars}`,
+      `  Saved chars:      ${totals.compressionSavedChars}`,
+      `  Reduction:        ${compressionPct.toFixed(1)}%`,
+      `  Meter: ${efficiencyMeter(compressionPct)} ${compressionPct.toFixed(1)}%`,
+      "",
+      "Dedup (avoided re-reads):",
+      `  Cache hits:    ${totals.hits}`,
+      `  Chars avoided: ${totals.dedupSavedChars} (budget-capped)`,
+      "",
+      `Total est. tokens saved: ${Math.round(totals.savedChars / 4)}`,
       "",
     );
   } else {
