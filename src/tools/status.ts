@@ -4,6 +4,7 @@ import {
   getCacheStats,
   getAllBudgets,
   getSavingsStats,
+  getRtkStats,
   reductionPercent,
   efficiencyMeter,
   isRtkAvailable,
@@ -22,6 +23,7 @@ export const statusTool: Tool & {
   handler: async () => {
     const stats = getCacheStats();
     const savings = getSavingsStats();
+    const rtk = getRtkStats();
     const budgets = getAllBudgets();
     const rtkAvailable = isRtkAvailable();
     const compressionPct = reductionPercent(
@@ -39,6 +41,11 @@ export const statusTool: Tool & {
       `  Cache hits:    ${stats.hits}`,
       `  Cache misses:  ${stats.misses}`,
       `  Hit rate:      ${(stats.hitRate * 100).toFixed(1)}%`,
+      "",
+      "RTK Rewrites:",
+      `  Rewritten:       ${rtk.rewrites}`,
+      `  Already wrapped: ${rtk.alreadyWrapped}`,
+      `  Passthrough:     ${rtk.passthrough}`,
       "",
       "Compression (output trimming):",
       `  Calls:            ${savings.totalCalls}`,
