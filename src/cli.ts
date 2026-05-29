@@ -5,6 +5,7 @@ import {
   getAllBudgets,
   getStatsSessionsDir,
   pruneDeadSessions,
+  getLifetimeStats,
   reductionPercent,
   efficiencyMeter,
   isRtkAvailable,
@@ -40,6 +41,11 @@ interface SessionStats {
         savedChars: number;
       }
     >;
+  };
+  rtk?: {
+    rewrites: number;
+    alreadyWrapped: number;
+    passthrough: number;
   };
   budgets?: ReturnType<typeof getAllBudgets>;
 }
@@ -108,6 +114,7 @@ if (args[0] === "mcp" || args.length === 0) {
 } else if (args[0] === "status") {
   pruneDeadSessions();
   const rtkAvailable = isRtkAvailable();
+  const lifetime = getLifetimeStats();
   const sessions = readSessionStats();
   const liveSessions = sessions.filter((s) => isProcessAlive(s.pid));
   const visibleSessions = liveSessions.length > 0 ? liveSessions : sessions;
@@ -129,18 +136,24 @@ if (args[0] === "mcp" || args.length === 0) {
       acc.dedupSavedChars += dedupSavedChars;
       acc.savedChars += compressionSavedChars + dedupSavedChars;
       acc.calls += s.savings.totalCalls ?? 0;
+      acc.rtkRewrites += s.rtk?.rewrites ?? 0;
+      acc.rtkAlreadyWrapped += s.rtk?.alreadyWrapped ?? 0;
+      acc.rtkPassthrough += s.rtk?.passthrough ?? 0;
       return acc;
     },
     {
       filesTracked: 0,
-      hits: 0,
-      misses: 0,
-      rawChars: 0,
-      compressedChars: 0,
-      compressionSavedChars: 0,
-      dedupSavedChars: 0,
-      savedChars: 0,
-      calls: 0,
+      hits: lifetime.hits,
+      misses: lifetime.misses,
+      rawChars: lifetime.rawChars,
+      compressedChars: lifetime.compressedChars,
+      compressionSavedChars: lifetime.compressionSavedChars,
+      dedupSavedChars: lifetime.dedupSavedChars,
+      savedChars: lifetime.savedChars,
+      calls: lifetime.calls,
+      rtkRewrites: lifetime.rtkRewrites,
+      rtkAlreadyWrapped: lifetime.rtkAlreadyWrapped,
+      rtkPassthrough: lifetime.rtkPassthrough,
     },
   );
   const cacheTotal = totals.hits + totals.misses;
@@ -157,18 +170,25 @@ if (args[0] === "mcp" || args.length === 0) {
     "",
   ];
 
-  if (visibleSessions.length > 0) {
-    const newestUpdate = Math.max(...visibleSessions.map((s) => s.updatedAt));
+  if (visibleSessions.length > 0 || lifetime.bankedSessions > 0) {
+    const updateTimes = visibleSessions.map((s) => s.updatedAt);
+    if (lifetime.updatedAt > 0) updateTimes.push(lifetime.updatedAt);
+    const newestUpdate = updateTimes.length > 0 ? Math.max(...updateTimes) : Date.now();
     const age = Math.round((Date.now() - newestUpdate) / 1000);
     const ageStr = age < 60 ? `${age}s ago` : `${Math.round(age / 60)}m ago`;
     lines.push(
-      "Global Session Stats:",
-      `  Sessions:      ${visibleSessions.length} (${liveSessions.length} live)`,
+      "Global Session Stats (cumulative):",
+      `  Sessions:      ${visibleSessions.length + lifetime.bankedSessions} (${liveSessions.length} live, ${lifetime.bankedSessions} ended)`,
       `  Files tracked: ${totals.filesTracked}`,
       `  Cache hits:    ${totals.hits}`,
       `  Cache misses:  ${totals.misses}`,
       `  Hit rate:      ${(hitRate * 100).toFixed(1)}%`,
       `  Last update:   ${ageStr}`,
+      "",
+      "RTK Rewrites:",
+      `  Rewritten:       ${totals.rtkRewrites}`,
+      `  Already wrapped: ${totals.rtkAlreadyWrapped}`,
+      `  Passthrough:     ${totals.rtkPassthrough}`,
       "",
       "Compression (output trimming):",
       `  Calls:            ${totals.calls}`,
