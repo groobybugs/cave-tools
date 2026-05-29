@@ -17,6 +17,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "check": "tsc --noEmit",
+    "test": "pnpm run build && node test.mjs",
     "start": "node dist/cli.js",
     "mcp": "node dist/cli.js mcp",
     "prepack": "pnpm run build"

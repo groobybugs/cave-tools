@@ -40,6 +40,9 @@ export const editTool: Tool & {
     if (oldString === newString) {
       return err("old_string and new_string are identical");
     }
+    if (oldString.length === 0) {
+      return err("old_string cannot be empty");
+    }
 
     let content: string;
     try {
