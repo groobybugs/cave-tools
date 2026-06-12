@@ -45,6 +45,30 @@ async function test() {
   assert.equal(bashHardFailure.isError, true);
   assert.match(bashHardFailure.content[0].text, /Exit code: 7/);
 
+  // Secret redaction tests
+  console.log("1b. Testing secret redaction:");
+  const tokenOutput = await bashTool.handler({
+    command: "echo 'Authorization: Bearer sk-live-abc123xyz789secret'",
+    description: "Test bearer token redaction",
+  });
+  assert.match(tokenOutput.content[0].text, /\[REDACTED:Bearer token\]/);
+  assert.doesNotMatch(tokenOutput.content[0].text, /sk-live-abc123xyz789secret/);
+
+  const apiKeyOutput = await bashTool.handler({
+    command: "echo 'api_key=AKIAIOSFODNN7EXAMPLE'",
+    description: "Test API key redaction",
+  });
+  assert.match(apiKeyOutput.content[0].text, /\[REDACTED:AWS key\]/);
+
+  const noRedactOutput = await bashTool.handler({
+    command: "echo 'api_key=AKIAIOSFODNN7EXAMPLE'",
+    description: "Test redaction opt-out",
+    redact_secrets: false,
+  });
+  assert.match(noRedactOutput.content[0].text, /AKIAIOSFODNN7EXAMPLE/);
+  console.log("Secret redaction tests passed");
+  console.log();
+
   // Test compress
   console.log("2. Testing cave__compress:");
   const compressResult = await compressTool.handler({

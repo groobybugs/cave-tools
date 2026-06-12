@@ -6,6 +6,7 @@ import {
   extractStructuredData,
   rewriteCommandWithRtk,
 } from "../compression/utils.js";
+import { redactSecrets } from "../compression/redact.js";
 
 function stringifyOutput(value: unknown): string {
   if (Buffer.isBuffer(value)) return value.toString("utf-8");
@@ -45,7 +46,7 @@ export const bashTool: Tool & {
 } = {
   name: "cave__bash",
   description:
-    "Run a shell command with RTK rewriting + Stone Tablet + Flint Chipper compression. Tries RTK command rewriting internally where applicable.",
+    "Run a shell command with RTK rewriting + Stone Tablet + Flint Chipper compression. Tries RTK command rewriting internally where applicable. Sensitive tokens and keys are redacted from output by default.",
   inputSchema: {
     type: "object",
     properties: {
@@ -69,6 +70,12 @@ export const bashTool: Tool & {
           "When true, non-zero exits are returned as normal text instead of MCP errors. Default false.",
         default: false,
       },
+      redact_secrets: {
+        type: "boolean",
+        description:
+          "When false, skip secret redaction. Default true.",
+        default: true,
+      },
     },
     required: ["command", "description"],
   },
@@ -76,6 +83,7 @@ export const bashTool: Tool & {
     const command = String(args.command);
     const timeout = Number(args.timeout) || 120000;
     const allowFailure = args.allowFailure === true;
+    const shouldRedact = args.redact_secrets !== false;
     let rewrittenCommand = command;
 
     try {
@@ -86,8 +94,10 @@ export const bashTool: Tool & {
         stdio: ["pipe", "pipe", "pipe"],
       });
 
+      let processed = shouldRedact ? redactSecrets(output) : output;
+
       // Try structured extraction first
-      let processed = extractStructuredData(output, rewrittenCommand);
+      processed = extractStructuredData(processed, rewrittenCommand);
 
       // Apply budget compression
       processed = applyBudget(processed, "bash");
@@ -106,10 +116,11 @@ export const bashTool: Tool & {
         ],
       };
     } catch (error) {
-      const errorMessage = applyBudget(
-        formatCommandError(error, command, rewrittenCommand),
-        "bash",
-      );
+      let errorMessage = formatCommandError(error, command, rewrittenCommand);
+      if (shouldRedact) {
+        errorMessage = redactSecrets(errorMessage);
+      }
+      errorMessage = applyBudget(errorMessage, "bash");
       return {
         content: [
           {
