@@ -162,6 +162,32 @@ async function test() {
   console.log("Signatures read mode tests passed");
   console.log();
 
+  // Aggressive read mode tests
+  console.log("2f. Testing aggressive read mode:");
+  const aggDir = mkdtempSync(join(tmpdir(), "cave-agg-"));
+  try {
+    const pyFile = join(aggDir, "sample.py");
+    writeFileSync(
+      pyFile,
+      "#!/usr/bin/env python3\n# This is a comment\n\ndef hello():\n    # inline comment\n    return 'world'\n\n\nclass Foo:\n    pass\n",
+      "utf-8",
+    );
+
+    const aggResult = await readTool.handler({
+      file_path: pyFile,
+      mode: "aggressive",
+    });
+    const aggText = aggResult.content[0].text;
+    assert.ok(aggText.includes("#!/usr/bin/env python3"), "shebang preserved");
+    assert.doesNotMatch(aggText, /# This is a comment/);
+    assert.ok(aggText.includes("def hello():"));
+    assert.ok(aggText.includes("return 'world'"));
+  } finally {
+    rmSync(aggDir, { recursive: true, force: true });
+  }
+  console.log("Aggressive read mode tests passed");
+  console.log();
+
   console.log("3. Testing cave__grep:");
   const grepResult = await grepTool.handler({
     pattern: "Cave Tools",

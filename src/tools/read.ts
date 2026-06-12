@@ -12,6 +12,7 @@ import {
 } from "../compression/utils.js";
 
 import { formatSignatures } from "../compression/signatures.js";
+import { aggressiveCompress } from "../compression/aggressive.js";
 
 const IMAGE_MIME: Record<string, string> = {
   ".png": "image/png",
@@ -32,7 +33,7 @@ export const readTool: Tool & {
 } = {
   name: "cave__read",
   description:
-    "Read a file with dedup + Flint Chipper compression. Returns a stub if the file hasn't changed since the last read in the same session. Image files (.png, .jpg, .jpeg, .gif, .webp, .bmp, .svg) are returned as image content blocks (base64); offset/limit are ignored for images. Use mode='signatures' to extract function/class/type signatures only (TS/JS/Rust).",
+    "Read a file with dedup + Flint Chipper compression. Returns a stub if the file hasn't changed since the last read in the same session. Image files (.png, .jpg, .jpeg, .gif, .webp, .bmp, .svg) are returned as image content blocks (base64); offset/limit are ignored for images, signatures, and aggressive modes. Use mode='signatures' to extract function/class/type signatures only (TS/JS/Rust). Use mode='aggressive' to strip comments and blank lines.",
   inputSchema: {
     type: "object",
     properties: {
@@ -52,8 +53,8 @@ export const readTool: Tool & {
       },
       mode: {
         type: "string",
-        enum: ["full", "signatures"],
-        description: "Read mode: full text (default) or signatures only.",
+        enum: ["full", "signatures", "aggressive"],
+        description: "Read mode: full text (default), signatures only, or aggressive comment stripping.",
         default: "full",
       },
     },
@@ -141,6 +142,19 @@ export const readTool: Tool & {
 
     try {
       const content = readFileSync(filePath, "utf-8");
+
+      if (mode === "aggressive") {
+        updateFileCache(filePath);
+        const compressedContent = aggressiveCompress(content, ext);
+        const output =
+          compressedContent.length < content.length ? compressedContent : content;
+        const compressed = applyBudget(output, "read");
+        const wasCompressed = compressed.length < output.length;
+        recordRead(filePath, wasCompressed, compressed.length);
+        return {
+          content: [{ type: "text", text: compressed }],
+        };
+      }
 
       if (mode === "signatures") {
         updateFileCache(filePath);
