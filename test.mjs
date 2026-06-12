@@ -15,6 +15,7 @@ import {
   shouldForceFull,
   getBounceStats,
 } from "./dist/compression/utils.js";
+import { classifyCommand } from "./dist/compression/classify.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -121,6 +122,17 @@ async function test() {
   recordEdit("src/edited.rs");
   assert.ok(shouldForceFull("src/edited.rs"), "recent edit forces full");
   console.log("Bounce tracking tests passed");
+  console.log();
+
+  // Command classification tests
+  console.log("2d. Testing command classification:");
+  assert.equal(classifyCommand("npm run dev"), "passthrough", "dev server passthrough");
+  assert.equal(classifyCommand("gh auth login"), "passthrough", "auth passthrough");
+  assert.equal(classifyCommand("curl https://api.example.com"), "verbatim", "curl verbatim");
+  assert.equal(classifyCommand("gh api repos/owner/repo/issues"), "verbatim", "gh api verbatim");
+  assert.equal(classifyCommand("cargo test"), "compressible", "test compressible");
+  assert.equal(classifyCommand("git status"), "compressible", "git status compressible");
+  console.log("Command classification tests passed");
   console.log();
 
   console.log("3. Testing cave__grep:");

@@ -7,6 +7,7 @@ import {
   rewriteCommandWithRtk,
 } from "../compression/utils.js";
 import { redactSecrets } from "../compression/redact.js";
+import { classifyCommand } from "../compression/classify.js";
 
 function stringifyOutput(value: unknown): string {
   if (Buffer.isBuffer(value)) return value.toString("utf-8");
@@ -85,6 +86,7 @@ export const bashTool: Tool & {
     const allowFailure = args.allowFailure === true;
     const shouldRedact = args.redact_secrets !== false;
     let rewrittenCommand = command;
+    const policy = classifyCommand(command);
 
     try {
       rewrittenCommand = rewriteCommandWithRtk(command);
@@ -95,6 +97,45 @@ export const bashTool: Tool & {
       });
 
       let processed = shouldRedact ? redactSecrets(output) : output;
+
+      if (policy === "passthrough") {
+        const rtkStatus =
+          rewrittenCommand !== command
+            ? `[RTK: ${command} -> ${rewrittenCommand}]`
+            : "[RTK: no rewrite]";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `${rtkStatus}\n${processed}`,
+            },
+          ],
+        };
+      }
+
+      if (policy === "verbatim") {
+        const lines = processed.split("\n");
+        const VERBATIM_MAX = 500;
+        if (lines.length > VERBATIM_MAX) {
+          processed = [
+            ...lines.slice(0, 250),
+            `\n... (${lines.length - 500} lines truncated) ...\n`,
+            ...lines.slice(-250),
+          ].join("\n");
+        }
+        const rtkStatus =
+          rewrittenCommand !== command
+            ? `[RTK: ${command} -> ${rewrittenCommand}]`
+            : "[RTK: no rewrite]";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `${rtkStatus}\n${processed}`,
+            },
+          ],
+        };
+      }
 
       // Try structured extraction first
       processed = extractStructuredData(processed, rewrittenCommand);
