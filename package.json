@@ -10,6 +10,8 @@
   },
   "files": [
     "dist/",
+    "claude/",
+    "scripts/*.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -20,6 +22,8 @@
     "test": "pnpm run build && node test.mjs",
     "start": "node dist/cli.js",
     "mcp": "node dist/cli.js mcp",
+    "install:agents": "node scripts/install-agent-instructions.mjs",
+    "remove:agents": "node scripts/remove-agent-instructions.mjs",
     "prepack": "pnpm run build"
   },
   "keywords": [

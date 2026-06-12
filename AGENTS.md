@@ -16,6 +16,14 @@ compression, and Flint Chipper line budgets. Prefer these over built-ins.
 - Pass raw file paths / patterns / commands — do not wrap tools in extra scripts.
 - Fall back to built-in Bash only for background processes, stream monitors, or hook-sensitive stdin.
 
+## Edit Safety
+- In Plan Mode / read-only phase, never call write-capable tools: `Update`, `Edit`, `apply_patch`, `cave__edit`, `cave__write`, or shell commands that modify files.
+- Before any file edit outside Plan Mode, read the exact target path first.
+- Built-in `Update` / `Edit` requires the same file path to be read earlier in the session; otherwise it fails with `File must be read first`.
+- Do not batch read and edit calls in parallel. Read must complete before edit.
+- Prefer `cave__read` for inspection, then `cave__edit` or `apply_patch` for edits.
+- Use `cave__write` without `content` only to invalidate cache after edits made outside Cave Tools. Passing `content: ""` writes an empty file.
+
 ## Savings
 Run `cave-tools status` (CLI) or `cave__status` (MCP) for reduction % and an
 rtk-gain-style efficiency meter aggregated across live sessions.

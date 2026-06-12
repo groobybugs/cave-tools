@@ -8,7 +8,7 @@ export const writeTool: Tool & {
 } = {
   name: "cave__write",
   description:
-    "Write file content and/or invalidate the dedup cache. With `content`, writes (creates/overwrites) the single file in `file_paths` then invalidates it. Without `content`, only invalidates the cache for the listed paths (call after editing a file outside Cave Tools so cave__read returns fresh content).",
+    "Write file content and/or invalidate the dedup cache. With `content`, writes (creates/overwrites) the single file in `file_paths` then invalidates it. Without `content`, only invalidates the cache for the listed paths. Omit `content` for cache invalidation; `content: \"\"` writes an empty file.",
   inputSchema: {
     type: "object",
     properties: {
@@ -19,7 +19,8 @@ export const writeTool: Tool & {
       },
       content: {
         type: "string",
-        description: "Optional. If provided, written to the single file in `file_paths` (create/overwrite).",
+        description:
+          "Optional. If provided, written to the single file in `file_paths` (create/overwrite). Omit this field to only invalidate cache. Passing an empty string writes an empty file.",
       },
     },
     required: ["file_paths"],

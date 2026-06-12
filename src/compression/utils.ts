@@ -1,8 +1,16 @@
 import { createHash } from "crypto";
 import { spawnSync } from "child_process";
-import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from "fs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+  readdirSync,
+  renameSync,
+} from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { join, dirname } from "path";
 
 const fileCache = new Map<string, string>();
 
@@ -99,6 +107,11 @@ const STATS_DIR = join(homedir(), ".cache", "cave-tools");
 const SESSIONS_DIR = join(STATS_DIR, "sessions");
 const SESSION_STATS_FILE = join(SESSIONS_DIR, `${sessionPid}.json`);
 const LIFETIME_FILE = join(STATS_DIR, "lifetime.json");
+const READ_REGISTRY_FILE = join(
+  process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
+  "cave-tools",
+  "read-registry.txt",
+);
 
 const budgets: Record<string, BudgetConfig> = {
   bash: { maxLines: 80, headLines: 40, tailLines: 40 },
@@ -286,6 +299,33 @@ export function updateFileCache(filePath: string): void {
     fileCache.set(filePath, hash);
     cacheMisses++;
     persistStats();
+    registerReadPath(filePath);
+  }
+}
+
+// Append an absolute path to the flat-file read registry used by the
+// strict-mode PreToolUse redirect hook. Deduplicates so the file never
+// grows with duplicates. Writes atomically (temp + rename) with 0600
+// permissions. Silent-fail on any filesystem error — the registry is
+// best-effort.
+function registerReadPath(filePath: string): void {
+  try {
+    mkdirSync(dirname(READ_REGISTRY_FILE), { recursive: true });
+    const paths = new Set<string>();
+    if (existsSync(READ_REGISTRY_FILE)) {
+      const raw = readFileSync(READ_REGISTRY_FILE, "utf-8");
+      for (const line of raw.split("\n")) {
+        const trimmed = line.trim();
+        if (trimmed) paths.add(trimmed);
+      }
+    }
+    if (paths.has(filePath)) return; // already registered
+    paths.add(filePath);
+    const tempPath = `${READ_REGISTRY_FILE}.tmp.${process.pid}`;
+    writeFileSync(tempPath, Array.from(paths).join("\n") + "\n", { mode: 0o600 });
+    renameSync(tempPath, READ_REGISTRY_FILE);
+  } catch {
+    // Silent fail — registry is advisory
   }
 }
 

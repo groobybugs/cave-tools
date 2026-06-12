@@ -67,6 +67,20 @@ For a local checkout instead of the published package, use:
 }
 ```
 
+Install/remove global agent wiring from this checkout:
+
+```bash
+pnpm run install:agents
+pnpm run remove:agents
+pnpm run install:agents -- --list
+pnpm run install:agents -- --dry-run --verbose --all
+pnpm run install:agents -- --agent claude,gemini
+pnpm run remove:agents -- --dry-run --verbose --agent antigravity,antigravity-backup
+pnpm run remove:agents -- --all
+```
+
+Installer/remover detect installed clients and prompt when run in an interactive terminal. Use `--all` for all detected targets, `--agent <name>` for one or more targets, `--dry-run` to print planned writes/removals without changing files, and `--verbose` to print the modified/planned file paths summary. Missing clients are skipped unless explicitly selected, then their installer still respects the target detect path.
+
 Some clients use a different wrapper key:
 
 | Client      | Global config path                                            | Shape                                          |
@@ -74,6 +88,10 @@ Some clients use a different wrapper key:
 | Claude Code | `~/.claude.json` for user/local scope, or project `.mcp.json` | `mcpServers`                                   |
 | Gemini CLI  | `~/.gemini/settings.json`                                     | `mcpServers`                                   |
 | Antigravity | `~/.gemini/antigravity/mcp_config.json`                       | `mcpServers`                                   |
+| Antigravity CLI | `~/.gemini/antigravity-cli/mcp_config.json`              | `mcpServers`                                   |
+| Antigravity IDE alt | `~/.gemini/antigravity-ide/mcp_config.json`          | `mcpServers`                                   |
+| Antigravity shared | `~/.gemini/config/mcp_config.json`                    | `mcpServers`                                   |
+| Antigravity backup | `~/.gemini/antigravity-backup/mcp_config.json`        | `mcpServers`                                   |
 | Kiro CLI    | `~/.kiro/settings/mcp.json`                                   | `mcpServers`                                   |
 | Cursor      | `~/.cursor/mcp.json`                                          | `mcpServers`                                   |
 | opencode    | `~/.config/opencode/opencode.json`                            | `mcp` with `type: "local"` and `command` array |
@@ -99,7 +117,7 @@ All tool names use the MCP names exported by the server.
 | Tool              | Purpose                                                                                   | Caveman Code parity                                                 |
 | ----------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `cave__read`      | Read files with dedup + Flint Chipper. Reads images (`.png/.jpg/.jpeg/.gif/.webp/.bmp/.svg`) as MCP image content (base64, up to 5 MB). | Based on `read`, plus standalone dedup cache + image support.       |
-| `cave__bash`      | Run shell commands with RTK rewrite + Stone Tablet + Flint Chipper.                       | Based on `bash` compression behavior, not permission/TUI handling.  |
+| `cave__bash`      | Run shell commands with RTK rewrite + Stone Tablet + Flint Chipper. Supports opt-in soft failures via `allowFailure`. | Based on `bash` compression behavior, not permission/TUI handling.  |
 | `cave__grep`      | Search file contents with `rg --json`, match limits, context lines, long-line truncation. | Based on `grep`.                                                    |
 | `cave__find`      | Find files by glob with `fd` when available, Node fallback, relative paths, result limit. | Based on `find`.                                                    |
 | `cave__ls`        | List directory entries, sorted, directories suffixed with `/`.                            | Based on `ls`.                                                      |
@@ -123,6 +141,14 @@ Use this instruction block in agent rules:
 - Use `cave__compress` to compress large pasted or tool-produced text.
 - Use `cave__status` to check RTK availability, cache state, and budget settings when the user asks about savings.
 - These tools are the compression layer. Do not wrap them in extra Python/scripts; pass file paths, search patterns, or commands directly.
+
+## Edit Safety
+- In Plan Mode / read-only phase, never call write-capable tools: `Update`, `Edit`, `apply_patch`, `cave__edit`, `cave__write`, or shell commands that modify files.
+- Before any file edit outside Plan Mode, read the exact target path first.
+- Built-in `Update` / `Edit` requires the same file path to be read earlier in the session; otherwise it fails with `File must be read first`.
+- Do not batch read and edit calls in parallel. Read must complete before edit.
+- Prefer `cave__read` for inspection, then `cave__edit` or `apply_patch` for edits.
+- Use `cave__write` without `content` only to invalidate cache after edits made outside Cave Tools. Passing `content: ""` writes an empty file.
 ```
 
 ## Enforcing Cave Tools (Hooks / Permissions)
@@ -247,6 +273,7 @@ Antigravity and Gemini CLI have no `deny`/hook system — enforcement is the glo
 - Add global rules at `~/.gemini/GEMINI.md` (Antigravity's native global rules — three-dot menu in the Agent chat → **+ Global** creates it) and/or the cross-tool `~/.gemini/AGENTS.md`.
 - These files do **not** support `@file` imports — inline the rules directly. A bare `@RTK.md` line is silently ignored, so paste the actual content.
 - Optionally disable the built-in `Read`/`Grep`/`Glob`/`Bash` in the IDE tool toggles so the model falls back to `cave__*`.
+- Antigravity caches MCP tool schemas under `~/.gemini/antigravity*/mcp/cave-tools/*.json`. Installer does not write those cache files; Antigravity recreates them after it connects to the configured MCP server. Remover deletes the cache dirs so stale tools disappear after uninstall.
 
 ### Other MCP clients
 
@@ -288,6 +315,18 @@ Run a shell command:
   "timeout": 120000
 }
 ```
+
+Allow a command to fail without returning an MCP tool error:
+
+```json
+{
+  "command": "test -f build.gradle && sed -n '1,80p' build.gradle",
+  "description": "Read Gradle file if present",
+  "allowFailure": true
+}
+```
+
+When `allowFailure` is omitted or `false`, non-zero exits still return `isError: true`. Failure output includes original command, executed command, exit code, stderr, and stdout when available.
 
 Invalidate cache after edits:
 

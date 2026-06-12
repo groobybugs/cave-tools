@@ -1,0 +1,64 @@
+{
+  "description": "cave-tools auto-init: SessionStart skill injection, per-turn reinforcement, PreToolUse redirect, statusline refresh.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-activate.js"],
+            "timeout": 5,
+            "statusMessage": "Loading cave-tools rules..."
+          },
+          {
+            "type": "command",
+            "command": "cave-tools",
+            "args": ["status", "--emit-statusline"],
+            "timeout": 3,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-mode-tracker.js"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Glob|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-redirect.sh"],
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__cave-tools__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cave-tools",
+            "args": ["status", "--emit-statusline"],
+            "timeout": 3,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "cave-tools",
+  "version": "0.4.3",
+  "description": "Token-saving file/shell tool layer for Claude Code. Auto-injects rules every session, reinforces them per turn, and shows live savings in the statusline.",
+  "author": {
+    "name": "groobybugs",
+    "email": "groobybugs299@hotmail.com",
+    "url": "https://github.com/groobybugs"
+  },
+  "homepage": "https://github.com/groobybugs/cave-tools",
+  "repository": "https://github.com/groobybugs/cave-tools",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "token-savings",
+    "cave-tools",
+    "compression"
+  ]
+}
