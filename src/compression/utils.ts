@@ -469,15 +469,90 @@ export function applyBudget(text: string, toolName: string): string {
   return result;
 }
 
+const MAX_STRUCTURED_INPUT_BYTES = 4 * 1024 * 1024;
+
+function stripJsonInsignificantWhitespace(input: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const c = input[i]!;
+
+    if (inString) {
+      out += c;
+      if (escaped) {
+        escaped = false;
+      } else if (c === "\\") {
+        escaped = true;
+      } else if (c === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (c === '"') {
+      inString = true;
+      out += c;
+    } else if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+      // drop insignificant whitespace outside strings
+    } else {
+      out += c;
+    }
+  }
+
+  return out;
+}
+
+export function compactJson(text: string): string | null {
+  if (text.length > MAX_STRUCTURED_INPUT_BYTES) return null;
+
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+
+  // Validate before mutating — never reshape malformed JSON.
+  try {
+    JSON.parse(text);
+  } catch {
+    return null;
+  }
+
+  const compact = stripJsonInsignificantWhitespace(text);
+  return compact.length < text.length ? compact : null;
+}
+
+export function compactJsonl(text: string): string | null {
+  if (text.length > MAX_STRUCTURED_INPUT_BYTES) return null;
+
+  const lines = text.split("\n");
+  const out: string[] = [];
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    try {
+      JSON.parse(line);
+    } catch {
+      return null;
+    }
+
+    out.push(stripJsonInsignificantWhitespace(line));
+  }
+
+  if (out.length === 0) return null;
+
+  const compact = out.join("\n");
+  return compact.length < text.length ? compact : null;
+}
+
 export function extractStructuredData(
   text: string,
   commandHint?: string,
 ): string {
-  try {
-    const parsed = JSON.parse(text);
-    return JSON.stringify(parsed, null, 1);
-  } catch {
-    // Not JSON.
+  const compacted = compactJson(text) ?? compactJsonl(text);
+  if (compacted !== null) {
+    return compacted;
   }
 
   if (text.trim().startsWith("<")) {

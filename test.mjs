@@ -6,6 +6,11 @@ import { grepTool } from "./dist/tools/grep.js";
 import { lsTool } from "./dist/tools/ls.js";
 import { statusTool } from "./dist/tools/status.js";
 import { writeTool } from "./dist/tools/write.js";
+import {
+  compactJson,
+  compactJsonl,
+  extractStructuredData,
+} from "./dist/compression/utils.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -47,6 +52,30 @@ async function test() {
     tool_name: "bash",
   });
   console.log(compressResult.content[0].text);
+  console.log();
+
+  // JSON compaction tests
+  console.log("2b. Testing JSON compaction:");
+  const prettyJson = '{\n  "name": "cave-tools",\n  "version": 3,\n  "tags": ["a", "b"]\n}';
+  const compactedJson = compactJson(prettyJson);
+  assert.ok(compactedJson, "pretty JSON should compact");
+  assert.equal(JSON.parse(compactedJson), JSON.parse(prettyJson), "value identical");
+  assert.ok(!compactedJson.includes("\n"), "no newlines in compacted JSON");
+
+  const jsonlInput = '{ "a": 1 }\n{ "b": 2 }\n\n{ "c": 3 }';
+  const compactedJsonl = compactJsonl(jsonlInput);
+  assert.equal(compactedJsonl, '{"a":1}\n{"b":2}\n{"c":3}', "JSONL compacted");
+
+  const alreadyMinified = '{"a":1,"b":[2,3]}';
+  assert.equal(compactJson(alreadyMinified), null, "minified JSON no-op");
+
+  const stringWithSpaces = '{\n  "msg": "hello   world\\n\\ttab"\n}';
+  const compactedString = compactJson(stringWithSpaces);
+  assert.ok(compactedString?.includes("hello   world"), "inner spaces preserved");
+  assert.ok(compactedString?.includes("\\n\\ttab"), "escapes preserved");
+
+  assert.equal(extractStructuredData("not json"), "not json", "non-JSON passthrough");
+  console.log("JSON compaction tests passed");
   console.log();
 
   console.log("3. Testing cave__grep:");
