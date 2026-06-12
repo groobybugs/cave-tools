@@ -6,6 +6,9 @@ import {
   isFileUnchanged,
   updateFileCache,
   applyBudget,
+  recordRead,
+  shouldForceFull,
+  READ_STUB,
 } from "../compression/utils.js";
 
 const IMAGE_MIME: Record<string, string> = {
@@ -116,6 +119,7 @@ export const readTool: Tool & {
 
     // --- Text branch (original behavior) ---------------------------------
     if (isFileUnchanged(filePath)) {
+      recordRead(filePath, false, READ_STUB.length);
       return {
         content: [
           {
@@ -135,7 +139,21 @@ export const readTool: Tool & {
 
       updateFileCache(filePath);
 
+      if (shouldForceFull(filePath)) {
+        recordRead(filePath, false, selected.length);
+        return {
+          content: [
+            {
+              type: "text",
+              text: selected,
+            },
+          ],
+        };
+      }
+
       const compressed = applyBudget(selected, "read");
+      const wasCompressed = compressed.length < selected.length;
+      recordRead(filePath, wasCompressed, compressed.length);
 
       return {
         content: [

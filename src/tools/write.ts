@@ -1,7 +1,7 @@
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { writeFileSync } from "fs";
-import { invalidateFileCache } from "../compression/utils.js";
+import { invalidateFileCache, recordEdit } from "../compression/utils.js";
 
 export const writeTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
@@ -51,6 +51,7 @@ export const writeTool: Tool & {
         };
       }
       invalidateFileCache(paths[0]);
+      recordEdit(paths[0]);
       return {
         content: [
           { type: "text", text: `Wrote ${args.content.length} chars to ${paths[0]}` },

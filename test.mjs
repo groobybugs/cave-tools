@@ -10,6 +10,10 @@ import {
   compactJson,
   compactJsonl,
   extractStructuredData,
+  recordRead,
+  recordEdit,
+  shouldForceFull,
+  getBounceStats,
 } from "./dist/compression/utils.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -100,6 +104,23 @@ async function test() {
 
   assert.equal(extractStructuredData("not json"), "not json", "non-JSON passthrough");
   console.log("JSON compaction tests passed");
+  console.log();
+
+  // Bounce tracking tests
+  console.log("2c. Testing bounce tracking:");
+  recordRead("src/a.rs", true, 50);
+  recordRead("src/a.rs", false, 500);
+  let bounceStats = getBounceStats();
+  assert.equal(bounceStats.totalBounces, 1, "detect compressed -> full bounce");
+  assert.equal(bounceStats.totalWastedChars, 50, "wasted chars from compressed read");
+
+  recordRead("src/b.rs", true, 30);
+  recordRead("src/b.rs", false, 400);
+  assert.ok(shouldForceFull("src/c.rs"), "high bounce rate extension forces full");
+
+  recordEdit("src/edited.rs");
+  assert.ok(shouldForceFull("src/edited.rs"), "recent edit forces full");
+  console.log("Bounce tracking tests passed");
   console.log();
 
   console.log("3. Testing cave__grep:");

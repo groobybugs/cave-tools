@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from "fs";
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { invalidateFileCache } from "../compression/utils.js";
+import { invalidateFileCache, recordEdit } from "../compression/utils.js";
 
 export const editTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
@@ -71,6 +71,7 @@ export const editTool: Tool & {
       return err(`Cannot write file: ${filePath}`);
     }
     invalidateFileCache(filePath);
+    recordEdit(filePath);
 
     const n = replaceAll ? occurrences : 1;
     return ok(`Edited ${filePath} (${n} replacement${n === 1 ? "" : "s"})`);

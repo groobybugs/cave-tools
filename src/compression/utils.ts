@@ -20,9 +20,22 @@ let dedupSavedChars = 0;
 let rtkRewrites = 0;
 let rtkAlreadyWrapped = 0;
 let rtkPassthrough = 0;
+let seqCounter = 0;
+let totalBounces = 0;
+let totalWastedChars = 0;
 const sessionStart = Date.now();
 const sessionPid = process.pid;
 const READ_STUB = "<file unchanged since last read>";
+
+export { READ_STUB };
+
+const recentReads = new Map<string, BounceEvent[]>();
+const perExtension = new Map<string, BounceStats>();
+const recentlyEdited = new Map<string, number>();
+
+const BOUNCE_WINDOW = 5;
+const EDIT_FORCE_WINDOW = 10;
+const BOUNCE_RATE_THRESHOLD = 0.3;
 
 interface ToolSavings {
   calls: number;
@@ -41,6 +54,18 @@ interface BudgetConfig {
   maxLines: number;
   headLines: number;
   tailLines: number;
+}
+
+interface BounceEvent {
+  seq: number;
+  wasCompressed: boolean;
+  charsSent: number;
+}
+
+interface BounceStats {
+  totalReads: number;
+  bounces: number;
+  wastedChars: number;
 }
 
 interface PersistedStats {
@@ -66,6 +91,11 @@ interface PersistedStats {
   };
   rtk: RtkStats;
   budgets: Record<string, BudgetConfig>;
+  bounces: {
+    totalBounces: number;
+    totalWastedChars: number;
+    byExtension: Record<string, BounceStats>;
+  };
 }
 
 export interface LifetimeStats {
@@ -82,6 +112,8 @@ export interface LifetimeStats {
   rtkAlreadyWrapped: number;
   rtkPassthrough: number;
   updatedAt: number;
+  totalBounces: number;
+  totalWastedChars: number;
 }
 
 function emptyLifetime(): LifetimeStats {
@@ -99,6 +131,8 @@ function emptyLifetime(): LifetimeStats {
     rtkAlreadyWrapped: 0,
     rtkPassthrough: 0,
     updatedAt: 0,
+    totalBounces: 0,
+    totalWastedChars: 0,
   };
 }
 
@@ -167,6 +201,7 @@ function buildStats(): PersistedStats {
       passthrough: rtkPassthrough,
     },
     budgets: getAllBudgets(),
+    bounces: getBounceStats(),
   };
 }
 
@@ -209,6 +244,7 @@ function bankSession(filePath: string): void {
   const s = session.savings;
   const c = session.cache;
   const r = session.rtk;
+  const b = session.bounces;
   const compressionSavedChars = s?.compressionSavedChars ?? s?.savedChars ?? 0;
   const dedupSavedChars = s?.dedupSavedChars ?? 0;
   lifetime.bankedSessions += 1;
@@ -223,6 +259,8 @@ function bankSession(filePath: string): void {
   lifetime.rtkRewrites += r?.rewrites ?? 0;
   lifetime.rtkAlreadyWrapped += r?.alreadyWrapped ?? 0;
   lifetime.rtkPassthrough += r?.passthrough ?? 0;
+  lifetime.totalBounces += b?.totalBounces ?? 0;
+  lifetime.totalWastedChars += b?.totalWastedChars ?? 0;
   lifetime.updatedAt = Date.now();
   try {
     mkdirSync(STATS_DIR, { recursive: true });
@@ -387,6 +425,12 @@ export function resetStats(): void {
   rtkRewrites = 0;
   rtkAlreadyWrapped = 0;
   rtkPassthrough = 0;
+  seqCounter = 0;
+  totalBounces = 0;
+  totalWastedChars = 0;
+  recentReads.clear();
+  perExtension.clear();
+  recentlyEdited.clear();
   for (const key of Object.keys(savingsByTool)) delete savingsByTool[key];
   try {
     rmSync(SESSION_STATS_FILE, { force: true });
@@ -394,6 +438,94 @@ export function resetStats(): void {
     // Non-fatal: stats persistence is best-effort.
   }
   persistStats();
+}
+
+function extensionOf(filePath: string): string {
+  const dot = filePath.lastIndexOf(".");
+  return dot > 0 ? filePath.slice(dot).toLowerCase() : "";
+}
+
+export function recordRead(
+  filePath: string,
+  wasCompressed: boolean,
+  charsSent: number,
+): void {
+  seqCounter++;
+  const events = recentReads.get(filePath) ?? [];
+
+  if (!wasCompressed && events.length > 0) {
+    const last = events[events.length - 1];
+    if (last.wasCompressed && seqCounter - last.seq <= BOUNCE_WINDOW) {
+      totalBounces++;
+      totalWastedChars += last.charsSent;
+
+      const ext = extensionOf(filePath);
+      if (ext) {
+        const stats = perExtension.get(ext) ?? {
+          totalReads: 0,
+          bounces: 0,
+          wastedChars: 0,
+        };
+        stats.bounces++;
+        stats.wastedChars += last.charsSent;
+        perExtension.set(ext, stats);
+      }
+    }
+  }
+
+  events.push({ seq: seqCounter, wasCompressed, charsSent });
+  if (events.length > 10) events.shift();
+  recentReads.set(filePath, events);
+
+  const ext = extensionOf(filePath);
+  if (ext) {
+    const stats = perExtension.get(ext) ?? {
+      totalReads: 0,
+      bounces: 0,
+      wastedChars: 0,
+    };
+    stats.totalReads++;
+    perExtension.set(ext, stats);
+  }
+
+  persistStats();
+}
+
+export function recordEdit(filePath: string): void {
+  seqCounter++;
+  recentlyEdited.set(filePath, seqCounter);
+  persistStats();
+}
+
+export function shouldForceFull(filePath: string): boolean {
+  const editSeq = recentlyEdited.get(filePath);
+  if (editSeq !== undefined && seqCounter - editSeq <= EDIT_FORCE_WINDOW) {
+    return true;
+  }
+
+  const ext = extensionOf(filePath);
+  if (!ext) return false;
+
+  const stats = perExtension.get(ext);
+  if (!stats || stats.totalReads < 3) return false;
+
+  return stats.bounces / stats.totalReads >= BOUNCE_RATE_THRESHOLD;
+}
+
+export function getBounceStats(): {
+  totalBounces: number;
+  totalWastedChars: number;
+  byExtension: Record<string, BounceStats>;
+} {
+  const byExtension: Record<string, BounceStats> = {};
+  for (const [ext, stats] of perExtension) {
+    byExtension[ext] = { ...stats };
+  }
+  return {
+    totalBounces,
+    totalWastedChars,
+    byExtension,
+  };
 }
 
 export function getBudget(toolName: string): BudgetConfig {

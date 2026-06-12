@@ -5,6 +5,7 @@ import {
   getAllBudgets,
   getSavingsStats,
   getRtkStats,
+  getBounceStats,
   reductionPercent,
   efficiencyMeter,
   isRtkAvailable,
@@ -24,12 +25,18 @@ export const statusTool: Tool & {
     const stats = getCacheStats();
     const savings = getSavingsStats();
     const rtk = getRtkStats();
+    const bounces = getBounceStats();
     const budgets = getAllBudgets();
     const rtkAvailable = isRtkAvailable();
     const compressionPct = reductionPercent(
       savings.rawChars,
       savings.compressionSavedChars,
     );
+
+    const bounceExts = Object.entries(bounces.byExtension)
+      .filter(([, s]) => s.bounces > 0)
+      .sort((a, b) => b[1].bounces - a[1].bounces)
+      .slice(0, 5);
 
     const report = [
       "=== Cave Tools Status ===",
@@ -58,6 +65,16 @@ export const statusTool: Tool & {
       "Dedup (avoided re-reads):",
       `  Cache hits:    ${stats.hits}`,
       `  Chars avoided: ${savings.dedupSavedChars} (budget-capped)`,
+      "",
+      "Bounces (compressed read → full re-read):",
+      `  Total bounces:      ${bounces.totalBounces}`,
+      `  Wasted chars:       ${bounces.totalWastedChars}`,
+      ...bounceExts.map(
+        ([ext, s]) =>
+          `  ${ext}: ${s.bounces}/${s.totalReads} reads bounced (${
+            s.totalReads > 0 ? ((s.bounces / s.totalReads) * 100).toFixed(0) : 0
+          }%), ${s.wastedChars} chars wasted`,
+      ),
       "",
       `Total est. tokens saved: ${savings.estimatedTokensSaved}`,
       "",
