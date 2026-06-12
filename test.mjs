@@ -22,6 +22,11 @@ import {
   expandArchive,
   cleanupArchives,
 } from "./dist/compression/archive.js";
+import {
+  addCodebookFile,
+  compressWithCodebook,
+  getCodebookSize,
+} from "./dist/compression/codebook.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -209,6 +214,19 @@ async function test() {
   cleanupArchives(0);
   assert.equal(expandArchive(archived.id), null, "cleanup removed archive");
   console.log("Archive tests passed");
+  console.log();
+
+  // Codebook tests
+  console.log("2h. Testing codebook:");
+  addCodebookFile("a.ts", "import { useState } from 'react';\nexport const THEME = 'dark';\n");
+  addCodebookFile("b.ts", "import { useState } from 'react';\nexport const THEME = 'dark';\n");
+  addCodebookFile("c.ts", "import { useState } from 'react';\nexport const OTHER = 'value';\n");
+  assert.ok(getCodebookSize() > 0, "codebook built after 3 files");
+
+  const codebookResult = compressWithCodebook("import { useState } from 'react';\nexport const UNIQUE = 'x';");
+  assert.ok(codebookResult.text.includes("[§"), "boilerplate replaced with codebook ref");
+  assert.ok(codebookResult.legend.includes("§CODEBOOK"), "legend appended");
+  console.log("Codebook tests passed");
   console.log();
 
   console.log("3. Testing cave__grep:");

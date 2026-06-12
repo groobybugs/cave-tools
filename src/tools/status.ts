@@ -11,6 +11,7 @@ import {
   isRtkAvailable,
 } from "../compression/utils.js";
 import { getArchiveStats } from "../compression/archive.js";
+import { getCodebookSize } from "../compression/codebook.js";
 
 export const statusTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
@@ -81,6 +82,9 @@ export const statusTool: Tool & {
       "Archives (large outputs on disk):",
       `  Count:       ${archives.count}`,
       `  Total chars: ${archives.totalChars}`,
+      "",
+      "Codebook (cross-file boilerplate dedup):",
+      `  Entries: ${getCodebookSize()}`,
       "",
       `Total est. tokens saved: ${savings.estimatedTokensSaved}`,
       "",

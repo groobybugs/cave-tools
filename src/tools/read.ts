@@ -13,6 +13,7 @@ import {
 
 import { formatSignatures } from "../compression/signatures.js";
 import { aggressiveCompress } from "../compression/aggressive.js";
+import { addCodebookFile, compressWithCodebook } from "../compression/codebook.js";
 
 const IMAGE_MIME: Record<string, string> = {
   ".png": "image/png",
@@ -174,6 +175,7 @@ export const readTool: Tool & {
       const selected = lines.slice(start, end).join("\n");
 
       updateFileCache(filePath);
+      addCodebookFile(filePath, content);
 
       if (shouldForceFull(filePath)) {
         recordRead(filePath, false, selected.length);
@@ -187,7 +189,10 @@ export const readTool: Tool & {
         };
       }
 
-      const compressed = applyBudget(selected, "read");
+      const { text: codebookText, legend } = compressWithCodebook(selected);
+      const withLegend = legend ? `${codebookText}\n\n${legend}` : codebookText;
+
+      const compressed = applyBudget(withLegend, "read");
       const wasCompressed = compressed.length < selected.length;
       recordRead(filePath, wasCompressed, compressed.length);
 
