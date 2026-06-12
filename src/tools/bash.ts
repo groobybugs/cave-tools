@@ -8,6 +8,7 @@ import {
 } from "../compression/utils.js";
 import { redactSecrets } from "../compression/redact.js";
 import { classifyCommand } from "../compression/classify.js";
+import { archiveIfLarge } from "../compression/archive.js";
 
 function stringifyOutput(value: unknown): string {
   if (Buffer.isBuffer(value)) return value.toString("utf-8");
@@ -97,12 +98,12 @@ export const bashTool: Tool & {
       });
 
       let processed = shouldRedact ? redactSecrets(output) : output;
+      const rtkStatus =
+        rewrittenCommand !== command
+          ? `[RTK: ${command} -> ${rewrittenCommand}]`
+          : "[RTK: no rewrite]";
 
       if (policy === "passthrough") {
-        const rtkStatus =
-          rewrittenCommand !== command
-            ? `[RTK: ${command} -> ${rewrittenCommand}]`
-            : "[RTK: no rewrite]";
         return {
           content: [
             {
@@ -112,6 +113,8 @@ export const bashTool: Tool & {
           ],
         };
       }
+
+      const archive = archiveIfLarge(processed, command);
 
       if (policy === "verbatim") {
         const lines = processed.split("\n");
@@ -123,15 +126,14 @@ export const bashTool: Tool & {
             ...lines.slice(-250),
           ].join("\n");
         }
-        const rtkStatus =
-          rewrittenCommand !== command
-            ? `[RTK: ${command} -> ${rewrittenCommand}]`
-            : "[RTK: no rewrite]";
+        const archiveNote = archive
+          ? `\n\n[Archived: ${archive.id} — use cave__compress expand ${archive.id}]`
+          : "";
         return {
           content: [
             {
               type: "text",
-              text: `${rtkStatus}\n${processed}`,
+              text: `${rtkStatus}\n${processed}${archiveNote}`,
             },
           ],
         };
@@ -143,16 +145,15 @@ export const bashTool: Tool & {
       // Apply budget compression
       processed = applyBudget(processed, "bash");
 
-      const rtkStatus =
-        rewrittenCommand !== command
-          ? `[RTK: ${command} -> ${rewrittenCommand}]`
-          : "[RTK: no rewrite]";
+      const archiveNote = archive
+        ? `\n\n[Archived: ${archive.id} — use cave__compress expand ${archive.id}]`
+        : "";
 
       return {
         content: [
           {
             type: "text",
-            text: `${rtkStatus}\n${processed}`,
+            text: `${rtkStatus}\n${processed}${archiveNote}`,
           },
         ],
       };

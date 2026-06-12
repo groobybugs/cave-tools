@@ -17,6 +17,11 @@ import {
   getBounceStats,
 } from "./dist/compression/utils.js";
 import { classifyCommand } from "./dist/compression/classify.js";
+import {
+  archiveIfLarge,
+  expandArchive,
+  cleanupArchives,
+} from "./dist/compression/archive.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -186,6 +191,24 @@ async function test() {
     rmSync(aggDir, { recursive: true, force: true });
   }
   console.log("Aggressive read mode tests passed");
+  console.log();
+
+  // Archive tests
+  console.log("2g. Testing archive:");
+  cleanupArchives(0);
+  const smallOutput = "small";
+  assert.equal(archiveIfLarge(smallOutput, "echo small"), null, "small output not archived");
+
+  const bigOutput = "line\n".repeat(10_000);
+  const archived = archiveIfLarge(bigOutput, "seq 10000");
+  assert.ok(archived, "big output archived");
+  assert.ok(archived.summary.includes("lines archived"), "summary mentions archived lines");
+
+  const expanded = expandArchive(archived.id);
+  assert.equal(expanded, bigOutput, "archive round-trip");
+  cleanupArchives(0);
+  assert.equal(expandArchive(archived.id), null, "cleanup removed archive");
+  console.log("Archive tests passed");
   console.log();
 
   console.log("3. Testing cave__grep:");

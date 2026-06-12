@@ -1,13 +1,14 @@
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { applyBudget, extractStructuredData } from "../compression/utils.js";
+import { expandArchive } from "../compression/archive.js";
 
 export const compressTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__compress",
   description:
-    "Compress any text through the full pipeline: ANSI stripping, blank line collapse, Flint Chipper, and optional Stone Tablet structured extraction.",
+    "Compress any text through the full pipeline: ANSI stripping, blank line collapse, Flint Chipper, and optional Stone Tablet structured extraction. Use action='expand' with archive_id to retrieve a large archived output.",
   inputSchema: {
     type: "object",
     properties: {
@@ -30,10 +31,42 @@ export const compressTool: Tool & {
         description: "Tool name for budget selection (bash, read, grep)",
         default: "bash",
       },
+      action: {
+        type: "string",
+        enum: ["compress", "expand"],
+        description: "Action: compress text (default) or expand an archive_id",
+        default: "compress",
+      },
+      archive_id: {
+        type: "string",
+        description: "Archive ID to expand when action='expand'",
+      },
     },
     required: ["text"],
   },
   handler: async (args) => {
+    const action = String(args.action || "compress");
+
+    if (action === "expand") {
+      const archiveId = String(args.archive_id || "");
+      if (!archiveId) {
+        return {
+          content: [{ type: "text", text: "Error: archive_id required" }],
+          isError: true,
+        };
+      }
+      const expanded = expandArchive(archiveId);
+      if (expanded === null) {
+        return {
+          content: [{ type: "text", text: `Archive not found: ${archiveId}` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: expanded }],
+      };
+    }
+
     const text = String(args.text);
     const commandHint = args.command_hint
       ? String(args.command_hint)

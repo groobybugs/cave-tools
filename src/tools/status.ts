@@ -10,6 +10,7 @@ import {
   efficiencyMeter,
   isRtkAvailable,
 } from "../compression/utils.js";
+import { getArchiveStats } from "../compression/archive.js";
 
 export const statusTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
@@ -26,6 +27,7 @@ export const statusTool: Tool & {
     const savings = getSavingsStats();
     const rtk = getRtkStats();
     const bounces = getBounceStats();
+    const archives = getArchiveStats();
     const budgets = getAllBudgets();
     const rtkAvailable = isRtkAvailable();
     const compressionPct = reductionPercent(
@@ -75,6 +77,10 @@ export const statusTool: Tool & {
             s.totalReads > 0 ? ((s.bounces / s.totalReads) * 100).toFixed(0) : 0
           }%), ${s.wastedChars} chars wasted`,
       ),
+      "",
+      "Archives (large outputs on disk):",
+      `  Count:       ${archives.count}`,
+      `  Total chars: ${archives.totalChars}`,
       "",
       `Total est. tokens saved: ${savings.estimatedTokensSaved}`,
       "",
