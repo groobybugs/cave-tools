@@ -4,6 +4,7 @@ import { editTool } from "./dist/tools/edit.js";
 import { findTool } from "./dist/tools/find.js";
 import { grepTool } from "./dist/tools/grep.js";
 import { lsTool } from "./dist/tools/ls.js";
+import { readTool } from "./dist/tools/read.js";
 import { statusTool } from "./dist/tools/status.js";
 import { writeTool } from "./dist/tools/write.js";
 import {
@@ -133,6 +134,32 @@ async function test() {
   assert.equal(classifyCommand("cargo test"), "compressible", "test compressible");
   assert.equal(classifyCommand("git status"), "compressible", "git status compressible");
   console.log("Command classification tests passed");
+  console.log();
+
+  // Signatures read mode tests
+  console.log("2e. Testing signatures read mode:");
+  const sigsDir = mkdtempSync(join(tmpdir(), "cave-sigs-"));
+  try {
+    const tsFile = join(sigsDir, "sample.ts");
+    writeFileSync(
+      tsFile,
+      "export async function loadUser(id: string): Promise<User> {\n  return db.get(id);\n}\n\nclass UserService {\n  constructor() {}\n}\n\nexport interface User {\n  id: string;\n}\n",
+      "utf-8",
+    );
+
+    const sigResult = await readTool.handler({
+      file_path: tsFile,
+      mode: "signatures",
+    });
+    const sigText = sigResult.content[0].text;
+    assert.match(sigText, /export async fn loadUser\(id: string\) → Promise<User>/);
+    assert.match(sigText, /class UserService/);
+    assert.match(sigText, /export interface User/);
+    assert.doesNotMatch(sigText, /return db.get/);
+  } finally {
+    rmSync(sigsDir, { recursive: true, force: true });
+  }
+  console.log("Signatures read mode tests passed");
   console.log();
 
   console.log("3. Testing cave__grep:");

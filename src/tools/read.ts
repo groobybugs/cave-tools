@@ -11,6 +11,8 @@ import {
   READ_STUB,
 } from "../compression/utils.js";
 
+import { formatSignatures } from "../compression/signatures.js";
+
 const IMAGE_MIME: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -30,7 +32,7 @@ export const readTool: Tool & {
 } = {
   name: "cave__read",
   description:
-    "Read a file with dedup + Flint Chipper compression. Returns a stub if the file hasn't changed since the last read in the same session. Image files (.png, .jpg, .jpeg, .gif, .webp, .bmp, .svg) are returned as image content blocks (base64); offset/limit are ignored for images.",
+    "Read a file with dedup + Flint Chipper compression. Returns a stub if the file hasn't changed since the last read in the same session. Image files (.png, .jpg, .jpeg, .gif, .webp, .bmp, .svg) are returned as image content blocks (base64); offset/limit are ignored for images. Use mode='signatures' to extract function/class/type signatures only (TS/JS/Rust).",
   inputSchema: {
     type: "object",
     properties: {
@@ -45,8 +47,14 @@ export const readTool: Tool & {
       },
       limit: {
         type: "number",
-        description: "Maximum number of lines to read. Ignored for images.",
+        description: "Maximum number of lines to read. Ignored for images and signatures mode.",
         default: 200,
+      },
+      mode: {
+        type: "string",
+        enum: ["full", "signatures"],
+        description: "Read mode: full text (default) or signatures only.",
+        default: "full",
       },
     },
     required: ["file_path"],
@@ -55,6 +63,7 @@ export const readTool: Tool & {
     const filePath = String(args.file_path);
     const offset = Number(args.offset) || 1;
     const limit = Number(args.limit) || 200;
+    const mode = String(args.mode || "full");
 
     const ext = extname(filePath).toLowerCase();
     const imageMime = IMAGE_MIME[ext];
@@ -132,6 +141,19 @@ export const readTool: Tool & {
 
     try {
       const content = readFileSync(filePath, "utf-8");
+
+      if (mode === "signatures") {
+        updateFileCache(filePath);
+        const sigs = formatSignatures(content, ext);
+        const output = sigs || "(no signatures extracted for this file type)";
+        const compressed = applyBudget(output, "read");
+        const wasCompressed = compressed.length < output.length;
+        recordRead(filePath, wasCompressed, compressed.length);
+        return {
+          content: [{ type: "text", text: compressed }],
+        };
+      }
+
       const lines = content.split("\n");
       const start = Math.max(0, offset - 1);
       const end = Math.min(lines.length, start + limit);
