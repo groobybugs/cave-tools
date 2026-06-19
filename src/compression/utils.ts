@@ -1,14 +1,13 @@
 import { createHash } from "crypto";
-import { spawnSync } from "child_process";
 import {
-  existsSync,
-  readFileSync,
-  writeFileSync,
-  mkdirSync,
-  rmSync,
-  readdirSync,
-  renameSync,
-} from "fs";
+  readFile,
+  writeFile,
+  mkdir,
+  rm,
+  readdir,
+  rename,
+  access,
+} from "fs/promises";
 import { homedir } from "os";
 import { join, dirname } from "path";
 
@@ -205,10 +204,10 @@ function buildStats(): PersistedStats {
   };
 }
 
-function persistStats(): void {
+async function persistStats(): Promise<void> {
   try {
-    mkdirSync(SESSIONS_DIR, { recursive: true });
-    writeFileSync(SESSION_STATS_FILE, JSON.stringify(buildStats()), "utf-8");
+    await mkdir(SESSIONS_DIR, { recursive: true });
+    await writeFile(SESSION_STATS_FILE, JSON.stringify(buildStats()), "utf-8");
   } catch {
     // Non-fatal: stats persistence is best-effort.
   }
@@ -222,9 +221,9 @@ export function getStatsSessionsDir(): string {
   return SESSIONS_DIR;
 }
 
-export function getLifetimeStats(): LifetimeStats {
+export async function getLifetimeStats(): Promise<LifetimeStats> {
   try {
-    const parsed = JSON.parse(readFileSync(LIFETIME_FILE, "utf-8")) as Partial<LifetimeStats>;
+    const parsed = JSON.parse(await readFile(LIFETIME_FILE, "utf-8")) as Partial<LifetimeStats>;
     return { ...emptyLifetime(), ...parsed };
   } catch {
     return emptyLifetime();
@@ -233,14 +232,14 @@ export function getLifetimeStats(): LifetimeStats {
 
 // Fold a (dead) session's totals into the persistent lifetime aggregate so its
 // savings survive after the session file is pruned. Best-effort; never throws.
-function bankSession(filePath: string): void {
+async function bankSession(filePath: string): Promise<void> {
   let session: PersistedStats;
   try {
-    session = JSON.parse(readFileSync(filePath, "utf-8")) as PersistedStats;
+    session = JSON.parse(await readFile(filePath, "utf-8")) as PersistedStats;
   } catch {
-    return; // Unreadable/corrupt — nothing to bank.
+    return;
   }
-  const lifetime = getLifetimeStats();
+  const lifetime = await getLifetimeStats();
   const s = session.savings;
   const c = session.cache;
   const r = session.rtk;
@@ -263,18 +262,18 @@ function bankSession(filePath: string): void {
   lifetime.totalWastedChars += b?.totalWastedChars ?? 0;
   lifetime.updatedAt = Date.now();
   try {
-    mkdirSync(STATS_DIR, { recursive: true });
-    writeFileSync(LIFETIME_FILE, JSON.stringify(lifetime), "utf-8");
+    await mkdir(STATS_DIR, { recursive: true });
+    await writeFile(LIFETIME_FILE, JSON.stringify(lifetime), "utf-8");
   } catch {
     // Non-fatal: lifetime persistence is best-effort.
   }
 }
 
-export function pruneDeadSessions(): number {
+export async function pruneDeadSessions(): Promise<number> {
   let removed = 0;
   let names: string[];
   try {
-    names = readdirSync(SESSIONS_DIR);
+    names = await readdir(SESSIONS_DIR);
   } catch {
     return 0;
   }
@@ -291,9 +290,9 @@ export function pruneDeadSessions(): number {
     }
     if (!alive) {
       const filePath = join(SESSIONS_DIR, name);
-      bankSession(filePath); // Preserve savings before deleting the file.
+      await bankSession(filePath);
       try {
-        rmSync(filePath, { force: true });
+        await rm(filePath, { force: true });
         removed++;
       } catch {
         // Non-fatal: best-effort cleanup.
@@ -303,19 +302,19 @@ export function pruneDeadSessions(): number {
   return removed;
 }
 
-export function getFileHash(filePath: string): string | null {
+export async function getFileHash(filePath: string): Promise<string | null> {
   try {
-    const content = readFileSync(filePath, "utf-8");
+    const content = await readFile(filePath, "utf-8");
     return createHash("sha256").update(content).digest("hex");
   } catch {
     return null;
   }
 }
 
-export function isFileUnchanged(filePath: string): boolean {
+export async function isFileUnchanged(filePath: string): Promise<boolean> {
   let content: string;
   try {
-    content = readFileSync(filePath, "utf-8");
+    content = await readFile(filePath, "utf-8");
   } catch {
     return false;
   }
@@ -326,18 +325,18 @@ export function isFileUnchanged(filePath: string): boolean {
     cacheHits++;
     const wouldEmit = budgetedText(content, "read").length;
     dedupSavedChars += Math.max(0, wouldEmit - READ_STUB.length);
-    persistStats();
+    void persistStats();
   }
   return unchanged;
 }
 
-export function updateFileCache(filePath: string): void {
-  const hash = getFileHash(filePath);
+export async function updateFileCache(filePath: string): Promise<void> {
+  const hash = await getFileHash(filePath);
   if (hash) {
     fileCache.set(filePath, hash);
     cacheMisses++;
-    persistStats();
-    registerReadPath(filePath);
+    void persistStats();
+    void registerReadPath(filePath);
   }
 }
 
@@ -346,22 +345,24 @@ export function updateFileCache(filePath: string): void {
 // grows with duplicates. Writes atomically (temp + rename) with 0600
 // permissions. Silent-fail on any filesystem error — the registry is
 // best-effort.
-function registerReadPath(filePath: string): void {
+async function registerReadPath(filePath: string): Promise<void> {
   try {
-    mkdirSync(dirname(READ_REGISTRY_FILE), { recursive: true });
+    await mkdir(dirname(READ_REGISTRY_FILE), { recursive: true });
     const paths = new Set<string>();
-    if (existsSync(READ_REGISTRY_FILE)) {
-      const raw = readFileSync(READ_REGISTRY_FILE, "utf-8");
+    try {
+      const raw = await readFile(READ_REGISTRY_FILE, "utf-8");
       for (const line of raw.split("\n")) {
         const trimmed = line.trim();
         if (trimmed) paths.add(trimmed);
       }
+    } catch {
+      // File doesn't exist yet — start empty
     }
-    if (paths.has(filePath)) return; // already registered
+    if (paths.has(filePath)) return;
     paths.add(filePath);
     const tempPath = `${READ_REGISTRY_FILE}.tmp.${process.pid}`;
-    writeFileSync(tempPath, Array.from(paths).join("\n") + "\n", { mode: 0o600 });
-    renameSync(tempPath, READ_REGISTRY_FILE);
+    await writeFile(tempPath, Array.from(paths).join("\n") + "\n", { mode: 0o600 });
+    await rename(tempPath, READ_REGISTRY_FILE);
   } catch {
     // Silent fail — registry is advisory
   }
@@ -369,7 +370,7 @@ function registerReadPath(filePath: string): void {
 
 export function invalidateFileCache(filePath: string): void {
   fileCache.delete(filePath);
-  persistStats();
+  void persistStats();
 }
 
 export function getCacheStats(): {
@@ -415,10 +416,10 @@ export function efficiencyMeter(percent: number, width = 24): string {
 
 export function resetCache(): void {
   fileCache.clear();
-  persistStats();
+  void persistStats();
 }
 
-export function resetStats(): void {
+export async function resetStats(): Promise<void> {
   cacheHits = 0;
   cacheMisses = 0;
   dedupSavedChars = 0;
@@ -433,11 +434,11 @@ export function resetStats(): void {
   recentlyEdited.clear();
   for (const key of Object.keys(savingsByTool)) delete savingsByTool[key];
   try {
-    rmSync(SESSION_STATS_FILE, { force: true });
+    await rm(SESSION_STATS_FILE, { force: true });
   } catch {
     // Non-fatal: stats persistence is best-effort.
   }
-  persistStats();
+  void persistStats();
 }
 
 function extensionOf(filePath: string): string {
@@ -488,13 +489,13 @@ export function recordRead(
     perExtension.set(ext, stats);
   }
 
-  persistStats();
+  void persistStats();
 }
 
 export function recordEdit(filePath: string): void {
   seqCounter++;
   recentlyEdited.set(filePath, seqCounter);
-  persistStats();
+  void persistStats();
 }
 
 export function shouldForceFull(filePath: string): boolean {
@@ -539,7 +540,7 @@ export function setBudget(
   tailLines: number,
 ): void {
   budgets[toolName] = { maxLines, headLines, tailLines };
-  persistStats();
+  void persistStats();
 }
 
 export function getAllBudgets(): Record<string, BudgetConfig> {
@@ -597,7 +598,7 @@ export function applyBudget(text: string, toolName: string): string {
   tool.compressedChars += result.length;
   tool.savedChars += Math.max(0, rawLength - result.length);
   savingsByTool[toolName] = tool;
-  persistStats();
+  void persistStats();
   return result;
 }
 
@@ -694,36 +695,54 @@ export function extractStructuredData(
   return text;
 }
 
-export function isRtkAvailable(): boolean {
-  const result = spawnSync("rtk", ["--version"], {
-    encoding: "utf-8",
-    timeout: 3000,
-  });
-  return result.status === 0;
+let rtkAvailableCache: boolean | null = null;
+
+export async function isRtkAvailable(): Promise<boolean> {
+  if (rtkAvailableCache !== null) return rtkAvailableCache;
+  try {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+    await execFileAsync("rtk", ["--version"], { timeout: 3000 });
+    rtkAvailableCache = true;
+  } catch {
+    rtkAvailableCache = false;
+  }
+  return rtkAvailableCache;
 }
 
-export function rewriteCommandWithRtk(command: string): string {
-  if (!isRtkAvailable()) {
+export async function rewriteCommandWithRtk(command: string): Promise<string> {
+  if (!(await isRtkAvailable())) {
     rtkPassthrough++;
-    persistStats();
+    void persistStats();
     return command;
   }
 
-  const result = spawnSync("rtk", ["rewrite", command], {
-    encoding: "utf-8",
-    timeout: 3000,
-  });
-  const rewritten = result.stdout.trim();
+  const { execFile } = await import("child_process");
+  const { promisify } = await import("util");
+  const execFileAsync = promisify(execFile);
 
-  // Some RTK versions emit valid rewrites with non-zero status. Trust stdout.
+  let rewritten: string;
+  try {
+    const result = await execFileAsync("rtk", ["rewrite", command], {
+      encoding: "utf-8",
+      timeout: 3000,
+    });
+    rewritten = result.stdout.trim();
+  } catch {
+    rtkPassthrough++;
+    void persistStats();
+    return command;
+  }
+
   if (!rewritten) {
     rtkPassthrough++;
-    persistStats();
+    void persistStats();
     return command;
   }
 
   if (rewritten === command.trim()) rtkAlreadyWrapped++;
   else rtkRewrites++;
-  persistStats();
+  void persistStats();
   return rewritten;
 }

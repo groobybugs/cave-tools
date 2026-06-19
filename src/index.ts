@@ -97,7 +97,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 export async function startServer(): Promise<void> {
-  pruneDeadSessions();
+  await pruneDeadSessions();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Cave Tools MCP server running on stdio");

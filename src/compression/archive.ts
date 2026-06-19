@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { readdir, readFile, rm, stat, writeFile, mkdir } from "fs/promises";
 import { createHash } from "crypto";
 import { homedir } from "os";
 import { join } from "path";
@@ -31,24 +31,24 @@ function metaPath(id: string): string {
   return join(entryDir(id), `${id}.meta.json`);
 }
 
-export function archiveIfLarge(
+export async function archiveIfLarge(
   output: string,
   command: string,
-): { id: string; summary: string } | null {
+): Promise<{ id: string; summary: string } | null> {
   if (output.length < ARCHIVE_THRESHOLD) return null;
 
   const id = archiveId(output);
   const dir = entryDir(id);
-  mkdirSync(dir, { recursive: true });
+  await mkdir(dir, { recursive: true });
 
-  writeFileSync(contentPath(id), output, "utf-8");
+  await writeFile(contentPath(id), output, "utf-8");
   const meta: ArchiveEntry = {
     id,
     command,
     sizeChars: output.length,
     createdAt: Date.now(),
   };
-  writeFileSync(metaPath(id), JSON.stringify(meta), "utf-8");
+  await writeFile(metaPath(id), JSON.stringify(meta), "utf-8");
 
   const lines = output.split("\n");
   const head = lines.slice(0, 20).join("\n");
@@ -58,24 +58,24 @@ export function archiveIfLarge(
   return { id, summary };
 }
 
-export function expandArchive(id: string): string | null {
+export async function expandArchive(id: string): Promise<string | null> {
   try {
-    return readFileSync(contentPath(id), "utf-8");
+    return await readFile(contentPath(id), "utf-8");
   } catch {
     return null;
   }
 }
 
-export function listArchives(): ArchiveEntry[] {
+export async function listArchives(): Promise<ArchiveEntry[]> {
   const entries: ArchiveEntry[] = [];
   try {
-    for (const prefix of readdirSync(ARCHIVE_DIR)) {
+    for (const prefix of await readdir(ARCHIVE_DIR)) {
       const prefixDir = join(ARCHIVE_DIR, prefix);
-      for (const file of readdirSync(prefixDir)) {
+      for (const file of await readdir(prefixDir)) {
         if (!file.endsWith(".meta.json")) continue;
         try {
           const meta = JSON.parse(
-            readFileSync(join(prefixDir, file), "utf-8"),
+            await readFile(join(prefixDir, file), "utf-8"),
           ) as ArchiveEntry;
           entries.push(meta);
         } catch {
@@ -89,18 +89,18 @@ export function listArchives(): ArchiveEntry[] {
   return entries.sort((a, b) => b.createdAt - a.createdAt);
 }
 
-export function cleanupArchives(maxAgeMs = ARCHIVE_MAX_AGE_MS): number {
+export async function cleanupArchives(maxAgeMs = ARCHIVE_MAX_AGE_MS): Promise<number> {
   const cutoff = Date.now() - maxAgeMs;
   let removed = 0;
   try {
-    for (const prefix of readdirSync(ARCHIVE_DIR)) {
+    for (const prefix of await readdir(ARCHIVE_DIR)) {
       const prefixDir = join(ARCHIVE_DIR, prefix);
-      for (const file of readdirSync(prefixDir)) {
-        const path = join(prefixDir, file);
+      for (const file of await readdir(prefixDir)) {
+        const filePath = join(prefixDir, file);
         try {
-          const stat = statSync(path);
-          if (stat.mtimeMs < cutoff) {
-            rmSync(path, { force: true });
+          const s = await stat(filePath);
+          if (s.mtimeMs < cutoff) {
+            await rm(filePath, { force: true });
             removed++;
           }
         } catch {
@@ -114,8 +114,8 @@ export function cleanupArchives(maxAgeMs = ARCHIVE_MAX_AGE_MS): number {
   return removed;
 }
 
-export function getArchiveStats(): { count: number; totalChars: number } {
-  const archives = listArchives();
+export async function getArchiveStats(): Promise<{ count: number; totalChars: number }> {
+  const archives = await listArchives();
   return {
     count: archives.length,
     totalChars: archives.reduce((sum, a) => sum + a.sizeChars, 0),

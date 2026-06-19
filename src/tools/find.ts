@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, statSync } from "fs";
+import { readdir, stat, access } from "fs/promises";
 import path from "path";
-import { spawnSync } from "child_process";
+import { spawn } from "child_process";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { applyBudget } from "../compression/utils.js";
 import type { ToolResult } from "../types.js";
@@ -32,11 +32,11 @@ function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${source}$`);
 }
 
-function findWithNode(
+async function findWithNode(
   searchPath: string,
   pattern: string,
   limit: number,
-): string[] {
+): Promise<string[]> {
   const matcher = globToRegExp(
     pattern.includes("/") ? pattern : `**/${pattern}`,
   );
@@ -46,36 +46,58 @@ function findWithNode(
 
   while (stack.length > 0 && results.length < limit) {
     const dir = stack.pop()!;
-    let entries: string[];
+    let entries: import("fs").Dirent[];
     try {
-      entries = readdirSync(dir);
+      entries = await readdir(dir, { withFileTypes: true });
     } catch {
       continue;
     }
 
     for (const entry of entries) {
-      if (entry === ".git" || entry === "node_modules") continue;
-      const fullPath = path.join(dir, entry);
-      let stat;
-      try {
-        stat = statSync(fullPath);
-      } catch {
-        continue;
-      }
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const fullPath = path.join(dir, entry.name);
 
       const relative = toPosixPath(path.relative(searchPath, fullPath));
+      const isDir = entry.isDirectory();
       if (
         matcher.test(relative) ||
         basenameMatcher?.test(path.basename(relative))
       ) {
-        results.push(relative + (stat.isDirectory() ? "/" : ""));
+        results.push(relative + (isDir ? "/" : ""));
       }
       if (results.length >= limit) break;
-      if (stat.isDirectory()) stack.push(fullPath);
+      if (isDir) stack.push(fullPath);
     }
   }
 
   return results.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+}
+
+function spawnFd(fdArgs: string[]): Promise<{ error?: Error; stdout: string }> {
+  return new Promise((resolve) => {
+    const child = spawn("fd", fdArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      resolve({ error, stdout: "" });
+    });
+
+    child.on("close", (code) => {
+      if (code !== 0 && !stdout.trim()) {
+        resolve({ error: new Error(stderr || `fd exited with code ${code}`), stdout: "" });
+      } else {
+        resolve({ stdout });
+      }
+    });
+  });
 }
 
 export const findTool: Tool & {
@@ -108,7 +130,9 @@ export const findTool: Tool & {
     const searchPath = path.resolve(args.path ? String(args.path) : ".");
     const limit = Math.max(1, Number(args.limit) || DEFAULT_LIMIT);
 
-    if (!existsSync(searchPath)) {
+    try {
+      await access(searchPath);
+    } catch {
       return {
         content: [{ type: "text", text: `Path not found: ${searchPath}` }],
         isError: true,
@@ -124,13 +148,10 @@ export const findTool: Tool & {
       pattern,
       searchPath,
     ];
-    const result = spawnSync("fd", fdArgs, {
-      encoding: "utf-8",
-      maxBuffer: 10 * 1024 * 1024,
-    });
+    const result = await spawnFd(fdArgs);
 
     const lines = result.error
-      ? findWithNode(searchPath, pattern, limit)
+      ? await findWithNode(searchPath, pattern, limit)
       : (result.stdout?.trim() || "")
           .split("\n")
           .map((line) => line.trim())

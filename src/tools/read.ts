@@ -1,5 +1,5 @@
 import type { ToolResult } from "../types.js";
-import { readFileSync, statSync } from "fs";
+import { readFile, stat } from "fs/promises";
 import { extname } from "path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -58,6 +58,11 @@ export const readTool: Tool & {
         description: "Read mode: full text (default), signatures only, or aggressive comment stripping.",
         default: "full",
       },
+      force: {
+        type: "boolean",
+        description: "Bypass dedup cache and always return full content",
+        default: false,
+      },
     },
     required: ["file_path"],
   },
@@ -66,14 +71,14 @@ export const readTool: Tool & {
     const offset = Number(args.offset) || 1;
     const limit = Number(args.limit) || 200;
     const mode = String(args.mode || "full");
+    const force = args.force === true;
 
     const ext = extname(filePath).toLowerCase();
     const imageMime = IMAGE_MIME[ext];
 
-    // --- Image branch -----------------------------------------------------
     if (imageMime) {
       try {
-        if (isFileUnchanged(filePath)) {
+        if (!force && (await isFileUnchanged(filePath))) {
           return {
             content: [
               { type: "text", text: "<image unchanged since last read>" },
@@ -81,13 +86,13 @@ export const readTool: Tool & {
           };
         }
 
-        const size = statSync(filePath).size;
-        if (size > MAX_IMAGE_BYTES) {
+        const fileStat = await stat(filePath);
+        if (fileStat.size > MAX_IMAGE_BYTES) {
           return {
             content: [
               {
                 type: "text",
-                text: `Image too large (${size} bytes, max ${MAX_IMAGE_BYTES}). Resize or crop before reading.`,
+                text: `Image too large (${fileStat.size} bytes, max ${MAX_IMAGE_BYTES}). Resize or crop before reading.`,
               },
             ],
             isError: true,
@@ -96,15 +101,15 @@ export const readTool: Tool & {
 
         // SVG: send as text (it's just XML), keeps the image route for raster only.
         if (ext === ".svg") {
-          const svg = readFileSync(filePath, "utf-8");
-          updateFileCache(filePath);
+          const svg = await readFile(filePath, "utf-8");
+          await updateFileCache(filePath);
           return {
             content: [{ type: "text", text: svg }],
           };
         }
 
-        const buf = readFileSync(filePath);
-        updateFileCache(filePath);
+        const buf = await readFile(filePath);
+        await updateFileCache(filePath);
 
         return {
           content: [
@@ -128,8 +133,32 @@ export const readTool: Tool & {
       }
     }
 
-    // --- Text branch (original behavior) ---------------------------------
-    if (isFileUnchanged(filePath)) {
+    if (shouldForceFull(filePath)) {
+      try {
+        const content = await readFile(filePath, "utf-8");
+        const lines = content.split("\n");
+        const start = Math.max(0, offset - 1);
+        const end = Math.min(lines.length, start + limit);
+        const selected = lines.slice(start, end).join("\n");
+        await updateFileCache(filePath);
+        recordRead(filePath, false, selected.length);
+        return {
+          content: [{ type: "text", text: selected }],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error reading file: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    if (!force && (await isFileUnchanged(filePath))) {
       recordRead(filePath, false, READ_STUB.length);
       return {
         content: [
@@ -142,10 +171,10 @@ export const readTool: Tool & {
     }
 
     try {
-      const content = readFileSync(filePath, "utf-8");
+      const content = await readFile(filePath, "utf-8");
 
       if (mode === "aggressive") {
-        updateFileCache(filePath);
+        await updateFileCache(filePath);
         const compressedContent = aggressiveCompress(content, ext);
         const output =
           compressedContent.length < content.length ? compressedContent : content;
@@ -158,7 +187,7 @@ export const readTool: Tool & {
       }
 
       if (mode === "signatures") {
-        updateFileCache(filePath);
+        await updateFileCache(filePath);
         const sigs = formatSignatures(content, ext);
         const output = sigs || "(no signatures extracted for this file type)";
         const compressed = applyBudget(output, "read");
@@ -174,20 +203,8 @@ export const readTool: Tool & {
       const end = Math.min(lines.length, start + limit);
       const selected = lines.slice(start, end).join("\n");
 
-      updateFileCache(filePath);
+      await updateFileCache(filePath);
       addCodebookFile(filePath, content);
-
-      if (shouldForceFull(filePath)) {
-        recordRead(filePath, false, selected.length);
-        return {
-          content: [
-            {
-              type: "text",
-              text: selected,
-            },
-          ],
-        };
-      }
 
       const { text: codebookText, legend } = compressWithCodebook(selected);
       const withLegend = legend ? `${codebookText}\n\n${legend}` : codebookText;

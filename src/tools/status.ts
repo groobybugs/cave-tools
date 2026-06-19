@@ -28,9 +28,9 @@ export const statusTool: Tool & {
     const savings = getSavingsStats();
     const rtk = getRtkStats();
     const bounces = getBounceStats();
-    const archives = getArchiveStats();
+    const archives = await getArchiveStats();
     const budgets = getAllBudgets();
-    const rtkAvailable = isRtkAvailable();
+    const rtkAvailable = await isRtkAvailable();
     const compressionPct = reductionPercent(
       savings.rawChars,
       savings.compressionSavedChars,

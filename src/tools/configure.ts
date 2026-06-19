@@ -72,7 +72,7 @@ export const configureTool: Tool & {
       }
 
       case "reset_stats": {
-        resetStats();
+        await resetStats();
         return {
           content: [
             {

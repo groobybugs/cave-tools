@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import { createInterface } from "node:readline";
-import { readFileSync, statSync } from "fs";
+import { readFile, stat } from "fs/promises";
 import path from "path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolResult } from "../types.js";
@@ -71,7 +71,8 @@ export const grepTool: Tool & {
       const searchPath = path.resolve(searchDir);
       let isDirectory: boolean;
       try {
-        isDirectory = statSync(searchPath).isDirectory();
+        const s = await stat(searchPath);
+        isDirectory = s.isDirectory();
       } catch {
         return {
           content: [
@@ -125,6 +126,26 @@ export const grepTool: Tool & {
   },
 };
 
+async function getFileLinesAsync(
+  filePath: string,
+  cache: Map<string, string[]>,
+): Promise<string[]> {
+  let lines = cache.get(filePath);
+  if (!lines) {
+    try {
+      const content = await readFile(filePath, "utf-8");
+      lines = content
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .split("\n");
+    } catch {
+      lines = [];
+    }
+    cache.set(filePath, lines);
+  }
+  return lines;
+}
+
 function runRg(
   rgArgs: string[],
   searchPath: string,
@@ -138,64 +159,12 @@ function runRg(
     let stderr = "";
     let matchCount = 0;
     let matchLimitReached = false;
-    let linesTruncated = false;
 
     const matches: Array<{ filePath: string; lineNumber: number }> = [];
-    const fileCache = new Map<string, string[]>();
 
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-
-    const formatPath = (filePath: string): string => {
-      if (isDirectory) {
-        const relative = path.relative(searchPath, filePath);
-        if (relative && !relative.startsWith(".."))
-          return relative.replace(/\\/g, "/");
-      }
-      return path.basename(filePath);
-    };
-
-    const getFileLines = (filePath: string): string[] => {
-      let lines = fileCache.get(filePath);
-      if (!lines) {
-        try {
-          const content = readFileSync(filePath, "utf-8");
-          lines = content
-            .replace(/\r\n/g, "\n")
-            .replace(/\r/g, "\n")
-            .split("\n");
-        } catch {
-          lines = [];
-        }
-        fileCache.set(filePath, lines);
-      }
-      return lines;
-    };
-
-    const formatBlock = (filePath: string, lineNumber: number): string[] => {
-      const relativePath = formatPath(filePath);
-      const lines = getFileLines(filePath);
-      if (!lines.length)
-        return [`${relativePath}:${lineNumber}: (unable to read file)`];
-      const block: string[] = [];
-      const start =
-        contextValue > 0 ? Math.max(1, lineNumber - contextValue) : lineNumber;
-      const end =
-        contextValue > 0
-          ? Math.min(lines.length, lineNumber + contextValue)
-          : lineNumber;
-      for (let current = start; current <= end; current++) {
-        const lineText = lines[current - 1] ?? "";
-        const sanitized = lineText.replace(/\r/g, "");
-        const isMatchLine = current === lineNumber;
-        const truncated = truncateLine(sanitized);
-        if (truncated.length < sanitized.length) linesTruncated = true;
-        if (isMatchLine) block.push(`${relativePath}:${current}: ${truncated}`);
-        else block.push(`${relativePath}-${current}- ${truncated}`);
-      }
-      return block;
-    };
 
     rl.on("line", (line: string) => {
       if (!line.trim() || matchCount >= effectiveLimit) return;
@@ -222,7 +191,7 @@ function runRg(
       reject(new Error(`Failed to run ripgrep: ${error.message}`));
     });
 
-    child.on("close", (code) => {
+    child.on("close", async (code) => {
       if (code !== 0 && code !== 1 && matchCount === 0) {
         reject(new Error(stderr.trim() || `ripgrep exited with code ${code}`));
         return;
@@ -233,10 +202,41 @@ function runRg(
         return;
       }
 
+      const formatPath = (filePath: string): string => {
+        if (isDirectory) {
+          const relative = path.relative(searchPath, filePath);
+          if (relative && !relative.startsWith(".."))
+            return relative.replace(/\\/g, "/");
+        }
+        return path.basename(filePath);
+      };
+
+      const fileCache = new Map<string, string[]>();
+      let linesTruncated = false;
+
       const outputLines: string[] = [];
       for (const match of matches) {
-        const block = formatBlock(match.filePath, match.lineNumber);
-        outputLines.push(...block);
+        const relativePath = formatPath(match.filePath);
+        const lines = await getFileLinesAsync(match.filePath, fileCache);
+        if (!lines.length) {
+          outputLines.push(`${relativePath}:${match.lineNumber}: (unable to read file)`);
+          continue;
+        }
+        const start =
+          contextValue > 0 ? Math.max(1, match.lineNumber - contextValue) : match.lineNumber;
+        const end =
+          contextValue > 0
+            ? Math.min(lines.length, match.lineNumber + contextValue)
+            : match.lineNumber;
+        for (let current = start; current <= end; current++) {
+          const lineText = lines[current - 1] ?? "";
+          const sanitized = lineText.replace(/\r/g, "");
+          const isMatchLine = current === match.lineNumber;
+          const truncated = truncateLine(sanitized);
+          if (truncated.length < sanitized.length) linesTruncated = true;
+          if (isMatchLine) outputLines.push(`${relativePath}:${current}: ${truncated}`);
+          else outputLines.push(`${relativePath}-${current}- ${truncated}`);
+        }
       }
 
       let output = outputLines.join("\n");

@@ -94,10 +94,10 @@ interface StatusSummary {
   budgets: ReturnType<typeof getAllBudgets>;
 }
 
-function buildStatusSummary(): StatusSummary {
-  pruneDeadSessions();
-  const rtkAvailable = isRtkAvailable();
-  const lifetime = getLifetimeStats();
+async function buildStatusSummary(): Promise<StatusSummary> {
+  await pruneDeadSessions();
+  const rtkAvailable = await isRtkAvailable();
+  const lifetime = await getLifetimeStats();
   const sessions = readSessionStats();
   const liveSessions = sessions.filter((s) => isProcessAlive(s.pid));
   const visibleSessions = liveSessions.length > 0 ? liveSessions : sessions;
@@ -282,7 +282,8 @@ if (args[0] === "mcp" || args.length === 0) {
     process.exit(1);
   });
 } else if (args[0] === "status") {
-  const summary = buildStatusSummary();
+  (async () => {
+  const summary = await buildStatusSummary();
 
   // --emit-statusline: write compact one-liner to ~/.claude/.cave-tools-statusline-suffix
   // for the statusline script to read. No stdout output. Used by SessionStart and
@@ -347,6 +348,7 @@ if (args[0] === "mcp" || args.length === 0) {
 
   console.log(lines.join("\n"));
   process.exit(0);
+  })();
 } else if (args[0] === "bench") {
   console.log("Benchmark mode - not yet implemented");
   process.exit(0);

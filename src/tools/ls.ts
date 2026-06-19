@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync } from "fs";
+import { readdir, stat, access } from "fs/promises";
 import path from "path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { applyBudget } from "../compression/utils.js";
@@ -29,13 +29,24 @@ export const lsTool: Tool & {
     const dirPath = path.resolve(args.path ? String(args.path) : ".");
     const limit = Math.max(1, Number(args.limit) || DEFAULT_LIMIT);
 
-    if (!existsSync(dirPath)) {
+    try {
+      await access(dirPath);
+    } catch {
       return {
         content: [{ type: "text", text: `Path not found: ${dirPath}` }],
         isError: true,
       };
     }
-    if (!statSync(dirPath).isDirectory()) {
+
+    try {
+      const dirStat = await stat(dirPath);
+      if (!dirStat.isDirectory()) {
+        return {
+          content: [{ type: "text", text: `Not a directory: ${dirPath}` }],
+          isError: true,
+        };
+      }
+    } catch {
       return {
         content: [{ type: "text", text: `Not a directory: ${dirPath}` }],
         isError: true,
@@ -43,7 +54,7 @@ export const lsTool: Tool & {
     }
 
     try {
-      const entries = readdirSync(dirPath).sort((a, b) =>
+      const entries = (await readdir(dirPath)).sort((a, b) =>
         a.toLowerCase().localeCompare(b.toLowerCase()),
       );
       const results: string[] = [];
@@ -56,7 +67,8 @@ export const lsTool: Tool & {
         }
         const fullPath = path.join(dirPath, entry);
         try {
-          results.push(statSync(fullPath).isDirectory() ? `${entry}/` : entry);
+          const entryStat = await stat(fullPath);
+          results.push(entryStat.isDirectory() ? `${entry}/` : entry);
         } catch {
           // Skip entries that disappeared or cannot be statted.
         }

@@ -55,7 +55,7 @@ export const compressTool: Tool & {
           isError: true,
         };
       }
-      const expanded = expandArchive(archiveId);
+      const expanded = await expandArchive(archiveId);
       if (expanded === null) {
         return {
           content: [{ type: "text", text: `Archive not found: ${archiveId}` }],

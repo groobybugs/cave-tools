@@ -4,6 +4,7 @@ const PASSTHROUGH_PATTERNS = [
   /^auth\s+login\b/i,
   /^auth\s+logout\b/i,
   /^auth\s+status\b/i,
+  /^gh\s+auth\b/i,
   /^npm\s+login\b/i,
   /^pnpm\s+login\b/i,
   /^yarn\s+login\b/i,

@@ -10,15 +10,15 @@ const PATTERNS: RedactPattern[] = [
   },
   {
     label: "Authorization header",
-    regex: /(authorization:\s*(?:basic|bearer|token)\s+)([^\s\r\n]+)/gi,
-  },
-  {
-    label: "API key param",
-    regex: /((?:api[_-]?key|apikey|access[_-]?key|secret[_-]?key|token|password|passwd|pwd|secret)\s*[=:]\s*)([^\s\r\n,;&"']+)/gi,
+    regex: /(authorization:\s*(?:basic|bearer|token)\s+)([^\s\r\n\[]+)/gi,
   },
   {
     label: "AWS key",
     regex: /(AKIA[0-9A-Z]{16})/g,
+  },
+  {
+    label: "API key param",
+    regex: /((?:api[_-]?key|apikey|access[_-]?key|secret[_-]?key|token|password|passwd|pwd|secret)\s*[=:]\s*)([^\s\r\n,;&"'\[]+)/gi,
   },
   {
     label: "Private key block",

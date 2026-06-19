@@ -1,5 +1,5 @@
 import type { ToolResult } from "../types.js";
-import { execSync } from "child_process";
+import { exec } from "child_process";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   applyBudget,
@@ -22,6 +22,7 @@ function formatCommandError(
 ): string {
   const err = error as NodeJS.ErrnoException & {
     status?: number;
+    code?: number | string;
     signal?: NodeJS.Signals;
     stdout?: unknown;
     stderr?: unknown;
@@ -29,11 +30,16 @@ function formatCommandError(
   const message = error instanceof Error ? error.message : String(error);
   const stdout = stringifyOutput(err.stdout).trim();
   const stderr = stringifyOutput(err.stderr).trim();
+  const exitCode = typeof err.status === "number"
+    ? err.status
+    : typeof err.code === "number"
+      ? err.code
+      : undefined;
   const details = [
     "Command failed",
     `Original command: ${command}`,
     `Executed command: ${rewrittenCommand}`,
-    err.status !== undefined ? `Exit code: ${err.status}` : undefined,
+    exitCode !== undefined ? `Exit code: ${exitCode}` : undefined,
     err.signal !== undefined ? `Signal: ${err.signal}` : undefined,
     stderr ? `stderr:\n${stderr}` : undefined,
     stdout ? `stdout:\n${stdout}` : undefined,
@@ -41,6 +47,27 @@ function formatCommandError(
   ].filter(Boolean);
 
   return details.join("\n");
+}
+
+function execAsync(
+  command: string,
+  options: { timeout: number; maxBuffer?: number },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    exec(command, {
+      timeout: options.timeout,
+      encoding: "utf-8",
+      maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
+    }, (error: Error | null, stdout: string, stderr: string) => {
+      if (error) {
+        (error as any).stdout = stdout;
+        (error as any).stderr = stderr;
+        reject(error);
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
 }
 
 export const bashTool: Tool & {
@@ -90,11 +117,9 @@ export const bashTool: Tool & {
     const policy = classifyCommand(command);
 
     try {
-      rewrittenCommand = rewriteCommandWithRtk(command);
-      const output = execSync(rewrittenCommand, {
+      rewrittenCommand = await rewriteCommandWithRtk(command);
+      const output = await execAsync(rewrittenCommand, {
         timeout,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
       });
 
       let processed = shouldRedact ? redactSecrets(output) : output;
@@ -114,7 +139,7 @@ export const bashTool: Tool & {
         };
       }
 
-      const archive = archiveIfLarge(processed, command);
+      const archive = await archiveIfLarge(processed, command);
 
       if (policy === "verbatim") {
         const lines = processed.split("\n");

@@ -99,7 +99,7 @@ async function test() {
   const prettyJson = '{\n  "name": "cave-tools",\n  "version": 3,\n  "tags": ["a", "b"]\n}';
   const compactedJson = compactJson(prettyJson);
   assert.ok(compactedJson, "pretty JSON should compact");
-  assert.equal(JSON.parse(compactedJson), JSON.parse(prettyJson), "value identical");
+  assert.deepStrictEqual(JSON.parse(compactedJson), JSON.parse(prettyJson), "value identical");
   assert.ok(!compactedJson.includes("\n"), "no newlines in compacted JSON");
 
   const jsonlInput = '{ "a": 1 }\n{ "b": 2 }\n\n{ "c": 3 }';
@@ -200,19 +200,19 @@ async function test() {
 
   // Archive tests
   console.log("2g. Testing archive:");
-  cleanupArchives(0);
+  await cleanupArchives(0);
   const smallOutput = "small";
-  assert.equal(archiveIfLarge(smallOutput, "echo small"), null, "small output not archived");
+  assert.equal(await archiveIfLarge(smallOutput, "echo small"), null, "small output not archived");
 
   const bigOutput = "line\n".repeat(10_000);
-  const archived = archiveIfLarge(bigOutput, "seq 10000");
+  const archived = await archiveIfLarge(bigOutput, "seq 10000");
   assert.ok(archived, "big output archived");
   assert.ok(archived.summary.includes("lines archived"), "summary mentions archived lines");
 
-  const expanded = expandArchive(archived.id);
+  const expanded = await expandArchive(archived.id);
   assert.equal(expanded, bigOutput, "archive round-trip");
-  cleanupArchives(0);
-  assert.equal(expandArchive(archived.id), null, "cleanup removed archive");
+  await cleanupArchives(0);
+  assert.equal(await expandArchive(archived.id), null, "cleanup removed archive");
   console.log("Archive tests passed");
   console.log();
 
@@ -297,6 +297,162 @@ async function test() {
   console.log("cave__edit tests passed");
   console.log();
 
+  console.log("6b. Testing cave__edit improvements:");
+  const editImproveDir = mkdtempSync(join(tmpdir(), "cave-edit-improve-"));
+  try {
+    const crlfFile = join(editImproveDir, "crlf.txt");
+    writeFileSync(crlfFile, "line1\r\nline2\r\nline3\r\n", "utf-8");
+    const crlfResult = await editTool.handler({
+      file_path: crlfFile,
+      old_string: "line1\nline2",
+      new_string: "changed1\nchanged2",
+    });
+    assert.equal(crlfResult.isError, undefined, `CRLF fallback should work: ${crlfResult.content[0].text}`);
+    const crlfContent = readFileSync(crlfFile, "utf-8");
+    assert.ok(crlfContent.includes("changed1\r\nchanged2"), "new_string should be adapted to CRLF");
+    assert.ok(crlfContent.includes("\r\nline3\r\n"), "rest of file should keep CRLF");
+
+    const lfFile = join(editImproveDir, "lf.txt");
+    writeFileSync(lfFile, "line1\nline2\nline3\n", "utf-8");
+    const lfResult = await editTool.handler({
+      file_path: lfFile,
+      old_string: "line1\r\nline2",
+      new_string: "a\r\nb",
+    });
+    assert.equal(lfResult.isError, undefined, `LF fallback should work: ${lfResult.content[0].text}`);
+    const lfContent = readFileSync(lfFile, "utf-8");
+    assert.ok(lfContent.includes("a\nb"), "new_string should be adapted to LF");
+
+    const wsFile = join(editImproveDir, "whitespace.txt");
+    writeFileSync(wsFile, "  let x = 1;  \n  let y = 2;\n", "utf-8");
+    const wsResult = await editTool.handler({
+      file_path: wsFile,
+      old_string: "  let x = 1;\n  let y = 2;",
+      new_string: "  let x = 10;\n  let y = 20;",
+    });
+    assert.equal(wsResult.isError, undefined, `trailing whitespace tolerance should work: ${wsResult.content[0].text}`);
+    const wsContent = readFileSync(wsFile, "utf-8");
+    assert.ok(wsContent.includes("let x = 10;"));
+    assert.ok(wsContent.includes("let y = 20;"));
+
+    const appliedFile = join(editImproveDir, "applied.txt");
+    writeFileSync(appliedFile, "new content here\n", "utf-8");
+    const appliedResult = await editTool.handler({
+      file_path: appliedFile,
+      old_string: "old content",
+      new_string: "new content here",
+    });
+    assert.equal(appliedResult.isError, true);
+    assert.match(appliedResult.content[0].text, /already applied/);
+
+    const hintFile = join(editImproveDir, "hint.txt");
+    writeFileSync(hintFile, "function myFunction() {\n  return 42;\n}\n", "utf-8");
+    const hintResult = await editTool.handler({
+      file_path: hintFile,
+      old_string: "function myFunction() {",
+      new_string: "function myFunction() {",
+    });
+    assert.equal(hintResult.isError, true);
+    assert.match(hintResult.content[0].text, /identical/);
+
+    const hintFile2 = join(editImproveDir, "hint2.txt");
+    writeFileSync(hintFile2, "function myFunction() {\n  return 42;\n}\n", "utf-8");
+    const hintResult2 = await editTool.handler({
+      file_path: hintFile2,
+      old_string: "  function myFunction() {",
+      new_string: "  function myFunc() {",
+    });
+    assert.equal(hintResult2.isError, true);
+    assert.match(hintResult2.content[0].text, /Closest match at line 1/);
+
+    const batchFile = join(editImproveDir, "batch.txt");
+    writeFileSync(batchFile, "alpha beta gamma delta\n", "utf-8");
+    const batchResult = await editTool.handler({
+      file_path: batchFile,
+      edits: [
+        { old_string: "alpha", new_string: "one" },
+        { old_string: "gamma", new_string: "three" },
+      ],
+    });
+    assert.equal(batchResult.isError, undefined, `batch edit should work: ${batchResult.content[0].text}`);
+    assert.equal(readFileSync(batchFile, "utf-8"), "one beta three delta\n");
+
+    const overlapFile = join(editImproveDir, "overlap.txt");
+    writeFileSync(overlapFile, "foo bar baz\n", "utf-8");
+    const overlapResult = await editTool.handler({
+      file_path: overlapFile,
+      edits: [
+        { old_string: "foo bar", new_string: "x" },
+        { old_string: "bar baz", new_string: "y" },
+      ],
+    });
+    assert.equal(overlapResult.isError, true);
+    assert.match(overlapResult.content[0].text, /overlap/);
+
+    const largeFile = join(editImproveDir, "large.txt");
+    const largeContent = "pattern\n".repeat(50);
+    writeFileSync(largeFile, largeContent, "utf-8");
+    const largeResult = await editTool.handler({
+      file_path: largeFile,
+      old_string: "pattern",
+      new_string: "replaced",
+    });
+    assert.equal(largeResult.isError, true);
+    assert.match(largeResult.content[0].text, /not unique/);
+  } finally {
+    rmSync(editImproveDir, { recursive: true, force: true });
+  }
+  console.log("cave__edit improvements tests passed");
+  console.log();
+
+  console.log("6c. Testing cave__read force parameter:");
+  const readForceDir = mkdtempSync(join(tmpdir(), "cave-read-force-"));
+  try {
+    const forceFile = join(readForceDir, "force.txt");
+    writeFileSync(forceFile, "initial content\n", "utf-8");
+
+    const read1 = await readTool.handler({ file_path: forceFile });
+    assert.equal(read1.isError, undefined);
+    assert.ok(read1.content[0].text.includes("initial content"));
+
+    const read2 = await readTool.handler({ file_path: forceFile });
+    assert.equal(read2.isError, undefined);
+    assert.match(read2.content[0].text, /unchanged since last read/);
+
+    const read3 = await readTool.handler({ file_path: forceFile, force: true });
+    assert.equal(read3.isError, undefined);
+    assert.ok(read3.content[0].text.includes("initial content"), "force should bypass dedup");
+  } finally {
+    rmSync(readForceDir, { recursive: true, force: true });
+  }
+  console.log("cave__read force parameter tests passed");
+  console.log();
+
+  console.log("6d. Testing cave__read recently-edited bypass:");
+  const readRecentDir = mkdtempSync(join(tmpdir(), "cave-read-recent-"));
+  try {
+    const recentFile = join(readRecentDir, "recent.txt");
+    writeFileSync(recentFile, "original content\n", "utf-8");
+
+    const read1 = await readTool.handler({ file_path: recentFile });
+    assert.equal(read1.isError, undefined);
+    assert.ok(read1.content[0].text.includes("original content"));
+
+    await editTool.handler({
+      file_path: recentFile,
+      old_string: "original content",
+      new_string: "edited content",
+    });
+
+    const read2 = await readTool.handler({ file_path: recentFile });
+    assert.equal(read2.isError, undefined);
+    assert.ok(read2.content[0].text.includes("edited content"), "recently-edited file should bypass dedup");
+  } finally {
+    rmSync(readRecentDir, { recursive: true, force: true });
+  }
+  console.log("cave__read recently-edited bypass tests passed");
+  console.log();
+
   console.log("7. Testing cave__write:");
   const writeDir = mkdtempSync(join(tmpdir(), "cave-write-"));
   try {
@@ -310,12 +466,49 @@ async function test() {
     assert.match(invalidateResult.content[0].text, /Invalidated cache/);
     assert.equal(readFileSync(filePath, "utf-8"), "keep me");
 
-    const emptyWriteResult = await writeTool.handler({
+    const emptyContentResult = await writeTool.handler({
       file_paths: [filePath],
       content: "",
     });
-    assert.equal(emptyWriteResult.isError, undefined);
-    assert.equal(readFileSync(filePath, "utf-8"), "");
+    assert.equal(emptyContentResult.isError, undefined);
+    assert.match(emptyContentResult.content[0].text, /Invalidated cache/);
+    assert.equal(readFileSync(filePath, "utf-8"), "keep me");
+
+    const file2 = join(writeDir, "sample2.txt");
+    writeFileSync(file2, "data", "utf-8");
+    const multiEmptyResult = await writeTool.handler({
+      file_paths: [filePath, file2],
+      content: "",
+    });
+    assert.equal(multiEmptyResult.isError, undefined);
+    assert.match(multiEmptyResult.content[0].text, /Invalidated cache for 2/);
+    assert.equal(readFileSync(filePath, "utf-8"), "keep me");
+    assert.equal(readFileSync(file2, "utf-8"), "data");
+
+    const truncateFile = join(writeDir, "truncate.txt");
+    writeFileSync(truncateFile, "will be emptied", "utf-8");
+    const truncateResult = await writeTool.handler({
+      file_paths: [truncateFile],
+      truncate: true,
+    });
+    assert.equal(truncateResult.isError, undefined);
+    assert.match(truncateResult.content[0].text, /Truncated/);
+    assert.equal(readFileSync(truncateFile, "utf-8"), "");
+
+    const truncateMultiResult = await writeTool.handler({
+      file_paths: [filePath, file2],
+      truncate: true,
+    });
+    assert.equal(truncateMultiResult.isError, true);
+    assert.match(truncateMultiResult.content[0].text, /truncate.*requires exactly one path/);
+
+    const contentMultiResult = await writeTool.handler({
+      file_paths: [filePath, file2],
+      content: "some text",
+    });
+    assert.equal(contentMultiResult.isError, true);
+    assert.match(contentMultiResult.content[0].text, /content.*requires exactly one path/);
+    assert.match(contentMultiResult.content[0].text, /omit.*content/);
   } finally {
     rmSync(writeDir, { recursive: true, force: true });
   }

@@ -139,7 +139,7 @@ export function compressWithCodebook(
 ): { text: string; legend: string; refsUsed: string[] } {
   const { text, refsUsed } = globalCodebook.compress(content);
   const legend =
-    refsUsed.length >= 3 ? globalCodebook.formatLegend(refsUsed) : "";
+    refsUsed.length >= 1 ? globalCodebook.formatLegend(refsUsed) : "";
   return { text, legend, refsUsed };
 }
 
