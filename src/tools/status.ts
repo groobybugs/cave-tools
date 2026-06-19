@@ -18,7 +18,7 @@ export const statusTool: Tool & {
 } = {
   name: "cave__status",
   description:
-    "Show compression statistics for the current session: dedup cache hit rate, total tokens saved, per-tool budget configuration, and RTK availability.",
+    "Show token-optimization stats for the current session: dedup cache hit rate, total tokens saved, per-tool output budgets, and RTK availability.",
   inputSchema: {
     type: "object",
     properties: {},
@@ -57,10 +57,10 @@ export const statusTool: Tool & {
       `  Already wrapped: ${rtk.alreadyWrapped}`,
       `  Passthrough:     ${rtk.passthrough}`,
       "",
-      "Compression (output trimming):",
+      "Output trimming:",
       `  Calls:            ${savings.totalCalls}`,
       `  Raw chars:        ${savings.rawChars}`,
-      `  Compressed chars: ${savings.compressedChars}`,
+      `  Trimmed chars:    ${savings.compressedChars}`,
       `  Saved chars:      ${savings.compressionSavedChars}`,
       `  Reduction:        ${compressionPct.toFixed(1)}%`,
       `  Meter: ${efficiencyMeter(compressionPct)} ${compressionPct.toFixed(1)}%`,
@@ -69,7 +69,7 @@ export const statusTool: Tool & {
       `  Cache hits:    ${stats.hits}`,
       `  Chars avoided: ${savings.dedupSavedChars} (budget-capped)`,
       "",
-      "Bounces (compressed read → full re-read):",
+      "Bounces (trimmed read → full re-read):",
       `  Total bounces:      ${bounces.totalBounces}`,
       `  Wasted chars:       ${bounces.totalWastedChars}`,
       ...bounceExts.map(

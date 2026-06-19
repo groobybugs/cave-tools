@@ -77,11 +77,12 @@ if (skillContent) {
     'ACTIVE EVERY RESPONSE. Off only: `/cave-tools off` or "stop cave-tools".\n\n' +
     'Current level: **' + mode + '**. Switch: `/cave-tools off|hint|enforce|strict`.\n\n' +
     '## Rules\n\n' +
-    '- `cave__read` instead of Read — dedup cache + Flint Chipper line budgets.\n' +
+    '- `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).\n' +
     '- `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.\n' +
     '- `cave__bash` instead of Bash — RTK rewriting + Stone Tablet + Flint Chipper.\n' +
     '- Never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).\n' +
-    '- After editing a file outside Cave Tools, call `cave__write` with the changed path(s) to invalidate the read dedup cache.\n' +
+    '- `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace-tolerant matching).\n' +
+    '- After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next cave__read returns fresh content.\n' +
     '- Use `cave__compress` for large pasted or tool-produced text.\n' +
     '- Use `cave__status` to inspect savings, hit rate, budgets.\n\n' +
     '## Edit Safety\n\n' +

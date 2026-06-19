@@ -7,6 +7,7 @@ import { lsTool } from "./dist/tools/ls.js";
 import { readTool } from "./dist/tools/read.js";
 import { statusTool } from "./dist/tools/status.js";
 import { writeTool } from "./dist/tools/write.js";
+import { invalidateTool } from "./dist/tools/invalidate.js";
 import {
   compactJson,
   compactJsonl,
@@ -359,8 +360,8 @@ async function test() {
     writeFileSync(hintFile2, "function myFunction() {\n  return 42;\n}\n", "utf-8");
     const hintResult2 = await editTool.handler({
       file_path: hintFile2,
-      old_string: "  function myFunction() {",
-      new_string: "  function myFunc() {",
+      old_string: "function notHere() {",
+      new_string: "function gone() {",
     });
     assert.equal(hintResult2.isError, true);
     assert.match(hintResult2.content[0].text, /Closest match at line 1/);
@@ -403,6 +404,58 @@ async function test() {
     rmSync(editImproveDir, { recursive: true, force: true });
   }
   console.log("cave__edit improvements tests passed");
+  console.log();
+
+  console.log("6e. Testing cave__edit fuzzy replacers:");
+  const fuzzyDir = mkdtempSync(join(tmpdir(), "cave-edit-fuzzy-"));
+  try {
+    // LineTrimmed / IndentationFlexible: leading-indent drift.
+    const indentFile = join(fuzzyDir, "indent.txt");
+    writeFileSync(indentFile, "function f() {\n        return 1;\n}\n", "utf-8");
+    const indentResult = await editTool.handler({
+      file_path: indentFile,
+      old_string: "return 1;", // no indentation supplied
+      new_string: "return 2;",
+    });
+    assert.equal(indentResult.isError, undefined, `indent drift should match: ${indentResult.content[0].text}`);
+    assert.ok(readFileSync(indentFile, "utf-8").includes("return 2;"));
+
+    // WhitespaceNormalized: collapsed inner whitespace.
+    const wsNormFile = join(fuzzyDir, "wsnorm.txt");
+    writeFileSync(wsNormFile, "const   x   =   1;\n", "utf-8");
+    const wsNormResult = await editTool.handler({
+      file_path: wsNormFile,
+      old_string: "const x = 1;",
+      new_string: "const x = 2;",
+    });
+    assert.equal(wsNormResult.isError, undefined, `whitespace-normalized should match: ${wsNormResult.content[0].text}`);
+    assert.ok(readFileSync(wsNormFile, "utf-8").includes("const x = 2;"));
+
+    // BlockAnchor: interior line drifted, anchors intact.
+    const blockFile = join(fuzzyDir, "block.txt");
+    writeFileSync(blockFile, "if (cond) {\n  doSomethingElse();\n}\n", "utf-8");
+    const blockResult = await editTool.handler({
+      file_path: blockFile,
+      old_string: "if (cond) {\n  doSomething();\n}",
+      new_string: "if (cond) {\n  done();\n}",
+    });
+    assert.equal(blockResult.isError, undefined, `block-anchor should match: ${blockResult.content[0].text}`);
+    assert.ok(readFileSync(blockFile, "utf-8").includes("done();"));
+
+    // EscapeNormalized: literal \n escape sequences in old_string.
+    const escFile = join(fuzzyDir, "esc.txt");
+    writeFileSync(escFile, "line one\nline two\n", "utf-8");
+    const escResult = await editTool.handler({
+      file_path: escFile,
+      old_string: "line one\\nline two",
+      new_string: "changed",
+    });
+    assert.equal(escResult.isError, undefined, `escape-normalized should match: ${escResult.content[0].text}`);
+    assert.ok(readFileSync(escFile, "utf-8").includes("changed"));
+  } finally {
+    rmSync(fuzzyDir, { recursive: true, force: true });
+  }
+  console.log("cave__edit fuzzy replacer tests passed");
   console.log();
 
   console.log("6c. Testing cave__read force parameter:");
@@ -456,63 +509,79 @@ async function test() {
   console.log("7. Testing cave__write:");
   const writeDir = mkdtempSync(join(tmpdir(), "cave-write-"));
   try {
-    const filePath = join(writeDir, "sample.txt");
-    writeFileSync(filePath, "keep me", "utf-8");
-
-    const invalidateResult = await writeTool.handler({
-      file_paths: [filePath],
+    // Create a new file via content.
+    const newFile = join(writeDir, "new.txt");
+    const createResult = await writeTool.handler({
+      file_path: newFile,
+      content: "hello world",
     });
-    assert.equal(invalidateResult.isError, undefined);
-    assert.match(invalidateResult.content[0].text, /Invalidated cache/);
-    assert.equal(readFileSync(filePath, "utf-8"), "keep me");
+    assert.equal(createResult.isError, undefined);
+    assert.match(createResult.content[0].text, /Wrote 11 chars/);
+    assert.equal(readFileSync(newFile, "utf-8"), "hello world");
 
+    // Overwrite an existing file.
+    const overwriteResult = await writeTool.handler({
+      file_path: newFile,
+      content: "replaced",
+    });
+    assert.equal(overwriteResult.isError, undefined);
+    assert.equal(readFileSync(newFile, "utf-8"), "replaced");
+
+    // content: "" now writes an empty file (no longer a cache-only no-op).
+    const emptyContentFile = join(writeDir, "empty.txt");
+    writeFileSync(emptyContentFile, "to be cleared", "utf-8");
     const emptyContentResult = await writeTool.handler({
-      file_paths: [filePath],
+      file_path: emptyContentFile,
       content: "",
     });
     assert.equal(emptyContentResult.isError, undefined);
-    assert.match(emptyContentResult.content[0].text, /Invalidated cache/);
-    assert.equal(readFileSync(filePath, "utf-8"), "keep me");
+    assert.equal(readFileSync(emptyContentFile, "utf-8"), "");
 
-    const file2 = join(writeDir, "sample2.txt");
-    writeFileSync(file2, "data", "utf-8");
-    const multiEmptyResult = await writeTool.handler({
-      file_paths: [filePath, file2],
-      content: "",
-    });
-    assert.equal(multiEmptyResult.isError, undefined);
-    assert.match(multiEmptyResult.content[0].text, /Invalidated cache for 2/);
-    assert.equal(readFileSync(filePath, "utf-8"), "keep me");
-    assert.equal(readFileSync(file2, "utf-8"), "data");
-
+    // truncate empties a file.
     const truncateFile = join(writeDir, "truncate.txt");
     writeFileSync(truncateFile, "will be emptied", "utf-8");
     const truncateResult = await writeTool.handler({
-      file_paths: [truncateFile],
+      file_path: truncateFile,
       truncate: true,
     });
     assert.equal(truncateResult.isError, undefined);
     assert.match(truncateResult.content[0].text, /Truncated/);
     assert.equal(readFileSync(truncateFile, "utf-8"), "");
 
-    const truncateMultiResult = await writeTool.handler({
-      file_paths: [filePath, file2],
-      truncate: true,
-    });
-    assert.equal(truncateMultiResult.isError, true);
-    assert.match(truncateMultiResult.content[0].text, /truncate.*requires exactly one path/);
-
-    const contentMultiResult = await writeTool.handler({
-      file_paths: [filePath, file2],
-      content: "some text",
-    });
-    assert.equal(contentMultiResult.isError, true);
-    assert.match(contentMultiResult.content[0].text, /content.*requires exactly one path/);
-    assert.match(contentMultiResult.content[0].text, /omit.*content/);
+    // Neither content nor truncate is an error (points at cave__invalidate).
+    const noOpResult = await writeTool.handler({ file_path: newFile });
+    assert.equal(noOpResult.isError, true);
+    assert.match(noOpResult.content[0].text, /cave__invalidate/);
   } finally {
     rmSync(writeDir, { recursive: true, force: true });
   }
   console.log("cave__write tests passed");
+  console.log();
+
+  console.log("7b. Testing cave__invalidate:");
+  const invalidateDir = mkdtempSync(join(tmpdir(), "cave-invalidate-"));
+  try {
+    const fileA = join(invalidateDir, "a.txt");
+    const fileB = join(invalidateDir, "b.txt");
+    writeFileSync(fileA, "keep a", "utf-8");
+    writeFileSync(fileB, "keep b", "utf-8");
+
+    const multiResult = await invalidateTool.handler({
+      file_paths: [fileA, fileB],
+    });
+    assert.equal(multiResult.isError, undefined);
+    assert.match(multiResult.content[0].text, /Invalidated cache for 2/);
+    // No disk writes.
+    assert.equal(readFileSync(fileA, "utf-8"), "keep a");
+    assert.equal(readFileSync(fileB, "utf-8"), "keep b");
+
+    const emptyResult = await invalidateTool.handler({ file_paths: [] });
+    assert.equal(emptyResult.isError, true);
+    assert.match(emptyResult.content[0].text, /non-empty array/);
+  } finally {
+    rmSync(invalidateDir, { recursive: true, force: true });
+  }
+  console.log("cave__invalidate tests passed");
   console.log();
 
   // Test status

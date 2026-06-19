@@ -9,6 +9,7 @@ import {
 import { readTool } from "./tools/read.js";
 import { bashTool } from "./tools/bash.js";
 import { writeTool } from "./tools/write.js";
+import { invalidateTool } from "./tools/invalidate.js";
 import { compressTool } from "./tools/compress.js";
 import { statusTool } from "./tools/status.js";
 import { configureTool } from "./tools/configure.js";
@@ -37,6 +38,7 @@ const tools: Tool[] = [
   findTool,
   lsTool,
   writeTool,
+  invalidateTool,
   editTool,
   compressTool,
   statusTool,
@@ -61,6 +63,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ) as Promise<CallToolResult>;
     case "cave__write":
       return writeTool.handler(
+        args as Record<string, unknown>,
+      ) as Promise<CallToolResult>;
+    case "cave__invalidate":
+      return invalidateTool.handler(
         args as Record<string, unknown>,
       ) as Promise<CallToolResult>;
     case "cave__edit":

@@ -1,15 +1,17 @@
 # Cave Tools — token-optimized MCP
 
-Cave Tools wraps shell + file ops with RTK rewriting, Stone Tablet JSON/XML
-compression, and Flint Chipper line budgets. Prefer these over built-ins.
+Cave Tools provides optimized drop-in replacements for shell + file ops (RTK
+rewriting, structured JSON/XML extraction, per-tool line budgets). They return the
+same results for fewer tokens. Prefer these over built-ins.
 
 ## Tools
-- `cave__read` instead of Read — dedup cache + line-budget compression.
+- `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).
 - `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
-- `cave__bash` instead of Bash for every command — RTK + Stone Tablet + Flint Chipper.
-- `cave__compress` to compress large pasted or tool-produced text.
+- `cave__bash` instead of Bash for every command — optimized drop-in replacement (RTK + structured extraction + line budgets).
+- `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - `cave__status` to inspect savings, cache hit rate, reduction % + budgets.
-- After editing a file outside Cave Tools, call `cave__write` to invalidate the read dedup cache.
+- `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace-tolerant matching).
+- After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) to refresh the read dedup cache.
 
 ## Rules
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
@@ -22,7 +24,7 @@ compression, and Flint Chipper line budgets. Prefer these over built-ins.
 - Built-in `Update` / `Edit` requires the same file path to be read earlier in the session; otherwise it fails with `File must be read first`.
 - Do not batch read and edit calls in parallel. Read must complete before edit.
 - Prefer `cave__read` for inspection, then `cave__edit` or `apply_patch` for edits.
-- Use `cave__write` without `content` only to invalidate cache after edits made outside Cave Tools. Passing `content: ""` writes an empty file.
+- `cave__write` always writes to disk (`content`, or `truncate: true` for an empty file). For cache-only invalidation after external edits, use `cave__invalidate`.
 
 ## Savings
 Run `cave-tools status` (CLI) or `cave__status` (MCP) for reduction % and an

@@ -47,15 +47,15 @@ case "$TOOL" in
     case "$FPATH" in
       *.png|*.jpg|*.jpeg|*.gif|*.webp|*.bmp|*.ico|*.pdf|*.svg) exit 0 ;;
     esac
-    echo "BLOCKED: Use cave__read instead of Read. Cave-tools provides dedup + Flint Chipper compression." >&2
+    echo "BLOCKED: Use cave__read instead of Read — it's the optimized drop-in replacement (dedup + line budgets)." >&2
     exit 2
     ;;
   Grep)
-    echo "BLOCKED: Use cave__grep instead of Grep. Cave-tools provides ripgrep with Flint Chipper budgets." >&2
+    echo "BLOCKED: Use cave__grep instead of Grep — it's the optimized drop-in replacement (ripgrep + line budgets)." >&2
     exit 2
     ;;
   Glob)
-    echo "BLOCKED: Use cave__find instead of Glob. Cave-tools provides fd-based search with compression." >&2
+    echo "BLOCKED: Use cave__find instead of Glob — it's the optimized drop-in replacement (fd-based search)." >&2
     exit 2
     ;;
   Edit|Write)

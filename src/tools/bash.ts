@@ -75,7 +75,7 @@ export const bashTool: Tool & {
 } = {
   name: "cave__bash",
   description:
-    "Run a shell command with RTK rewriting + Stone Tablet + Flint Chipper compression. Tries RTK command rewriting internally where applicable. Sensitive tokens and keys are redacted from output by default.",
+    "Optimized drop-in replacement for the built-in shell tool. Runs the same command and returns its output, applying RTK command rewriting where available and trimming noisy output to the essentials. Sensitive tokens and keys are redacted from output by default.",
   inputSchema: {
     type: "object",
     properties: {

@@ -1,7 +1,7 @@
 {
   "name": "@groobybugs/cave-tools",
   "version": "0.4.3",
-  "description": "A caveman needs their tools. Token-compression MCP server for any agent.",
+  "description": "A caveman needs their tools. Token-optimized MCP server providing drop-in replacements for any agent.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -104,7 +104,7 @@ process.stdin.on('end', () => {
 function buildReminder(mode) {
   const base = 'CAVE-TOOLS MODE ACTIVE (' + mode + '). ' +
     'Prefer cave__read / cave__bash / cave__grep / cave__find / cave__ls over built-ins. ' +
-    'Call cave__write (no content) to invalidate cache after external edits. ' +
+    'Call cave__invalidate to refresh cache after external edits; cave__write to create/overwrite files. ' +
     'Never run `rtk <cmd>` inside cave__bash (already prepended).';
   if (mode === 'strict') {
     return base + ' STRICT: built-in Edit/Write also requires a prior cave__read of the target.';

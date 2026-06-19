@@ -247,16 +247,18 @@ function readSessionStats(): SessionStats[] {
 
 const CAVE_INSTRUCTIONS = `# Cave Tools — token-optimized MCP
 
-Cave Tools wraps shell + file ops with RTK rewriting, Stone Tablet JSON/XML
-compression, and Flint Chipper line budgets. Prefer these over built-ins.
+Cave Tools provides optimized drop-in replacements for shell + file ops (RTK
+rewriting, structured JSON/XML extraction, per-tool line budgets). Same results,
+fewer tokens. Prefer these over built-ins.
 
 ## Tools
-- \`cave__read\` instead of Read — dedup cache + line-budget compression.
+- \`cave__read\` instead of Read — optimized drop-in replacement (dedup cache + line budgets).
 - \`cave__grep\`, \`cave__find\`, \`cave__ls\` instead of shell/Glob/Grep.
-- \`cave__bash\` instead of Bash for every command — RTK + Stone Tablet + Flint Chipper.
-- \`cave__compress\` to compress large pasted or tool-produced text.
+- \`cave__bash\` instead of Bash for every command — optimized drop-in replacement (RTK + structured extraction + line budgets).
+- \`cave__compress\` to optimize large pasted or tool-produced text down to fewer tokens.
 - \`cave__status\` to inspect savings, cache hit rate, reduction % + budgets.
-- After editing a file outside Cave Tools, call \`cave__write\` to invalidate the read dedup cache.
+- \`cave__write\` to create/overwrite a single file; \`cave__edit\` for fuzzy string replacement.
+- After editing a file outside Cave Tools, call \`cave__invalidate\` to refresh the read dedup cache.
 
 ## Rules
 - Do not double-wrap: never run \`rtk <cmd>\` inside \`cave__bash\` (it already prepends rtk).
@@ -319,10 +321,10 @@ if (args[0] === "mcp" || args.length === 0) {
       `  Already wrapped: ${summary.rtkAlreadyWrapped}`,
       `  Passthrough:     ${summary.rtkPassthrough}`,
       "",
-      "Compression (output trimming):",
+      "Output trimming:",
       `  Calls:            ${summary.totalCalls}`,
       `  Raw chars:        ${summary.rawChars}`,
-      `  Compressed chars: ${summary.compressedChars}`,
+      `  Trimmed chars:    ${summary.compressedChars}`,
       `  Saved chars:      ${summary.compressionSavedChars}`,
       `  Reduction:        ${summary.reductionPct.toFixed(1)}%`,
       `  Meter: ${efficiencyMeter(summary.reductionPct)} ${summary.reductionPct.toFixed(1)}%`,

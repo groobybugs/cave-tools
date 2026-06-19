@@ -10,7 +10,7 @@ Keep your favorite agent. Give it better tools.
 
 ## What This Is
 
-Cave Tools implements the portable compression/tool layer from Caveman Code:
+Cave Tools implements the portable token-optimization tool layer from Caveman Code. The MCP tools are optimized drop-in replacements for the built-ins — same results, fewer tokens. Internally that uses these layers:
 
 | Layer         | What it does                                                                                                                 |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------------- |
@@ -116,14 +116,15 @@ All tool names use the MCP names exported by the server.
 
 | Tool              | Purpose                                                                                   | Caveman Code parity                                                 |
 | ----------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `cave__read`      | Read files with dedup + Flint Chipper. Reads images (`.png/.jpg/.jpeg/.gif/.webp/.bmp/.svg`) as MCP image content (base64, up to 5 MB). | Based on `read`, plus standalone dedup cache + image support.       |
-| `cave__bash`      | Run shell commands with RTK rewrite + Stone Tablet + Flint Chipper. Supports opt-in soft failures via `allowFailure`. | Based on `bash` compression behavior, not permission/TUI handling.  |
+| `cave__read`      | Optimized drop-in replacement for Read (dedup + line budgets). Reads images (`.png/.jpg/.jpeg/.gif/.webp/.bmp/.svg`) as MCP image content (base64, up to 5 MB). | Based on `read`, plus standalone dedup cache + image support.       |
+| `cave__bash`      | Optimized drop-in replacement for the shell tool (RTK rewrite + structured extraction + line budgets). Supports opt-in soft failures via `allowFailure`. | Based on `bash` output behavior, not permission/TUI handling.  |
 | `cave__grep`      | Search file contents with `rg --json`, match limits, context lines, long-line truncation. | Based on `grep`.                                                    |
 | `cave__find`      | Find files by glob with `fd` when available, Node fallback, relative paths, result limit. | Based on `find`.                                                    |
 | `cave__ls`        | List directory entries, sorted, directories suffixed with `/`.                            | Based on `ls`.                                                      |
-| `cave__edit`      | Exact string replacement in a file (like built-in Edit). Auto-invalidates dedup cache.    | Cave Tools-specific edit tool.                                      |
-| `cave__write`     | Write file content (create/overwrite) and/or invalidate the read dedup cache.             | Cave Tools-specific write/cache tool.                               |
-| `cave__compress`  | Compress arbitrary text through Stone Tablet + Flint Chipper.                             | Cave Tools-specific helper.                                         |
+| `cave__edit`      | String replacement in a file (fuzzy whitespace/indentation-tolerant matching). Auto-invalidates dedup cache. | Cave Tools-specific edit tool.                                      |
+| `cave__write`     | Write a single file (create/overwrite, or `truncate` to empty). Auto-invalidates dedup cache. | Cave Tools-specific write tool.                                     |
+| `cave__invalidate`| Invalidate the read dedup cache for one or more paths without touching disk.              | Cave Tools-specific cache tool.                                    |
+| `cave__compress`  | Optimize arbitrary text down to fewer tokens (structured extraction + line budgets).     | Cave Tools-specific helper.                                         |
 | `cave__status`    | Show RTK availability, cache stats, and budgets.                                          | Cave Tools-specific helper.                                         |
 | `cave__configure` | Change line budgets for the current MCP session.                                          | Cave Tools-specific helper.                                         |
 
@@ -134,13 +135,13 @@ Use this instruction block in agent rules:
 ```md
 # Cave Tools MCP
 
-- Use `cave__read` instead of the built-in read tool for file reads. It applies read dedup and Flint Chipper line-budget compression.
-- Use `cave__grep`, `cave__find`, and `cave__ls` instead of shell commands for file exploration when available. They respect ignore rules where the underlying tools do and return compressed output.
-- Use `cave__bash` instead of the built-in shell tool for commands. It tries RTK command rewriting when `rtk` is available, then applies Stone Tablet JSON/XML compression and Flint Chipper output budgets.
-- After using any edit/write tool outside Cave Tools, call `cave__write` with the changed file path(s) to invalidate the read dedup cache.
-- Use `cave__compress` to compress large pasted or tool-produced text.
+- Use `cave__read` instead of the built-in read tool for file reads. Optimized drop-in replacement (read dedup + line budgets).
+- Use `cave__grep`, `cave__find`, and `cave__ls` instead of shell commands for file exploration when available. Optimized drop-in replacements that respect ignore rules and trim output to a line budget.
+- Use `cave__bash` instead of the built-in shell tool for commands. Optimized drop-in replacement: tries RTK command rewriting when `rtk` is available, then structured JSON/XML extraction and output budgets.
+- After using any edit/write tool outside Cave Tools, call `cave__invalidate` with the changed file path(s) to refresh the read dedup cache.
+- Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - Use `cave__status` to check RTK availability, cache state, and budget settings when the user asks about savings.
-- These tools are the compression layer. Do not wrap them in extra Python/scripts; pass file paths, search patterns, or commands directly.
+- These tools are the optimized replacement layer. Do not wrap them in extra Python/scripts; pass file paths, search patterns, or commands directly.
 
 ## Edit Safety
 - In Plan Mode / read-only phase, never call write-capable tools: `Update`, `Edit`, `apply_patch`, `cave__edit`, `cave__write`, or shell commands that modify files.
@@ -148,7 +149,7 @@ Use this instruction block in agent rules:
 - Built-in `Update` / `Edit` requires the same file path to be read earlier in the session; otherwise it fails with `File must be read first`.
 - Do not batch read and edit calls in parallel. Read must complete before edit.
 - Prefer `cave__read` for inspection, then `cave__edit` or `apply_patch` for edits.
-- Use `cave__write` without `content` only to invalidate cache after edits made outside Cave Tools. Passing `content: ""` writes an empty file.
+- `cave__write` always writes to disk (`content`, or `truncate: true` for an empty file). For cache-only invalidation after external edits, use `cave__invalidate`.
 ```
 
 ## Enforcing Cave Tools (Hooks / Permissions)
@@ -203,15 +204,15 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
        case "$FPATH" in
          *.png|*.jpg|*.jpeg|*.gif|*.webp|*.bmp|*.svg|*.pdf) exit 0 ;;
        esac
-       echo "BLOCKED: Use cave__read instead of Read. Cave-tools provides dedup + Flint Chipper compression." >&2
+       echo "BLOCKED: Use cave__read instead of Read — it's the optimized drop-in replacement (dedup + line budgets)." >&2
        exit 2
        ;;
      Grep)
-       echo "BLOCKED: Use cave__grep instead of Grep. Cave-tools provides ripgrep with Flint Chipper budgets." >&2
+       echo "BLOCKED: Use cave__grep instead of Grep — it's the optimized drop-in replacement (ripgrep + line budgets)." >&2
        exit 2
        ;;
      Glob)
-       echo "BLOCKED: Use cave__find instead of Glob. Cave-tools provides fd-based search with compression." >&2
+       echo "BLOCKED: Use cave__find instead of Glob — it's the optimized drop-in replacement (fd-based search)." >&2
        exit 2
        ;;
    esac
@@ -346,7 +347,7 @@ Invalidate cache after edits:
 
 Cave Tools is a fork/extraction of the tool layer from [Caveman Code](https://github.com/JuliusBrussee/caveman-code). It does not implement subagents, memory, editing, planning, or the TUI — only MCP tools other agents can call.
 
-Use Caveman Code if you want the full coding agent. Use Cave Tools if you want the compression tools inside Claude Code, Gemini CLI, Antigravity, Kiro CLI, Cursor, opencode, Codex, or another MCP client.
+Use Caveman Code if you want the full coding agent. Use Cave Tools if you want the optimized drop-in replacement tools inside Claude Code, Gemini CLI, Antigravity, Kiro CLI, Cursor, opencode, Codex, or another MCP client.
 
 ## License
 

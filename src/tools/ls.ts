@@ -11,7 +11,7 @@ export const lsTool: Tool & {
 } = {
   name: "cave__ls",
   description:
-    "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is compressed with Flint Chipper budgets.",
+    "Optimized drop-in replacement for listing a directory. Returns entries sorted alphabetically, with '/' suffix for directories, includes dotfiles, and trims output to a line budget.",
   inputSchema: {
     type: "object",
     properties: {

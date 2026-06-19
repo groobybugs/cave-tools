@@ -105,7 +105,7 @@ export const findTool: Tool & {
 } = {
   name: "cave__find",
   description:
-    "Search for files by glob pattern using fd when available, with a Node fallback. Returns matching file paths relative to the search directory. Output is compressed with Flint Chipper budgets.",
+    "Optimized drop-in replacement for the built-in Glob/find (fd when available, Node fallback). Returns matching file paths relative to the search directory, with output trimmed to a line budget.",
   inputSchema: {
     type: "object",
     properties: {

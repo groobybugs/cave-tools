@@ -8,13 +8,13 @@ export const compressTool: Tool & {
 } = {
   name: "cave__compress",
   description:
-    "Compress any text through the full pipeline: ANSI stripping, blank line collapse, Flint Chipper, and optional Stone Tablet structured extraction. Use action='expand' with archive_id to retrieve a large archived output.",
+    "Reduce arbitrary text to fewer tokens through the full pipeline: ANSI stripping, blank-line collapse, line budgeting, and optional structured JSON/XML extraction. Use action='expand' with archive_id to retrieve a large archived output.",
   inputSchema: {
     type: "object",
     properties: {
       text: {
         type: "string",
-        description: "The text to compress",
+        description: "The text to optimize",
       },
       command_hint: {
         type: "string",
@@ -23,7 +23,7 @@ export const compressTool: Tool & {
       },
       structured: {
         type: "boolean",
-        description: "Whether to apply Stone Tablet JSON/XML extraction",
+        description: "Whether to apply structured JSON/XML extraction",
         default: true,
       },
       tool_name: {
@@ -34,7 +34,7 @@ export const compressTool: Tool & {
       action: {
         type: "string",
         enum: ["compress", "expand"],
-        description: "Action: compress text (default) or expand an archive_id",
+        description: "Action: optimize text (default) or expand an archive_id",
         default: "compress",
       },
       archive_id: {

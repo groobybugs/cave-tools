@@ -34,7 +34,7 @@ export const readTool: Tool & {
 } = {
   name: "cave__read",
   description:
-    "Read a file with dedup + Flint Chipper compression. Returns a stub if the file hasn't changed since the last read in the same session. Image files (.png, .jpg, .jpeg, .gif, .webp, .bmp, .svg) are returned as image content blocks (base64); offset/limit are ignored for images, signatures, and aggressive modes. Use mode='signatures' to extract function/class/type signatures only (TS/JS/Rust). Use mode='aggressive' to strip comments and blank lines.",
+    "Optimized drop-in replacement for the built-in Read. Returns the same file content, but sends a stub when the file is unchanged since the last read in this session (skips re-sending identical content). Image files (.png, .jpg, .jpeg, .gif, .webp, .bmp, .svg) are returned as image content blocks (base64); offset/limit are ignored for images, signatures, and aggressive modes. Use mode='signatures' to return only function/class/type signatures (TS/JS/Rust). Use mode='aggressive' to drop comments and blank lines.",
   inputSchema: {
     type: "object",
     properties: {

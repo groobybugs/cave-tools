@@ -19,7 +19,7 @@ export const grepTool: Tool & {
 } = {
   name: "cave__grep",
   description:
-    "Search file contents using ripgrep. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is compressed with Flint Chipper budgets.",
+    "Optimized drop-in replacement for the built-in Grep (ripgrep). Returns matching lines with file paths and line numbers, respects .gitignore, with output trimmed to a line budget.",
   inputSchema: {
     type: "object",
     properties: {

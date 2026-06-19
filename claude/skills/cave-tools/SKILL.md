@@ -7,7 +7,7 @@ description: >
   or whenever file/shell operations are needed.
 ---
 
-Prefer cave-tools over built-in Read/Grep/Glob/Bash. RTK rewriting + Stone Tablet JSON/XML compression + Flint Chipper line budgets + read dedup cache.
+Prefer cave-tools over built-in Read/Grep/Glob/Bash. They are optimized drop-in replacements that return the same results for fewer tokens (RTK rewriting + structured JSON/XML extraction + per-tool line budgets + read dedup cache).
 
 ## Persistence
 
@@ -17,12 +17,13 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 
 ## Rules
 
-- Use `cave__read` instead of Read — dedup cache + Flint Chipper line-budget compression. Since 0.2.0 also returns image files (png/jpg/jpeg/gif/webp/bmp/svg up to 5 MB) as MCP image blocks.
+- Use `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets). Since 0.2.0 also returns image files (png/jpg/jpeg/gif/webp/bmp/svg up to 5 MB) as MCP image blocks.
 - Use `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
-- Use `cave__bash` instead of Bash. Tries `rtk rewrite <cmd>` when RTK available, then applies Stone Tablet JSON/XML compression + Flint Chipper line budgets.
+- Use `cave__bash` instead of Bash — optimized drop-in replacement. Tries `rtk rewrite <cmd>` when RTK available, then applies structured JSON/XML extraction + line budgets.
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
-- After editing a file outside Cave Tools, call `cave__write` with the changed path(s) — no `content` — to invalidate the read dedup cache.
-- Use `cave__compress` for large pasted or tool-produced text.
+- Use `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace/indentation-tolerant matching).
+- After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next `cave__read` returns fresh content (not a stub).
+- Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - Use `cave__status` to check RTK availability, cache state, savings %, budgets.
 - Pass raw file paths / patterns / commands. Do not wrap cave-tools calls in extra Python/shell scripts.
 - Fall back to built-in Bash only for background processes, stream monitors, or hook-sensitive stdin.
@@ -43,7 +44,7 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 - In Plan Mode / read-only phase, never call write-capable tools: `Update`, `Edit`, `apply_patch`, `cave__edit`, `cave__write`, or shell commands that modify files.
 - Do not batch read and edit calls in parallel. Read must complete before edit.
 - Prefer `cave__read` for inspection, then `cave__edit` or built-in `Edit` for changes.
-- Use `cave__write` without `content` only to invalidate cache after edits made outside Cave Tools. Passing `content: ""` writes an empty file.
+- `cave__write` always writes to disk (`content`, or `truncate: true` for an empty file). For cache-only invalidation after external edits, use `cave__invalidate` — it never touches disk.
 
 ## Examples
 
@@ -57,7 +58,7 @@ Not: `Grep("pattern", "src/")`
 Yes: `cave__grep({pattern: "pattern", path: "src/"})`
 
 Not: editing `foo.ts` with built-in Edit after `cave__read` saw a cached stub
-Yes: `cave__read` returns stub → edit with built-in Edit → call `cave__write({file_paths:["/abs/foo.ts"]})` to invalidate cache
+Yes: `cave__read` returns stub → edit with built-in Edit → call `cave__invalidate({file_paths:["/abs/foo.ts"]})` to refresh cache
 
 ## Savings
 
