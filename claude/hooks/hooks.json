@@ -1,5 +1,5 @@
 {
-  "description": "cave-tools auto-init: SessionStart skill injection, per-turn reinforcement, PreToolUse redirect, statusline refresh.",
+  "description": "cave-tools auto-init: SessionStart skill injection, SubagentStart injection, per-turn reinforcement, PreToolUse redirect, statusline refresh.",
   "hooks": {
     "SessionStart": [
       {
@@ -17,6 +17,18 @@
             "args": ["status", "--emit-statusline"],
             "timeout": 3,
             "async": true
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-subagent.js"],
+            "timeout": 5
           }
         ]
       }

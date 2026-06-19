@@ -11,7 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { getDefaultMode, safeWriteFlag } = require('./cave-tools-config');
+const { getDefaultMode, safeWriteFlag, buildRuleset } = require('./cave-tools-config');
 
 const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const flagPath = path.join(claudeDir, '.cave-tools-active');
@@ -29,65 +29,9 @@ if (mode === 'off') {
 // 1. Write flag file (symlink-safe)
 safeWriteFlag(flagPath, mode);
 
-// 2. Emit cave-tools ruleset.
-//    Reads SKILL.md at runtime so edits to the source of truth propagate
-//    automatically — no hardcoded duplication to go stale.
-//
-//    Plugin installs: __dirname = <plugin_root>/hooks/, SKILL.md at <plugin_root>/skills/cave-tools/SKILL.md
-//    Standalone installs: SKILL.md may live at $CLAUDE_CONFIG_DIR/skills/cave-tools/SKILL.md.
-//    Falls back to a hardcoded mini-ruleset if not found.
-
-const skillCandidates = [
-  path.join(__dirname, '..', 'skills', 'cave-tools', 'SKILL.md'),
-  path.join(claudeDir, 'skills', 'cave-tools', 'SKILL.md'),
-];
-
-let skillContent = '';
-for (const candidate of skillCandidates) {
-  try {
-    skillContent = fs.readFileSync(candidate, 'utf8');
-    if (skillContent) break;
-  } catch (e) { /* try next */ }
-}
-
-let output;
-
-if (skillContent) {
-  // Strip YAML frontmatter
-  const body = skillContent.replace(/^---[\s\S]*?---\s*/, '');
-
-  // Filter intensity table: keep header rows + only the active level's row
-  const filtered = body.split('\n').reduce((acc, line) => {
-    const tableRowMatch = line.match(/^\|\s*\*\*(\S+?)\*\*\s*\|/);
-    if (tableRowMatch) {
-      if (tableRowMatch[1] === mode) acc.push(line);
-      return acc;
-    }
-    acc.push(line);
-    return acc;
-  }, []);
-
-  output = 'CAVE-TOOLS MODE ACTIVE — level: ' + mode + '\n\n' + filtered.join('\n');
-} else {
-  // Fallback when SKILL.md is not found.
-  output =
-    'CAVE-TOOLS MODE ACTIVE — level: ' + mode + '\n\n' +
-    'Prefer cave-tools over built-in Read/Grep/Glob/Bash.\n\n' +
-    '## Persistence\n\n' +
-    'ACTIVE EVERY RESPONSE. Off only: `/cave-tools off` or "stop cave-tools".\n\n' +
-    'Current level: **' + mode + '**. Switch: `/cave-tools off|hint|enforce|strict`.\n\n' +
-    '## Rules\n\n' +
-    '- `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).\n' +
-    '- `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.\n' +
-    '- `cave__bash` instead of Bash — RTK rewriting + Stone Tablet + Flint Chipper.\n' +
-    '- Never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).\n' +
-    '- `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace-tolerant matching).\n' +
-    '- After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next cave__read returns fresh content.\n' +
-    '- Use `cave__compress` for large pasted or tool-produced text.\n' +
-    '- Use `cave__status` to inspect savings, hit rate, budgets.\n\n' +
-    '## Edit Safety\n\n' +
-    'In Plan Mode / read-only phase, never call write tools. Before any edit, read the exact target path first. Do not batch read+edit in parallel.';
-}
+// 2. Emit cave-tools ruleset (shared builder — single source of truth, reused
+//    by the SubagentStart hook).
+let output = 'CAVE-TOOLS MODE ACTIVE — level: ' + mode + '\n\n' + buildRuleset(mode);
 
 // 3. Detect missing statusline config — nudge Claude to help set it up.
 //    Only nudge if no statusline configured at all. If caveman owns it, we'll

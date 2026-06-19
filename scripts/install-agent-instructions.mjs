@@ -248,6 +248,31 @@ function installOpencodeMcp() {
   log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${configPath} mcp.cave-tools`);
 
   upsertFencedBlock(path.join(configDir, 'AGENTS.md'), CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
+
+  // opencode has no SubagentStart hook and no PreToolUse redirect (both are
+  // Claude-only). A subagent's system prompt comes from its .opencode/agent/*.md
+  // def and isn't guaranteed to inherit AGENTS.md — so inject the full ruleset
+  // block into each agent def to reach opencode subagents too. Idempotent via
+  // the cave-tools markers.
+  injectOpencodeAgentDefs([
+    path.join(configDir, 'agent'),
+    path.join(process.cwd(), '.opencode', 'agent'),
+  ]);
+}
+
+function injectOpencodeAgentDefs(agentDirs) {
+  for (const dir of agentDirs) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch (e) {
+      continue; // dir doesn't exist — nothing to patch
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.md')) continue;
+      upsertFencedBlock(path.join(dir, entry), CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
+    }
+  }
 }
 
 function claudeMcpJsonPath() {
@@ -492,6 +517,7 @@ function installCaveToolsClaudeHooks() {
   const files = [
     ['hooks/cave-tools-config.js', path.join(hooksDir, 'cave-tools-config.js'), 0o644],
     ['hooks/cave-tools-activate.js', path.join(hooksDir, 'cave-tools-activate.js'), 0o755],
+    ['hooks/cave-tools-subagent.js', path.join(hooksDir, 'cave-tools-subagent.js'), 0o755],
     ['hooks/cave-tools-mode-tracker.js', path.join(hooksDir, 'cave-tools-mode-tracker.js'), 0o755],
     ['hooks/cave-tools-statusline.sh', path.join(hooksDir, 'cave-tools-statusline.sh'), 0o755],
     ['hooks/cave-tools-statusline.ps1', path.join(hooksDir, 'cave-tools-statusline.ps1'), 0o644],
@@ -510,6 +536,7 @@ function installCaveToolsClaudeHooks() {
 
   const nodeBin = process.execPath;
   const activatePath = path.join(hooksDir, 'cave-tools-activate.js');
+  const subagentPath = path.join(hooksDir, 'cave-tools-subagent.js');
   const trackerPath = path.join(hooksDir, 'cave-tools-mode-tracker.js');
   const redirectPath = path.join(hooksDir, 'cave-tools-redirect.sh');
 
@@ -518,6 +545,13 @@ function installCaveToolsClaudeHooks() {
     command: `"${nodeBin}" "${activatePath}"`,
     timeout: 5,
     statusMessage: 'Loading cave-tools rules...',
+  });
+  // SessionStart does not fire for subagents; SubagentStart does. Inject the
+  // same ruleset into every spawned subagent (built-in + custom).
+  upsertHookHandler(settings, 'SubagentStart', null, {
+    type: 'command',
+    command: `"${nodeBin}" "${subagentPath}"`,
+    timeout: 5,
   });
   upsertHookHandler(settings, 'SessionStart', null, {
     type: 'command',

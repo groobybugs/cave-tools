@@ -170,6 +170,64 @@ function readFlag(flagPath) {
   }
 }
 
+// Build the cave-tools ruleset text for a given mode.
+//
+// Reads SKILL.md at runtime (source of truth) so edits propagate without
+// hardcoded duplication, strips YAML frontmatter, and filters the intensity
+// table down to the active level's row. Falls back to a compact hardcoded
+// ruleset when SKILL.md can't be found. Shared by the SessionStart activation
+// hook and the SubagentStart hook so the rule text never drifts between them.
+function buildRuleset(mode) {
+  const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  const skillCandidates = [
+    path.join(__dirname, '..', 'skills', 'cave-tools', 'SKILL.md'),
+    path.join(claudeDir, 'skills', 'cave-tools', 'SKILL.md'),
+  ];
+
+  let skillContent = '';
+  for (const candidate of skillCandidates) {
+    try {
+      skillContent = fs.readFileSync(candidate, 'utf8');
+      if (skillContent) break;
+    } catch (e) { /* try next */ }
+  }
+
+  if (skillContent) {
+    // Strip YAML frontmatter
+    const body = skillContent.replace(/^---[\s\S]*?---\s*/, '');
+    // Keep intensity-table header rows + only the active level's row
+    const filtered = body.split('\n').reduce((acc, line) => {
+      const tableRowMatch = line.match(/^\|\s*\*\*(\S+?)\*\*\s*\|/);
+      if (tableRowMatch) {
+        if (tableRowMatch[1] === mode) acc.push(line);
+        return acc;
+      }
+      acc.push(line);
+      return acc;
+    }, []);
+    return filtered.join('\n');
+  }
+
+  // Fallback when SKILL.md is not found.
+  return (
+    'Prefer cave-tools over built-in Read/Grep/Glob/Bash.\n\n' +
+    '## Persistence\n\n' +
+    'ACTIVE EVERY RESPONSE. Off only: `/cave-tools off` or "stop cave-tools".\n\n' +
+    'Current level: **' + mode + '**. Switch: `/cave-tools off|hint|enforce|strict`.\n\n' +
+    '## Rules\n\n' +
+    '- `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).\n' +
+    '- `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.\n' +
+    '- `cave__bash` instead of Bash — RTK rewriting + structured extraction + line budgets.\n' +
+    '- Never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).\n' +
+    '- `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace-tolerant matching).\n' +
+    '- After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next cave__read returns fresh content.\n' +
+    '- Use `cave__compress` for large pasted or tool-produced text.\n' +
+    '- Use `cave__status` to inspect savings, hit rate, budgets.\n\n' +
+    '## Edit Safety\n\n' +
+    'In Plan Mode / read-only phase, never call write tools. Before any edit, read the exact target path first. Do not batch read+edit in parallel.'
+  );
+}
+
 module.exports = {
   VALID_MODES,
   DEFAULT_MODE,
@@ -179,4 +237,5 @@ module.exports = {
   getDefaultMode,
   safeWriteFlag,
   readFlag,
+  buildRuleset,
 };
