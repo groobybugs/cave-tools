@@ -51,16 +51,16 @@ async function test() {
     allowFailure: true,
   });
   assert.equal(bashSoftFailure.isError, undefined);
-  assert.match(bashSoftFailure.content[0].text, /Exit code: 7/);
-  assert.match(bashSoftFailure.content[0].text, /stderr:\nerr/);
-  assert.match(bashSoftFailure.content[0].text, /stdout:\nout/);
+  assert.match(bashSoftFailure.content[0].text, /\[exit: 7\]/);
+  assert.match(bashSoftFailure.content[0].text, /err/);
+  assert.match(bashSoftFailure.content[0].text, /out/);
 
   const bashHardFailure = await bashTool.handler({
     command: "sh -c 'exit 7'",
     description: "Test hard failure command",
   });
   assert.equal(bashHardFailure.isError, true);
-  assert.match(bashHardFailure.content[0].text, /Exit code: 7/);
+  assert.match(bashHardFailure.content[0].text, /\[exit: 7\]/);
 
   // Secret redaction tests
   console.log("1b. Testing secret redaction:");

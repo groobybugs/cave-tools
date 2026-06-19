@@ -9,7 +9,16 @@ export type ImageContent = {
   mimeType: string; // e.g. "image/png"
 };
 
+export type ResourceContent = {
+  type: "resource";
+  resource: {
+    uri: string;
+    mimeType: string; // e.g. "application/pdf"
+    blob: string; // base64-encoded
+  };
+};
+
 export interface ToolResult {
-  content: Array<TextContent | ImageContent>;
+  content: Array<TextContent | ImageContent | ResourceContent>;
   isError?: boolean;
 }

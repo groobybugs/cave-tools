@@ -1,5 +1,5 @@
 import type { ToolResult } from "../types.js";
-import { exec } from "child_process";
+import { spawn } from "child_process";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   applyBudget,
@@ -10,62 +10,72 @@ import { redactSecrets } from "../compression/redact.js";
 import { classifyCommand } from "../compression/classify.js";
 import { archiveIfLarge } from "../compression/archive.js";
 
-function stringifyOutput(value: unknown): string {
-  if (Buffer.isBuffer(value)) return value.toString("utf-8");
-  return typeof value === "string" ? value : "";
+const DEFAULT_TIMEOUT = 120000;
+
+interface RunResult {
+  output: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
 }
 
-function formatCommandError(
-  error: unknown,
+// Streaming runner: captures combined stdout+stderr with no maxBuffer ceiling
+// (large output is handed to archiveIfLarge later), and reliably kills the
+// whole process group on timeout so detached children don't linger.
+function runCommand(
   command: string,
-  rewrittenCommand: string,
-): string {
-  const err = error as NodeJS.ErrnoException & {
-    status?: number;
-    code?: number | string;
-    signal?: NodeJS.Signals;
-    stdout?: unknown;
-    stderr?: unknown;
-  };
-  const message = error instanceof Error ? error.message : String(error);
-  const stdout = stringifyOutput(err.stdout).trim();
-  const stderr = stringifyOutput(err.stderr).trim();
-  const exitCode = typeof err.status === "number"
-    ? err.status
-    : typeof err.code === "number"
-      ? err.code
-      : undefined;
-  const details = [
-    "Command failed",
-    `Original command: ${command}`,
-    `Executed command: ${rewrittenCommand}`,
-    exitCode !== undefined ? `Exit code: ${exitCode}` : undefined,
-    err.signal !== undefined ? `Signal: ${err.signal}` : undefined,
-    stderr ? `stderr:\n${stderr}` : undefined,
-    stdout ? `stdout:\n${stdout}` : undefined,
-    !stderr && !stdout ? `Message: ${message}` : undefined,
-  ].filter(Boolean);
-
-  return details.join("\n");
-}
-
-function execAsync(
-  command: string,
-  options: { timeout: number; maxBuffer?: number },
-): Promise<string> {
+  options: { timeout: number; cwd?: string },
+): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    exec(command, {
-      timeout: options.timeout,
-      encoding: "utf-8",
-      maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
-    }, (error: Error | null, stdout: string, stderr: string) => {
-      if (error) {
-        (error as any).stdout = stdout;
-        (error as any).stderr = stderr;
-        reject(error);
-      } else {
-        resolve(stdout);
+    const detached = process.platform !== "win32";
+    const proc = spawn(command, {
+      shell: true,
+      cwd: options.cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached,
+    });
+
+    let output = "";
+    let timedOut = false;
+    let settled = false;
+
+    const append = (chunk: Buffer) => {
+      output += chunk.toString("utf-8");
+    };
+    proc.stdout?.on("data", append);
+    proc.stderr?.on("data", append);
+
+    const kill = () => {
+      try {
+        if (detached && proc.pid !== undefined) {
+          // Negative pid targets the whole process group.
+          process.kill(-proc.pid, "SIGTERM");
+        } else {
+          proc.kill("SIGTERM");
+        }
+      } catch {
+        // process already gone
       }
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      kill();
+    }, options.timeout);
+
+    proc.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+
+    proc.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ output, exitCode: code, signal, timedOut });
     });
   });
 }
@@ -75,7 +85,7 @@ export const bashTool: Tool & {
 } = {
   name: "cave__bash",
   description:
-    "Optimized drop-in replacement for the built-in shell tool. Runs the same command and returns its output, applying RTK command rewriting where available and trimming noisy output to the essentials. Sensitive tokens and keys are redacted from output by default.",
+    "Optimized drop-in replacement for the built-in shell tool. Runs the same command and returns its output, applying RTK command rewriting where available and trimming noisy output to the essentials. Sensitive tokens and keys are redacted from output by default. Output is streamed and captured without a buffer ceiling; large output is archived. Use 'workdir' instead of 'cd'.",
   inputSchema: {
     type: "object",
     properties: {
@@ -88,10 +98,15 @@ export const bashTool: Tool & {
         description:
           "Clear, concise description of what the command does (5-10 words)",
       },
+      workdir: {
+        type: "string",
+        description:
+          "Working directory to run the command in. Use this instead of 'cd'.",
+      },
       timeout: {
         type: "number",
-        description: "Timeout in milliseconds",
-        default: 120000,
+        description: "Timeout in milliseconds (must be positive)",
+        default: DEFAULT_TIMEOUT,
       },
       allowFailure: {
         type: "boolean",
@@ -110,32 +125,66 @@ export const bashTool: Tool & {
   },
   handler: async (args) => {
     const command = String(args.command);
-    const timeout = Number(args.timeout) || 120000;
+    const workdir = args.workdir ? String(args.workdir) : undefined;
     const allowFailure = args.allowFailure === true;
     const shouldRedact = args.redact_secrets !== false;
+
+    // Validate timeout: reject negative, fall back to default for 0/missing.
+    const rawTimeout = args.timeout;
+    if (rawTimeout !== undefined && Number(rawTimeout) < 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Invalid timeout value: ${rawTimeout}. Timeout must be a positive number.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+    const timeout = Number(rawTimeout) || DEFAULT_TIMEOUT;
+
     let rewrittenCommand = command;
     const policy = classifyCommand(command);
 
     try {
       rewrittenCommand = await rewriteCommandWithRtk(command);
-      const output = await execAsync(rewrittenCommand, {
+      const result = await runCommand(rewrittenCommand, {
         timeout,
+        cwd: workdir,
       });
 
-      let processed = shouldRedact ? redactSecrets(output) : output;
+      // Exit code as data: non-zero (and timeout/signal) are reported inline
+      // rather than thrown, so partial output is never lost.
+      const exitFailed =
+        result.timedOut ||
+        (result.exitCode !== null && result.exitCode !== 0) ||
+        result.signal !== null;
+      const exitNote = result.timedOut
+        ? `\n\n[timed out after ${timeout}ms — process group killed]`
+        : result.signal
+          ? `\n\n[killed by signal ${result.signal}]`
+          : result.exitCode && result.exitCode !== 0
+            ? `\n\n[exit: ${result.exitCode}]`
+            : "";
+
+      let processed = shouldRedact ? redactSecrets(result.output) : result.output;
       const rtkStatus =
         rewrittenCommand !== command
           ? `[RTK: ${command} -> ${rewrittenCommand}]`
           : "[RTK: no rewrite]";
+
+      const markError = exitFailed && !allowFailure ? { isError: true } : {};
 
       if (policy === "passthrough") {
         return {
           content: [
             {
               type: "text",
-              text: `${rtkStatus}\n${processed}`,
+              text: `${rtkStatus}\n${processed}${exitNote}`,
             },
           ],
+          ...markError,
         };
       }
 
@@ -158,9 +207,10 @@ export const bashTool: Tool & {
           content: [
             {
               type: "text",
-              text: `${rtkStatus}\n${processed}${archiveNote}`,
+              text: `${rtkStatus}\n${processed}${archiveNote}${exitNote}`,
             },
           ],
+          ...markError,
         };
       }
 
@@ -178,12 +228,19 @@ export const bashTool: Tool & {
         content: [
           {
             type: "text",
-            text: `${rtkStatus}\n${processed}${archiveNote}`,
+            text: `${rtkStatus}\n${processed}${archiveNote}${exitNote}`,
           },
         ],
+        ...markError,
       };
     } catch (error) {
-      let errorMessage = formatCommandError(error, command, rewrittenCommand);
+      const message = error instanceof Error ? error.message : String(error);
+      let errorMessage = [
+        "Command failed to launch",
+        `Original command: ${command}`,
+        `Executed command: ${rewrittenCommand}`,
+        `Message: ${message}`,
+      ].join("\n");
       if (shouldRedact) {
         errorMessage = redactSecrets(errorMessage);
       }
