@@ -1,17 +1,23 @@
-import { readdir, readFile, rm, stat, writeFile, mkdir } from "fs/promises";
+import { readFile, rm, writeFile, mkdir } from "fs/promises";
 import { createHash } from "crypto";
-import { homedir } from "os";
 import { join } from "path";
+import {
+  archiveDir,
+  archiveStats,
+  deleteArchive,
+  listArchives as listDbArchives,
+  recordArchive,
+} from "../storage/db.js";
 
 const ARCHIVE_THRESHOLD = 50_000;
 const ARCHIVE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const ARCHIVE_DIR = join(homedir(), ".cache", "cave-tools", "archives");
 
 export interface ArchiveEntry {
   id: string;
   command: string;
   sizeChars: number;
   createdAt: number;
+  contentPath?: string;
 }
 
 function archiveId(content: string): string {
@@ -20,7 +26,7 @@ function archiveId(content: string): string {
 
 function entryDir(id: string): string {
   const prefix = id.slice(0, 2);
-  return join(ARCHIVE_DIR, prefix);
+  return join(archiveDir(), prefix);
 }
 
 function contentPath(id: string): string {
@@ -39,16 +45,24 @@ export async function archiveIfLarge(
 
   const id = archiveId(output);
   const dir = entryDir(id);
+  const archivedContentPath = contentPath(id);
   await mkdir(dir, { recursive: true });
 
-  await writeFile(contentPath(id), output, "utf-8");
+  await writeFile(archivedContentPath, output, "utf-8");
   const meta: ArchiveEntry = {
     id,
     command,
     sizeChars: output.length,
     createdAt: Date.now(),
+    contentPath: archivedContentPath,
   };
-  await writeFile(metaPath(id), JSON.stringify(meta), "utf-8");
+  recordArchive({
+    id: meta.id,
+    command: meta.command,
+    sizeChars: meta.sizeChars,
+    createdAt: meta.createdAt,
+    contentPath: archivedContentPath,
+  });
 
   const lines = output.split("\n");
   const head = lines.slice(0, 20).join("\n");
@@ -67,57 +81,38 @@ export async function expandArchive(id: string): Promise<string | null> {
 }
 
 export async function listArchives(): Promise<ArchiveEntry[]> {
-  const entries: ArchiveEntry[] = [];
   try {
-    for (const prefix of await readdir(ARCHIVE_DIR)) {
-      const prefixDir = join(ARCHIVE_DIR, prefix);
-      for (const file of await readdir(prefixDir)) {
-        if (!file.endsWith(".meta.json")) continue;
-        try {
-          const meta = JSON.parse(
-            await readFile(join(prefixDir, file), "utf-8"),
-          ) as ArchiveEntry;
-          entries.push(meta);
-        } catch {
-          // skip corrupt meta
-        }
-      }
-    }
+    return listDbArchives();
   } catch {
-    // archive dir may not exist
+    return [];
   }
-  return entries.sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export async function cleanupArchives(maxAgeMs = ARCHIVE_MAX_AGE_MS): Promise<number> {
   const cutoff = Date.now() - maxAgeMs;
   let removed = 0;
-  try {
-    for (const prefix of await readdir(ARCHIVE_DIR)) {
-      const prefixDir = join(ARCHIVE_DIR, prefix);
-      for (const file of await readdir(prefixDir)) {
-        const filePath = join(prefixDir, file);
-        try {
-          const s = await stat(filePath);
-          if (s.mtimeMs < cutoff) {
-            await rm(filePath, { force: true });
-            removed++;
-          }
-        } catch {
-          // skip
-        }
+  for (const archive of await listArchives()) {
+    if (archive.createdAt >= cutoff) continue;
+    try {
+      await rm(archive.contentPath || contentPath(archive.id), { force: true });
+      await rm(metaPath(archive.id), { force: true });
+      deleteArchive(archive.id);
+      removed++;
+    } catch {
+      try {
+        deleteArchive(archive.id);
+      } catch {
+        // skip
       }
     }
-  } catch {
-    // archive dir may not exist
   }
   return removed;
 }
 
 export async function getArchiveStats(): Promise<{ count: number; totalChars: number }> {
-  const archives = await listArchives();
-  return {
-    count: archives.length,
-    totalChars: archives.reduce((sum, a) => sum + a.sizeChars, 0),
-  };
+  try {
+    return archiveStats();
+  } catch {
+    return { count: 0, totalChars: 0 };
+  }
 }

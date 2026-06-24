@@ -1,15 +1,23 @@
 import { createHash } from "crypto";
+import { readFile, access } from "fs/promises";
 import {
-  readFile,
-  writeFile,
-  mkdir,
-  rm,
-  readdir,
-  rename,
-  access,
-} from "fs/promises";
-import { homedir } from "os";
-import { join, dirname } from "path";
+  getLifetimeStats as getDbLifetimeStats,
+  listSessionStats as listDbSessionStats,
+  markSessionEnded,
+  registerReadPath as registerDbReadPath,
+  sessionsDir,
+  upsertSessionStats,
+} from "../storage/db.js";
+import type {
+  BounceStats,
+  BudgetConfig,
+  LifetimeStats,
+  PersistedStats,
+  RtkStats,
+  ToolSavings,
+} from "../storage/db.js";
+
+export type { LifetimeStats, PersistedStats } from "../storage/db.js";
 
 const fileCache = new Map<string, string>();
 
@@ -36,115 +44,13 @@ const BOUNCE_WINDOW = 5;
 const EDIT_FORCE_WINDOW = 10;
 const BOUNCE_RATE_THRESHOLD = 0.3;
 
-interface ToolSavings {
-  calls: number;
-  rawChars: number;
-  compressedChars: number;
-  savedChars: number;
-}
-
-interface RtkStats {
-  rewrites: number;
-  alreadyWrapped: number;
-  passthrough: number;
-}
-
-interface BudgetConfig {
-  maxLines: number;
-  headLines: number;
-  tailLines: number;
-}
-
 interface BounceEvent {
   seq: number;
   wasCompressed: boolean;
   charsSent: number;
 }
 
-interface BounceStats {
-  totalReads: number;
-  bounces: number;
-  wastedChars: number;
-}
-
-interface PersistedStats {
-  pid: number;
-  sessionStart: number;
-  updatedAt: number;
-  cache: {
-    hits: number;
-    misses: number;
-    total: number;
-    hitRate: number;
-    filesTracked: number;
-  };
-  savings: {
-    totalCalls: number;
-    rawChars: number;
-    compressedChars: number;
-    compressionSavedChars: number;
-    dedupSavedChars: number;
-    savedChars: number;
-    estimatedTokensSaved: number;
-    byTool: Record<string, ToolSavings>;
-  };
-  rtk: RtkStats;
-  budgets: Record<string, BudgetConfig>;
-  bounces: {
-    totalBounces: number;
-    totalWastedChars: number;
-    byExtension: Record<string, BounceStats>;
-  };
-}
-
-export interface LifetimeStats {
-  bankedSessions: number;
-  calls: number;
-  rawChars: number;
-  compressedChars: number;
-  compressionSavedChars: number;
-  dedupSavedChars: number;
-  savedChars: number;
-  hits: number;
-  misses: number;
-  rtkRewrites: number;
-  rtkAlreadyWrapped: number;
-  rtkPassthrough: number;
-  updatedAt: number;
-  totalBounces: number;
-  totalWastedChars: number;
-}
-
-function emptyLifetime(): LifetimeStats {
-  return {
-    bankedSessions: 0,
-    calls: 0,
-    rawChars: 0,
-    compressedChars: 0,
-    compressionSavedChars: 0,
-    dedupSavedChars: 0,
-    savedChars: 0,
-    hits: 0,
-    misses: 0,
-    rtkRewrites: 0,
-    rtkAlreadyWrapped: 0,
-    rtkPassthrough: 0,
-    updatedAt: 0,
-    totalBounces: 0,
-    totalWastedChars: 0,
-  };
-}
-
 const savingsByTool: Record<string, ToolSavings> = {};
-const STATS_DIR = join(homedir(), ".cache", "cave-tools");
-const SESSIONS_DIR = join(STATS_DIR, "sessions");
-const SESSION_STATS_FILE = join(SESSIONS_DIR, `${sessionPid}.json`);
-const LIFETIME_FILE = join(STATS_DIR, "lifetime.json");
-const READ_REGISTRY_FILE = join(
-  process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
-  "cave-tools",
-  "read-registry.txt",
-);
 
 const budgets: Record<string, BudgetConfig> = {
   bash: { maxLines: 80, headLines: 40, tailLines: 40 },
@@ -206,80 +112,56 @@ function buildStats(): PersistedStats {
 
 async function persistStats(): Promise<void> {
   try {
-    await mkdir(SESSIONS_DIR, { recursive: true });
-    await writeFile(SESSION_STATS_FILE, JSON.stringify(buildStats()), "utf-8");
+    upsertSessionStats(buildStats());
   } catch {
     // Non-fatal: stats persistence is best-effort.
   }
 }
 
 export function getSessionStatsFile(): string {
-  return SESSION_STATS_FILE;
+  return "sqlite:cave-tools.db:sessions";
 }
 
 export function getStatsSessionsDir(): string {
-  return SESSIONS_DIR;
+  return sessionsDir();
 }
 
 export async function getLifetimeStats(): Promise<LifetimeStats> {
   try {
-    const parsed = JSON.parse(await readFile(LIFETIME_FILE, "utf-8")) as Partial<LifetimeStats>;
-    return { ...emptyLifetime(), ...parsed };
+    return getDbLifetimeStats();
   } catch {
-    return emptyLifetime();
+    return {
+      bankedSessions: 0,
+      calls: 0,
+      rawChars: 0,
+      compressedChars: 0,
+      compressionSavedChars: 0,
+      dedupSavedChars: 0,
+      savedChars: 0,
+      hits: 0,
+      misses: 0,
+      rtkRewrites: 0,
+      rtkAlreadyWrapped: 0,
+      rtkPassthrough: 0,
+      updatedAt: 0,
+      totalBounces: 0,
+      totalWastedChars: 0,
+    };
   }
 }
 
-// Fold a (dead) session's totals into the persistent lifetime aggregate so its
-// savings survive after the session file is pruned. Best-effort; never throws.
-async function bankSession(filePath: string): Promise<void> {
-  let session: PersistedStats;
+export function listSessionStats(includeEnded = false): Array<PersistedStats & { endedAt: number | null }> {
   try {
-    session = JSON.parse(await readFile(filePath, "utf-8")) as PersistedStats;
+    return listDbSessionStats(includeEnded);
   } catch {
-    return;
-  }
-  const lifetime = await getLifetimeStats();
-  const s = session.savings;
-  const c = session.cache;
-  const r = session.rtk;
-  const b = session.bounces;
-  const compressionSavedChars = s?.compressionSavedChars ?? s?.savedChars ?? 0;
-  const dedupSavedChars = s?.dedupSavedChars ?? 0;
-  lifetime.bankedSessions += 1;
-  lifetime.calls += s?.totalCalls ?? 0;
-  lifetime.rawChars += s?.rawChars ?? 0;
-  lifetime.compressedChars += s?.compressedChars ?? 0;
-  lifetime.compressionSavedChars += compressionSavedChars;
-  lifetime.dedupSavedChars += dedupSavedChars;
-  lifetime.savedChars += compressionSavedChars + dedupSavedChars;
-  lifetime.hits += c?.hits ?? 0;
-  lifetime.misses += c?.misses ?? 0;
-  lifetime.rtkRewrites += r?.rewrites ?? 0;
-  lifetime.rtkAlreadyWrapped += r?.alreadyWrapped ?? 0;
-  lifetime.rtkPassthrough += r?.passthrough ?? 0;
-  lifetime.totalBounces += b?.totalBounces ?? 0;
-  lifetime.totalWastedChars += b?.totalWastedChars ?? 0;
-  lifetime.updatedAt = Date.now();
-  try {
-    await mkdir(STATS_DIR, { recursive: true });
-    await writeFile(LIFETIME_FILE, JSON.stringify(lifetime), "utf-8");
-  } catch {
-    // Non-fatal: lifetime persistence is best-effort.
+    return [];
   }
 }
 
 export async function pruneDeadSessions(): Promise<number> {
   let removed = 0;
-  let names: string[];
-  try {
-    names = await readdir(SESSIONS_DIR);
-  } catch {
-    return 0;
-  }
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue;
-    const pid = parseInt(name.slice(0, -".json".length), 10);
+  for (const session of listSessionStats(false)) {
+    const pid = session.pid;
     if (!Number.isFinite(pid) || pid === sessionPid) continue;
     let alive: boolean;
     try {
@@ -289,14 +171,7 @@ export async function pruneDeadSessions(): Promise<number> {
       alive = (e as NodeJS.ErrnoException)?.code === "EPERM";
     }
     if (!alive) {
-      const filePath = join(SESSIONS_DIR, name);
-      await bankSession(filePath);
-      try {
-        await rm(filePath, { force: true });
-        removed++;
-      } catch {
-        // Non-fatal: best-effort cleanup.
-      }
+      if (markSessionEnded(pid)) removed++;
     }
   }
   return removed;
@@ -336,35 +211,11 @@ export async function updateFileCache(filePath: string): Promise<void> {
     fileCache.set(filePath, hash);
     cacheMisses++;
     void persistStats();
-    void registerReadPath(filePath);
-  }
-}
-
-// Append an absolute path to the flat-file read registry used by the
-// strict-mode PreToolUse redirect hook. Deduplicates so the file never
-// grows with duplicates. Writes atomically (temp + rename) with 0600
-// permissions. Silent-fail on any filesystem error — the registry is
-// best-effort.
-async function registerReadPath(filePath: string): Promise<void> {
-  try {
-    await mkdir(dirname(READ_REGISTRY_FILE), { recursive: true });
-    const paths = new Set<string>();
     try {
-      const raw = await readFile(READ_REGISTRY_FILE, "utf-8");
-      for (const line of raw.split("\n")) {
-        const trimmed = line.trim();
-        if (trimmed) paths.add(trimmed);
-      }
+      registerDbReadPath(filePath, hash);
     } catch {
-      // File doesn't exist yet — start empty
+      // Registry persistence is advisory.
     }
-    if (paths.has(filePath)) return;
-    paths.add(filePath);
-    const tempPath = `${READ_REGISTRY_FILE}.tmp.${process.pid}`;
-    await writeFile(tempPath, Array.from(paths).join("\n") + "\n", { mode: 0o600 });
-    await rename(tempPath, READ_REGISTRY_FILE);
-  } catch {
-    // Silent fail — registry is advisory
   }
 }
 
@@ -433,11 +284,6 @@ export async function resetStats(): Promise<void> {
   perExtension.clear();
   recentlyEdited.clear();
   for (const key of Object.keys(savingsByTool)) delete savingsByTool[key];
-  try {
-    await rm(SESSION_STATS_FILE, { force: true });
-  } catch {
-    // Non-fatal: stats persistence is best-effort.
-  }
   void persistStats();
 }
 

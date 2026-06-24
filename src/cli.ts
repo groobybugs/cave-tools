@@ -3,9 +3,9 @@
 import { startServer } from "./index.js";
 import {
   getAllBudgets,
-  getStatsSessionsDir,
   pruneDeadSessions,
   getLifetimeStats,
+  listSessionStats,
   reductionPercent,
   efficiencyMeter,
   isRtkAvailable,
@@ -13,8 +13,6 @@ import {
 import {
   existsSync,
   mkdirSync,
-  readdirSync,
-  readFileSync,
   writeFileSync,
   lstatSync,
   realpathSync,
@@ -230,19 +228,7 @@ function writeStatuslineSuffix(suffix: string): void {
 }
 
 function readSessionStats(): SessionStats[] {
-  const dir = getStatsSessionsDir();
-  if (!existsSync(dir)) return [];
-
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => {
-      try {
-        return JSON.parse(readFileSync(join(dir, name), "utf-8")) as SessionStats;
-      } catch {
-        return null;
-      }
-    })
-    .filter((stats): stats is SessionStats => stats !== null);
+  return listSessionStats(false);
 }
 
 const CAVE_INSTRUCTIONS = `# Cave Tools — token-optimized MCP
