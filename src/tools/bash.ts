@@ -169,10 +169,6 @@ export const bashTool: Tool & {
             : "";
 
       let processed = shouldRedact ? redactSecrets(result.output) : result.output;
-      const rtkStatus =
-        rewrittenCommand !== command
-          ? `[RTK: ${command} -> ${rewrittenCommand}]`
-          : "[RTK: no rewrite]";
 
       const markError = exitFailed && !allowFailure ? { isError: true } : {};
 
@@ -181,7 +177,7 @@ export const bashTool: Tool & {
           content: [
             {
               type: "text",
-              text: `${rtkStatus}\n${processed}${exitNote}`,
+              text: `${processed}${exitNote}`,
             },
           ],
           ...markError,
@@ -207,7 +203,7 @@ export const bashTool: Tool & {
           content: [
             {
               type: "text",
-              text: `${rtkStatus}\n${processed}${archiveNote}${exitNote}`,
+              text: `${processed}${archiveNote}${exitNote}`,
             },
           ],
           ...markError,
@@ -228,7 +224,7 @@ export const bashTool: Tool & {
         content: [
           {
             type: "text",
-            text: `${rtkStatus}\n${processed}${archiveNote}${exitNote}`,
+            text: `${processed}${archiveNote}${exitNote}`,
           },
         ],
         ...markError,
