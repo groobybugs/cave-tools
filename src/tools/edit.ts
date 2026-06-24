@@ -1,8 +1,9 @@
-import { readFile, writeFile } from "fs/promises";
+import { readFile } from "fs/promises";
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { invalidateFileCache, recordEdit } from "../compression/utils.js";
 import { findReplacement } from "./replacers.js";
+import { writeIfUnchanged } from "../runtime/file-mutation.js";
 
 // Adapt new_string line endings to match the matched span's style so an edit
 // against a CRLF file doesn't inject lone LFs (and vice-versa).
@@ -12,6 +13,17 @@ function adaptLineEndings(search: string, newString: string): string {
   if (searchCRLF && !newCRLF) return newString.replace(/\n/g, "\r\n");
   if (!searchCRLF && newCRLF) return newString.replace(/\r\n/g, "\n");
   return newString;
+}
+
+function decodeUtf8PreserveBom(content: Uint8Array): { text: string; bom: boolean } {
+  const bom = content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf;
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bom ? content.slice(3) : content);
+  return { text, bom };
+}
+
+function joinBom(text: string, bom: boolean): string {
+  const stripped = text.replace(/^\uFEFF+/, "");
+  return bom ? `\uFEFF${stripped}` : stripped;
 }
 
 function findClosestLineHint(content: string, oldStr: string): string {
@@ -105,15 +117,20 @@ export const editTool: Tool & {
   handler: async (args) => {
     const filePath = String(args.file_path);
 
+    let sourceBytes: Buffer;
     let content: string;
+    let bom = false;
     try {
-      content = await readFile(filePath, "utf-8");
-    } catch {
-      return err(`Cannot read file: ${filePath}`);
+      sourceBytes = await readFile(filePath);
+      const decoded = decodeUtf8PreserveBom(sourceBytes);
+      content = decoded.text;
+      bom = decoded.bom;
+    } catch (error) {
+      return err(error instanceof Error && error.message.includes("encoded data") ? `File is not valid UTF-8: ${filePath}` : `Cannot read file: ${filePath}`);
     }
 
     if (Array.isArray(args.edits)) {
-      return handleBatchEdits(filePath, content, args.edits as SingleEdit[]);
+      return handleBatchEdits(filePath, content, sourceBytes, bom, args.edits as SingleEdit[]);
     }
 
     const oldString = String(args.old_string ?? "");
@@ -155,12 +172,13 @@ export const editTool: Tool & {
     }
 
     try {
-      await writeFile(filePath, updated, "utf-8");
-    } catch {
-      return err(`Cannot write file: ${filePath}`);
+      const result = await writeIfUnchanged(filePath, sourceBytes, joinBom(updated, bom));
+      invalidateFileCache(result.canonical);
+      recordEdit(result.canonical);
+    } catch (error) {
+      return err(error instanceof Error ? error.message : `Cannot write file: ${filePath}`);
     }
     invalidateFileCache(filePath);
-    recordEdit(filePath);
 
     return ok(`Edited ${filePath} (${count} replacement${count === 1 ? "" : "s"})`);
   },
@@ -169,6 +187,8 @@ export const editTool: Tool & {
 async function handleBatchEdits(
   filePath: string,
   content: string,
+  sourceBytes: Uint8Array,
+  bom: boolean,
   edits: SingleEdit[],
 ): Promise<ToolResult> {
   if (edits.length === 0) {
@@ -220,12 +240,13 @@ async function handleBatchEdits(
   }
 
   try {
-    await writeFile(filePath, updated, "utf-8");
-  } catch {
-    return err(`Cannot write file: ${filePath}`);
+    const result = await writeIfUnchanged(filePath, sourceBytes, joinBom(updated, bom));
+    invalidateFileCache(result.canonical);
+    recordEdit(result.canonical);
+  } catch (error) {
+    return err(error instanceof Error ? error.message : `Cannot write file: ${filePath}`);
   }
   invalidateFileCache(filePath);
-  recordEdit(filePath);
 
   return ok(`Edited ${filePath} (${matched.length} replacement${matched.length === 1 ? "" : "s"})`);
 }

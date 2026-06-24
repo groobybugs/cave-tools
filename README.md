@@ -119,10 +119,12 @@ All tool names use the MCP names exported by the server.
 | `cave__read`      | Optimized drop-in replacement for Read (dedup + line budgets). Reads images (`.png/.jpg/.jpeg/.gif/.webp/.bmp/.svg`) as MCP image content (base64, up to 5 MB). | Based on `read`, plus standalone dedup cache + image support.       |
 | `cave__bash`      | Optimized drop-in replacement for the shell tool (RTK rewrite + structured extraction + line budgets). Supports opt-in soft failures via `allowFailure`. | Based on `bash` output behavior, not permission/TUI handling.  |
 | `cave__grep`      | Search file contents with `rg --json`, match limits, context lines, long-line truncation. | Based on `grep`.                                                    |
-| `cave__find`      | Find files by glob with `fd` when available, Node fallback, relative paths, result limit. | Based on `find`.                                                    |
-| `cave__ls`        | List directory entries, sorted, directories suffixed with `/`.                            | Based on `ls`.                                                      |
+| `cave__find`      | Find files by glob with ripgrep-backed search, Node fallback, relative paths, result limit. | Based on `glob` / search.                                           |
+| `cave__ls`        | List directory entries, directories first, sorted, directories suffixed with `/`, paginated. | Based on directory read/list behavior.                              |
 | `cave__edit`      | String replacement in a file (fuzzy whitespace/indentation-tolerant matching). Auto-invalidates dedup cache. | Cave Tools-specific edit tool.                                      |
 | `cave__write`     | Write a single file (create/overwrite, or `truncate` to empty). Auto-invalidates dedup cache. | Cave Tools-specific write tool.                                     |
+| `cave__apply_patch` | Apply add/update/delete patches sequentially and invalidate changed paths.              | Based on `apply_patch`, with Cave cache integration.                 |
+| `cave__websearch` | Search current web via Exa/Parallel MCP backends, then redact/archive/budget-compress output. | Based on `websearch`, with Cave compression.                         |
 | `cave__invalidate`| Invalidate the read dedup cache for one or more paths without touching disk.              | Cave Tools-specific cache tool.                                    |
 | `cave__compress`  | Optimize arbitrary text down to fewer tokens (structured extraction + line budgets).     | Cave Tools-specific helper.                                         |
 | `cave__status`    | Show RTK availability, cache stats, and budgets.                                          | Cave Tools-specific helper.                                         |
@@ -138,6 +140,8 @@ Use this instruction block in agent rules:
 - Use `cave__read` instead of the built-in read tool for file reads. Optimized drop-in replacement (read dedup + line budgets).
 - Use `cave__grep`, `cave__find`, and `cave__ls` instead of shell commands for file exploration when available. Optimized drop-in replacements that respect ignore rules and trim output to a line budget.
 - Use `cave__bash` instead of the built-in shell tool for commands. Optimized drop-in replacement: tries RTK command rewriting when `rtk` is available, then structured JSON/XML extraction and output budgets.
+- Use `cave__edit` / `cave__write` for single-file changes and `cave__apply_patch` for multi-file add/update/delete patches.
+- Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived if large, and budget-compressed.
 - After using any edit/write tool outside Cave Tools, call `cave__invalidate` with the changed file path(s) to refresh the read dedup cache.
 - Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - Use `cave__status` to check RTK availability, cache state, and budget settings when the user asks about savings.
@@ -148,7 +152,7 @@ Use this instruction block in agent rules:
 - Before any file edit outside Plan Mode, read the exact target path first.
 - Built-in `Update` / `Edit` requires the same file path to be read earlier in the session; otherwise it fails with `File must be read first`.
 - Do not batch read and edit calls in parallel. Read must complete before edit.
-- Prefer `cave__read` for inspection, then `cave__edit` or `apply_patch` for edits.
+- Prefer `cave__read` for inspection, then `cave__edit`, `cave__apply_patch`, or `apply_patch` for edits.
 - `cave__write` always writes to disk (`content`, or `truncate: true` for an empty file). For cache-only invalidation after external edits, use `cave__invalidate`.
 ```
 
@@ -212,7 +216,7 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
        exit 2
        ;;
      Glob)
-       echo "BLOCKED: Use cave__find instead of Glob — it's the optimized drop-in replacement (fd-based search)." >&2
+        echo "BLOCKED: Use cave__find instead of Glob — it's the optimized drop-in replacement (ripgrep-backed search)." >&2
        exit 2
        ;;
    esac

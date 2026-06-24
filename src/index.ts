@@ -17,6 +17,8 @@ import { grepTool } from "./tools/grep.js";
 import { findTool } from "./tools/find.js";
 import { lsTool } from "./tools/ls.js";
 import { editTool } from "./tools/edit.js";
+import { applyPatchTool } from "./tools/apply-patch.js";
+import { websearchTool } from "./tools/websearch.js";
 import { pruneDeadSessions } from "./compression/utils.js";
 
 const server = new Server(
@@ -40,6 +42,8 @@ const tools: Tool[] = [
   writeTool,
   invalidateTool,
   editTool,
+  applyPatchTool,
+  websearchTool,
   compressTool,
   statusTool,
   configureTool,
@@ -71,6 +75,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ) as Promise<CallToolResult>;
     case "cave__edit":
       return editTool.handler(
+        args as Record<string, unknown>,
+      ) as Promise<CallToolResult>;
+    case "cave__apply_patch":
+      return applyPatchTool.handler(
+        args as Record<string, unknown>,
+      ) as Promise<CallToolResult>;
+    case "cave__websearch":
+      return websearchTool.handler(
         args as Record<string, unknown>,
       ) as Promise<CallToolResult>;
     case "cave__compress":

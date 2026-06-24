@@ -1,8 +1,9 @@
-import { readdir, stat, access } from "fs/promises";
+import { readdir, stat, realpath } from "fs/promises";
 import path from "path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { applyBudget } from "../compression/utils.js";
 import type { ToolResult } from "../types.js";
+import { containsPath, resolveExistingDirectory } from "../runtime/path.js";
 
 const DEFAULT_LIMIT = 500;
 
@@ -23,63 +24,56 @@ export const lsTool: Tool & {
         type: "number",
         description: "Maximum number of entries to return (default: 500)",
       },
+      offset: {
+        type: "number",
+        description: "1-based entry offset for pagination (default: 1)",
+        default: 1,
+      },
     },
   },
   handler: async (args) => {
-    const dirPath = path.resolve(args.path ? String(args.path) : ".");
+    const requested = path.resolve(args.path ? String(args.path) : ".");
     const limit = Math.max(1, Number(args.limit) || DEFAULT_LIMIT);
+    const offset = Math.max(1, Number(args.offset) || 1);
 
+    let dirPath: string;
     try {
-      await access(dirPath);
+      dirPath = await resolveExistingDirectory(requested);
     } catch {
       return {
-        content: [{ type: "text", text: `Path not found: ${dirPath}` }],
+        content: [{ type: "text", text: `Path not found or not a directory: ${requested}` }],
         isError: true,
       };
     }
 
     try {
-      const dirStat = await stat(dirPath);
-      if (!dirStat.isDirectory()) {
-        return {
-          content: [{ type: "text", text: `Not a directory: ${dirPath}` }],
-          isError: true,
-        };
-      }
-    } catch {
-      return {
-        content: [{ type: "text", text: `Not a directory: ${dirPath}` }],
-        isError: true,
-      };
-    }
-
-    try {
-      const entries = (await readdir(dirPath)).sort((a, b) =>
-        a.toLowerCase().localeCompare(b.toLowerCase()),
-      );
-      const results: string[] = [];
-      let limitReached = false;
-
+      const entries = await readdir(dirPath);
+      const results: Array<{ name: string; type: "directory" | "file" }> = [];
       for (const entry of entries) {
-        if (results.length >= limit) {
-          limitReached = true;
-          break;
-        }
         const fullPath = path.join(dirPath, entry);
         try {
+          const target = await realpath(fullPath);
+          if (!containsPath(dirPath, target)) continue;
           const entryStat = await stat(fullPath);
-          results.push(entryStat.isDirectory() ? `${entry}/` : entry);
+          if (entryStat.isDirectory()) results.push({ name: `${entry}/`, type: "directory" });
+          else if (entryStat.isFile()) results.push({ name: entry, type: "file" });
         } catch {
           // Skip entries that disappeared or cannot be statted.
         }
       }
+      results.sort((a, b) =>
+        a.type === b.type ? a.name.localeCompare(b.name) : a.type === "directory" ? -1 : 1,
+      );
 
-      if (results.length === 0)
+      const selected = results.slice(offset - 1, offset - 1 + limit).map((entry) => entry.name);
+      const limitReached = offset - 1 + selected.length < results.length;
+
+      if (selected.length === 0)
         return { content: [{ type: "text", text: "(empty directory)" }] };
 
-      let output = results.join("\n");
+      let output = selected.join("\n");
       if (limitReached)
-        output += `\n\n[${limit} entries limit reached. Use limit=${limit * 2} for more]`;
+        output += `\n\n[Directory listing truncated. Use offset=${offset + selected.length} to continue]`;
 
       return { content: [{ type: "text", text: applyBudget(output, "ls") }] };
     } catch (error) {

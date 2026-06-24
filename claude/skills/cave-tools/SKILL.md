@@ -1,13 +1,13 @@
 ---
 name: cave-tools
 description: >
-  Token-saving file/shell tool layer (cave__read / cave__bash / cave__grep / cave__find /
-  cave__ls / cave__write / cave__compress / cave__status). Auto-activates every session.
+  Token-saving file/shell/web tool layer (cave__read / cave__bash / cave__grep / cave__find /
+  cave__ls / cave__write / cave__edit / cave__apply_patch / cave__websearch / cave__compress / cave__status). Auto-activates every session.
   Use when the user says "use cave-tools", invokes /cave-tools, asks to save tokens,
   or whenever file/shell operations are needed.
 ---
 
-Prefer cave-tools over built-in Read/Grep/Glob/Bash. They are optimized drop-in replacements that return the same results for fewer tokens (RTK rewriting + structured JSON/XML extraction + per-tool line budgets + read dedup cache).
+Prefer cave-tools over built-in Read/Grep/Glob/Bash and use Cave Tools for compact web search when available. They are optimized drop-in replacements that return the same results for fewer tokens (RTK rewriting + structured JSON/XML extraction + per-tool line budgets + read dedup cache).
 
 ## Persistence
 
@@ -21,7 +21,8 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 - Use `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
 - Use `cave__bash` instead of Bash — optimized drop-in replacement. Tries `rtk rewrite <cmd>` when RTK available, then applies structured JSON/XML extraction + line budgets.
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
-- Use `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace/indentation-tolerant matching).
+- Use `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace/indentation-tolerant matching); `cave__apply_patch` for multi-file add/update/delete patches.
+- Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived if large, and budget-compressed.
 - After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next `cave__read` returns fresh content (not a stub).
 - Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - Use `cave__status` to check RTK availability, cache state, savings %, budgets.
@@ -43,7 +44,7 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 - Built-in `Update` / `Edit` tools require the same file path to be read earlier; otherwise they fail with `File must be read first`.
 - In Plan Mode / read-only phase, never call write-capable tools: `Update`, `Edit`, `apply_patch`, `cave__edit`, `cave__write`, or shell commands that modify files.
 - Do not batch read and edit calls in parallel. Read must complete before edit.
-- Prefer `cave__read` for inspection, then `cave__edit` or built-in `Edit` for changes.
+- Prefer `cave__read` for inspection, then `cave__edit`, `cave__apply_patch`, or built-in `Edit` for changes.
 - `cave__write` always writes to disk (`content`, or `truncate: true` for an empty file). For cache-only invalidation after external edits, use `cave__invalidate` — it never touches disk.
 
 ## Examples

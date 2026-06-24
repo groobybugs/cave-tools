@@ -55,7 +55,7 @@ case "$TOOL" in
     exit 2
     ;;
   Glob)
-    echo "BLOCKED: Use cave__find instead of Glob — it's the optimized drop-in replacement (fd-based search)." >&2
+    echo "BLOCKED: Use cave__find instead of Glob — it's the optimized drop-in replacement (ripgrep-backed search)." >&2
     exit 2
     ;;
   Edit|Write)

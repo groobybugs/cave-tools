@@ -1,5 +1,5 @@
 import type { ToolResult } from "../types.js";
-import { readFile, stat, readdir, open } from "fs/promises";
+import { readFile, stat, readdir, open, realpath } from "fs/promises";
 import { extname, dirname, basename, join } from "path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -14,6 +14,7 @@ import {
 import { formatSignatures } from "../compression/signatures.js";
 import { aggressiveCompress } from "../compression/aggressive.js";
 import { addCodebookFile, compressWithCodebook } from "../compression/codebook.js";
+import { containsPath } from "../runtime/path.js";
 
 const IMAGE_MIME: Record<string, string> = {
   ".png": "image/png",
@@ -36,6 +37,40 @@ const MAX_PDF_BYTES = 5 * 1024 * 1024;
 // generated blobs) so a single 2 MB line can't blow the token budget.
 const MAX_LINE_LENGTH = 2000;
 const MAX_BYTES = 50 * 1024;
+
+function startsWith(bytes: Uint8Array, prefix: number[]): boolean {
+  return prefix.every((value, index) => bytes[index] === value);
+}
+
+async function sniffImageMime(filePath: string, ext: string): Promise<string | undefined> {
+  if (ext === ".svg") return IMAGE_MIME[ext];
+  const extensionMime = IMAGE_MIME[ext];
+  let handle;
+  try {
+    handle = await open(filePath, "r");
+    const buffer = Buffer.alloc(16);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const bytes = buffer.subarray(0, bytesRead);
+    if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+    if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg";
+    if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return "image/gif";
+    if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) && startsWith(bytes.subarray(8), [0x57, 0x45, 0x42, 0x50])) return "image/webp";
+    return extensionMime;
+  } catch {
+    return extensionMime;
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function readUtf8Strict(filePath: string): Promise<string> {
+  const bytes = await readFile(filePath);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`File is not valid UTF-8: ${filePath}`);
+  }
+}
 
 // Extensions that are always binary; reject before attempting a utf-8 decode.
 const BINARY_EXTENSIONS = new Set([
@@ -141,6 +176,9 @@ function selectLines(
   }
 
   const lastReadLine = start + raw.length;
+  if (raw.length === 0 && offset !== 1) {
+    return { body: "", lastReadLine, truncated: false, truncatedByBytes };
+  }
   const body = lineNumbers
     ? raw
         .map(
@@ -216,7 +254,38 @@ export const readTool: Tool & {
     const force = args.force === true;
 
     const ext = extname(filePath).toLowerCase();
-    const imageMime = IMAGE_MIME[ext];
+    let fileStat;
+    try {
+      fileStat = await stat(filePath);
+      if (fileStat.isDirectory()) {
+        const entries = await readdir(filePath);
+        const rows: Array<{ name: string; type: "directory" | "file" }> = [];
+        for (const entry of entries) {
+          const fullPath = join(filePath, entry);
+          try {
+            const target = await realpath(fullPath);
+            if (!containsPath(filePath, target)) continue;
+            const info = await stat(fullPath);
+            if (info.isDirectory()) rows.push({ name: `${entry}/`, type: "directory" });
+            else if (info.isFile()) rows.push({ name: entry, type: "file" });
+          } catch {
+            // Skip entries that disappeared or cannot be statted.
+          }
+        }
+        rows.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "directory" ? -1 : 1));
+        const selected = rows.slice(offset - 1, offset - 1 + limit).map((entry) => entry.name);
+        if (selected.length === 0 && offset !== 1) {
+          return { content: [{ type: "text", text: `Offset ${offset} is out of range` }], isError: true };
+        }
+        let text = selected.length ? selected.join("\n") : "(empty directory)";
+        if (offset - 1 + selected.length < rows.length) text += `\n\n(Directory has more entries. Use 'offset'=${offset + selected.length})`;
+        return { content: [{ type: "text", text: applyBudget(text, "read") }] };
+      }
+    } catch {
+      // Let the normal file read path surface the detailed missing-path error.
+    }
+
+    const imageMime = await sniffImageMime(filePath, ext);
 
     if (imageMime) {
       try {
@@ -228,13 +297,13 @@ export const readTool: Tool & {
           };
         }
 
-        const fileStat = await stat(filePath);
-        if (fileStat.size > MAX_IMAGE_BYTES) {
+        const imageStat = fileStat ?? (await stat(filePath));
+        if (imageStat.size > MAX_IMAGE_BYTES) {
           return {
             content: [
               {
                 type: "text",
-                text: `Image too large (${fileStat.size} bytes, max ${MAX_IMAGE_BYTES}). Resize or crop before reading.`,
+                text: `Image too large (${imageStat.size} bytes, max ${MAX_IMAGE_BYTES}). Resize or crop before reading.`,
               },
             ],
             isError: true,
@@ -243,7 +312,7 @@ export const readTool: Tool & {
 
         // SVG: send as text (it's just XML), keeps the image route for raster only.
         if (ext === ".svg") {
-          const svg = await readFile(filePath, "utf-8");
+          const svg = await readUtf8Strict(filePath);
           await updateFileCache(filePath);
           return {
             content: [{ type: "text", text: svg }],
@@ -337,10 +406,11 @@ export const readTool: Tool & {
 
     if (shouldForceFull(filePath)) {
       try {
-        const content = await readFile(filePath, "utf-8");
-        const lines = content.split("\n");
-        const sel = selectLines(lines, offset, limit, lineNumbers);
-        const text = sel.body + truncationHint(sel);
+          const content = await readUtf8Strict(filePath);
+          const lines = content.split("\n");
+          const sel = selectLines(lines, offset, limit, lineNumbers);
+          if (!sel.body && offset !== 1) return { content: [{ type: "text", text: `Offset ${offset} is out of range` }], isError: true };
+          const text = sel.body + truncationHint(sel);
         await updateFileCache(filePath);
         recordRead(filePath, false, text.length);
         return {
@@ -369,7 +439,7 @@ export const readTool: Tool & {
     }
 
     try {
-      const content = await readFile(filePath, "utf-8");
+      const content = await readUtf8Strict(filePath);
 
       if (mode === "aggressive") {
         await updateFileCache(filePath);
@@ -398,6 +468,9 @@ export const readTool: Tool & {
 
       const lines = content.split("\n");
       const sel = selectLines(lines, offset, limit, lineNumbers);
+      if (!sel.body && offset !== 1) {
+        return { content: [{ type: "text", text: `Offset ${offset} is out of range` }], isError: true };
+      }
       await updateFileCache(filePath);
 
       let outText: string;

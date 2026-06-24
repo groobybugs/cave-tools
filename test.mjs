@@ -1,6 +1,7 @@
 import { bashTool } from "./dist/tools/bash.js";
 import { compressTool } from "./dist/tools/compress.js";
 import { editTool } from "./dist/tools/edit.js";
+import { applyPatchTool } from "./dist/tools/apply-patch.js";
 import { findTool } from "./dist/tools/find.js";
 import { grepTool } from "./dist/tools/grep.js";
 import { lsTool } from "./dist/tools/ls.js";
@@ -8,6 +9,7 @@ import { readTool } from "./dist/tools/read.js";
 import { statusTool } from "./dist/tools/status.js";
 import { writeTool } from "./dist/tools/write.js";
 import { invalidateTool } from "./dist/tools/invalidate.js";
+import { websearchTool, parseWebsearchResponse } from "./dist/tools/websearch.js";
 import {
   compactJson,
   compactJsonl,
@@ -552,10 +554,54 @@ async function test() {
     const noOpResult = await writeTool.handler({ file_path: newFile });
     assert.equal(noOpResult.isError, true);
     assert.match(noOpResult.content[0].text, /cave__invalidate/);
+
+    const nestedFile = join(writeDir, "nested", "created.txt");
+    const nestedResult = await writeTool.handler({
+      file_path: nestedFile,
+      content: "nested",
+    });
+    assert.equal(nestedResult.isError, undefined);
+    assert.equal(readFileSync(nestedFile, "utf-8"), "nested");
+
+    const bomFile = join(writeDir, "bom.txt");
+    writeFileSync(bomFile, "\uFEFFbefore", "utf-8");
+    const bomResult = await writeTool.handler({
+      file_path: bomFile,
+      content: "after",
+    });
+    assert.equal(bomResult.isError, undefined);
+    assert.equal(readFileSync(bomFile, "utf-8"), "\uFEFFafter");
   } finally {
     rmSync(writeDir, { recursive: true, force: true });
   }
   console.log("cave__write tests passed");
+  console.log();
+
+  console.log("7a. Testing cave__apply_patch:");
+  const patchDir = mkdtempSync(join(tmpdir(), "cave-patch-"));
+  try {
+    const addFile = join(patchDir, "added.txt");
+    const patchAdd = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Add File: ${addFile}\n+one\n+two\n*** End Patch`,
+    });
+    assert.equal(patchAdd.isError, undefined, patchAdd.content[0].text);
+    assert.equal(readFileSync(addFile, "utf-8"), "one\ntwo\n");
+
+    const patchUpdate = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${addFile}\n@@\n-one\n+ONE\n two\n*** End Patch`,
+    });
+    assert.equal(patchUpdate.isError, undefined, patchUpdate.content[0].text);
+    assert.equal(readFileSync(addFile, "utf-8"), "ONE\ntwo\n");
+
+    const patchDelete = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Delete File: ${addFile}\n*** End Patch`,
+    });
+    assert.equal(patchDelete.isError, undefined, patchDelete.content[0].text);
+    assert.throws(() => readFileSync(addFile, "utf-8"));
+  } finally {
+    rmSync(patchDir, { recursive: true, force: true });
+  }
+  console.log("cave__apply_patch tests passed");
   console.log();
 
   console.log("7b. Testing cave__invalidate:");
@@ -582,6 +628,41 @@ async function test() {
     rmSync(invalidateDir, { recursive: true, force: true });
   }
   console.log("cave__invalidate tests passed");
+  console.log();
+
+  console.log("7c. Testing cave__websearch:");
+  const directPayload = JSON.stringify({
+    result: { content: [{ type: "text", text: "direct web result" }] },
+  });
+  assert.equal(parseWebsearchResponse(directPayload), "direct web result");
+  assert.equal(parseWebsearchResponse(`event: message\ndata: ${directPayload}\n\n`), "direct web result");
+
+  const originalFetch = globalThis.fetch;
+  try {
+    let requestedUrl = "";
+    let requestedBody = "";
+    globalThis.fetch = async (url, init) => {
+      requestedUrl = String(url);
+      requestedBody = String(init?.body || "");
+      return new Response(directPayload, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const webResult = await websearchTool.handler({
+      query: "latest cave tools news",
+      provider: "exa",
+      numResults: 2,
+      timeout: 1,
+    });
+    assert.equal(webResult.isError, undefined, webResult.content[0].text);
+    assert.match(webResult.content[0].text, /direct web result/);
+    assert.match(requestedUrl, /mcp\.exa\.ai/);
+    assert.match(requestedBody, /web_search_exa/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  console.log("cave__websearch tests passed");
   console.log();
 
   // Test status

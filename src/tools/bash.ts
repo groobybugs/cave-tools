@@ -1,5 +1,4 @@
 import type { ToolResult } from "../types.js";
-import { spawn } from "child_process";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   applyBudget,
@@ -9,76 +8,11 @@ import {
 import { redactSecrets } from "../compression/redact.js";
 import { classifyCommand } from "../compression/classify.js";
 import { archiveIfLarge } from "../compression/archive.js";
+import { captureNotice, defaultShell, runCommand } from "../runtime/process.js";
+import { resolveExistingDirectory } from "../runtime/path.js";
 
 const DEFAULT_TIMEOUT = 120000;
-
-interface RunResult {
-  output: string;
-  exitCode: number | null;
-  signal: NodeJS.Signals | null;
-  timedOut: boolean;
-}
-
-// Streaming runner: captures combined stdout+stderr with no maxBuffer ceiling
-// (large output is handed to archiveIfLarge later), and reliably kills the
-// whole process group on timeout so detached children don't linger.
-function runCommand(
-  command: string,
-  options: { timeout: number; cwd?: string },
-): Promise<RunResult> {
-  return new Promise((resolve, reject) => {
-    const detached = process.platform !== "win32";
-    const proc = spawn(command, {
-      shell: true,
-      cwd: options.cwd,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      detached,
-    });
-
-    let output = "";
-    let timedOut = false;
-    let settled = false;
-
-    const append = (chunk: Buffer) => {
-      output += chunk.toString("utf-8");
-    };
-    proc.stdout?.on("data", append);
-    proc.stderr?.on("data", append);
-
-    const kill = () => {
-      try {
-        if (detached && proc.pid !== undefined) {
-          // Negative pid targets the whole process group.
-          process.kill(-proc.pid, "SIGTERM");
-        } else {
-          proc.kill("SIGTERM");
-        }
-      } catch {
-        // process already gone
-      }
-    };
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      kill();
-    }, options.timeout);
-
-    proc.on("error", (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(err);
-    });
-
-    proc.on("close", (code, signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ output, exitCode: code, signal, timedOut });
-    });
-  });
-}
+const MAX_TIMEOUT = 10 * 60 * 1000;
 
 export const bashTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
@@ -105,7 +39,7 @@ export const bashTool: Tool & {
       },
       timeout: {
         type: "number",
-        description: "Timeout in milliseconds (must be positive)",
+        description: `Timeout in milliseconds (must be positive, max ${MAX_TIMEOUT})`,
         default: DEFAULT_TIMEOUT,
       },
       allowFailure: {
@@ -143,15 +77,28 @@ export const bashTool: Tool & {
       };
     }
     const timeout = Number(rawTimeout) || DEFAULT_TIMEOUT;
+    if (timeout > MAX_TIMEOUT) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Invalid timeout value: ${rawTimeout}. Timeout must be <= ${MAX_TIMEOUT}ms.`,
+          },
+        ],
+        isError: true,
+      };
+    }
 
     let rewrittenCommand = command;
     const policy = classifyCommand(command);
 
     try {
+      const cwd = await resolveExistingDirectory(workdir);
       rewrittenCommand = await rewriteCommandWithRtk(command);
       const result = await runCommand(rewrittenCommand, {
         timeout,
-        cwd: workdir,
+        cwd,
+        shell: defaultShell(),
       });
 
       // Exit code as data: non-zero (and timeout/signal) are reported inline
@@ -160,8 +107,10 @@ export const bashTool: Tool & {
         result.timedOut ||
         (result.exitCode !== null && result.exitCode !== 0) ||
         result.signal !== null;
+      const capture = captureNotice(result.stdoutTruncated, result.stderrTruncated);
+      const captureNote = capture ? `\n\n${capture}` : "";
       const exitNote = result.timedOut
-        ? `\n\n[timed out after ${timeout}ms — process group killed]`
+        ? `\n\n[timed out after ${timeout}ms - process group killed]`
         : result.signal
           ? `\n\n[killed by signal ${result.signal}]`
           : result.exitCode && result.exitCode !== 0
@@ -177,7 +126,7 @@ export const bashTool: Tool & {
           content: [
             {
               type: "text",
-              text: `${processed}${exitNote}`,
+              text: `${processed}${captureNote}${exitNote}`,
             },
           ],
           ...markError,
@@ -203,7 +152,7 @@ export const bashTool: Tool & {
           content: [
             {
               type: "text",
-              text: `${processed}${archiveNote}${exitNote}`,
+              text: `${processed}${archiveNote}${captureNote}${exitNote}`,
             },
           ],
           ...markError,
@@ -224,7 +173,7 @@ export const bashTool: Tool & {
         content: [
           {
             type: "text",
-            text: `${processed}${archiveNote}${exitNote}`,
+            text: `${processed}${archiveNote}${captureNote}${exitNote}`,
           },
         ],
         ...markError,

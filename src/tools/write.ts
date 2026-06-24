@@ -1,7 +1,7 @@
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { invalidateFileCache, recordEdit } from "../compression/utils.js";
-import { writeFile } from "fs/promises";
+import { writeTextPreservingBom } from "../runtime/file-mutation.js";
 
 export const writeTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
@@ -43,18 +43,18 @@ export const writeTool: Tool & {
 
     const content = truncate ? "" : String(args.content);
     try {
-      await writeFile(filePath, content, "utf-8");
-    } catch {
+      const result = await writeTextPreservingBom(filePath, content);
+      invalidateFileCache(result.canonical);
+      invalidateFileCache(filePath);
+      recordEdit(result.canonical);
+      return ok(
+        truncate
+          ? `Truncated ${result.canonical} (0 bytes)`
+          : `Wrote ${content.length} chars to ${result.canonical} (${result.existed ? "overwrote existing file" : "created new file"})`,
+      );
+    } catch (error) {
       return err(`cannot write ${filePath}`);
     }
-    invalidateFileCache(filePath);
-    recordEdit(filePath);
-
-    return ok(
-      truncate
-        ? `Truncated ${filePath} (0 bytes)`
-        : `Wrote ${content.length} chars to ${filePath}`,
-    );
   },
 };
 

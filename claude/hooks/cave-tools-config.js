@@ -210,16 +210,17 @@ function buildRuleset(mode) {
 
   // Fallback when SKILL.md is not found.
   return (
-    'Prefer cave-tools over built-in Read/Grep/Glob/Bash.\n\n' +
+    'Prefer cave-tools over built-in Read/Grep/Glob/Bash and use cave__websearch for compact current web research.\n\n' +
     '## Persistence\n\n' +
     'ACTIVE EVERY RESPONSE. Off only: `/cave-tools off` or "stop cave-tools".\n\n' +
     'Current level: **' + mode + '**. Switch: `/cave-tools off|hint|enforce|strict`.\n\n' +
     '## Rules\n\n' +
     '- `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).\n' +
     '- `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.\n' +
-    '- `cave__bash` instead of Bash — RTK rewriting + structured extraction + line budgets.\n' +
-    '- Never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).\n' +
-    '- `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace-tolerant matching).\n' +
+     '- `cave__bash` instead of Bash — RTK rewriting + structured extraction + line budgets.\n' +
+     '- Never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).\n' +
+     '- `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace-tolerant matching); `cave__apply_patch` for multi-file add/update/delete patches.\n' +
+     '- `cave__websearch` for current web information; results are redacted, archived if large, and budget-compressed.\n' +
     '- After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next cave__read returns fresh content.\n' +
     '- Use `cave__compress` for large pasted or tool-produced text.\n' +
     '- Use `cave__status` to inspect savings, hit rate, budgets.\n\n' +
