@@ -13,8 +13,11 @@ const CLAUDE_BUNDLE_DIR = path.join(REPO_ROOT, 'claude');
 
 const MARKER_BEGIN = '<!-- cave-tools-begin -->';
 const MARKER_END = '<!-- cave-tools-end -->';
+const DISCIPLINE_MARKER_BEGIN = '<!-- cave-discipline-begin -->';
+const DISCIPLINE_MARKER_END = '<!-- cave-discipline-end -->';
 const DRY_RUN = process.argv.includes('--dry-run');
 const VERBOSE = process.argv.includes('--verbose');
+const WITH_EXTRA_RULES = process.argv.includes('--with-extra-rules');
 const touchedPaths = new Map();
 
 // Long-form rules block. Still written to opencode AGENTS.md (no skill system
@@ -50,6 +53,50 @@ const CAVE_TOOLS_POINTER_BLOCK = [
   MARKER_END,
   '',
 ].join('\n');
+
+const ZCODE_CAVE_TOOLS_SKILL = [
+  '---',
+  'name: cave-tools',
+  'description: Token-saving file/shell/web tool layer. Use when file, shell, search, edit, or web operations are needed.',
+  '---',
+  '',
+  MARKER_BEGIN,
+  '# Cave Tools MCP',
+  '',
+  'Prefer Cave Tools MCP tools over built-in file/shell/search tools when they are available. They are optimized drop-in replacements that return the same results for fewer tokens.',
+  '',
+  '## Rules',
+  '',
+  '- Use `cave__read` instead of built-in read tools for file reads.',
+  '- Use `cave__grep`, `cave__find`, and `cave__ls` instead of shell search/listing commands.',
+  '- Use `cave__bash` instead of built-in shell execution for foreground commands.',
+  '- Do not double-wrap: never run `rtk <cmd>` inside `cave__bash`; pass the raw command.',
+  '- Use `cave__edit` / `cave__write` for single-file changes and `cave__apply_patch` for multi-file changes.',
+  '- Use `cave__websearch` for current web information when a local web search tool is needed.',
+  '- After editing a file outside Cave Tools, call `cave__invalidate` with changed paths so later reads are fresh.',
+  '- Use `cave__compress` for large pasted or tool-produced text, and `cave__status` to inspect savings and RTK availability.',
+  '',
+  '## Fallbacks',
+  '',
+  'Use built-in tools only when Cave Tools is unavailable or when a task needs background processes, streaming monitors, interactive stdin, or host-specific behavior Cave Tools cannot provide.',
+  MARKER_END,
+  '',
+].join('\n');
+
+// Opt-in discipline block (--with-extra-rules). Broader than the cave-tools
+// block: bundles RTK-fallback, codebase-memory-mcp, MCP-init-wait, and
+// subagent propagation rules. Distinct markers so it coexists with the
+// cave-tools block without collision. Off by default — personal extras.
+//
+// Rules body lives in rules/cave-discipline.md (single source of truth, like
+// caveman's src/rules/caveman-activate.md). The installer reads it at runtime
+// and wraps it with the marker fence. Edit the .md, not this constant.
+const DISCIPLINE_RULES_PATH = path.join(REPO_ROOT, 'rules', 'cave-discipline.md');
+
+function readDisciplineBlock() {
+  const body = fs.readFileSync(DISCIPLINE_RULES_PATH, 'utf8').trimEnd() + '\n';
+  return `${DISCIPLINE_MARKER_BEGIN}\n${body}${DISCIPLINE_MARKER_END}\n`;
+}
 
 function log(message) {
   process.stdout.write(`${message}\n`);
@@ -136,18 +183,47 @@ function writeJson(filePath, value) {
   trackPath(filePath, 'write');
 }
 
+function writeText(filePath, value) {
+  ensureDir(path.dirname(filePath));
+  const exists = fs.existsSync(filePath);
+  const current = exists ? fs.readFileSync(filePath, 'utf8') : '';
+  if (current === value) {
+    log(`unchanged: ${filePath}`);
+    return;
+  }
+  backupOnce(filePath);
+  if (DRY_RUN) {
+    trackPath(filePath, exists ? 'update' : 'create');
+    log(`dry-run: would ${exists ? 'update' : 'create'} ${filePath}`);
+    return;
+  }
+  fs.writeFileSync(filePath, value, { mode: 0o644 });
+  trackPath(filePath, exists ? 'update' : 'create');
+  log(`${exists ? 'updated' : 'created'}: ${filePath}`);
+}
+
 function removeFencedBlock(content) {
+  return removeFencedBlockGeneric(content, MARKER_BEGIN, MARKER_END);
+}
+
+// Generic marker-fence stripper. Used by the discipline-block path so the
+// two marker pairs (cave-tools / cave-discipline) don't collide.
+function removeFencedBlockGeneric(content, beginMarker, endMarker) {
   let next = content;
   while (true) {
-    const begin = next.indexOf(MARKER_BEGIN);
-    const end = next.indexOf(MARKER_END);
+    const begin = next.indexOf(beginMarker);
+    const end = next.indexOf(endMarker);
     if (begin === -1 || end === -1 || end <= begin) return next;
-    next = next.slice(0, begin).trimEnd() + '\n\n' + next.slice(end + MARKER_END.length).trimStart();
+    next = next.slice(0, begin).trimEnd() + '\n\n' + next.slice(end + endMarker.length).trimStart();
   }
 }
 
 function hasCaveToolsGuidance(content) {
-  return /#\s*Cave Tools MCP/i.test(content) && /`cave__read`/.test(content) && /`cave__bash`/.test(content);
+  // Strip the discipline block too before checking — the discipline rules
+  // reference `cave__read`/`cave__bash` and would false-positive this check,
+  // causing the cave-tools block to be dedupe-stripped (issue: blocks collide).
+  const withoutDiscipline = removeFencedBlockGeneric(content, DISCIPLINE_MARKER_BEGIN, DISCIPLINE_MARKER_END);
+  return /#\s*Cave Tools MCP/i.test(withoutDiscipline) && /`cave__read`/.test(withoutDiscipline) && /`cave__bash`/.test(withoutDiscipline);
 }
 
 function upsertFencedBlock(filePath, block, options = {}) {
@@ -194,6 +270,32 @@ function upsertFencedBlock(filePath, block, options = {}) {
   log(`${exists ? 'updated' : 'created'}: ${filePath}`);
 }
 
+// Upsert the discipline block (--with-extra-rules) into a rules file. Uses
+// the generic fenced-block stripper so it never touches the cave-tools block.
+function upsertDisciplineBlock(filePath) {
+  if (!WITH_EXTRA_RULES) return;
+  ensureDir(path.dirname(filePath));
+  const block = readDisciplineBlock();
+  const exists = fs.existsSync(filePath);
+  const current = exists ? fs.readFileSync(filePath, 'utf8') : '';
+  const withoutDiscipline = removeFencedBlockGeneric(current, DISCIPLINE_MARKER_BEGIN, DISCIPLINE_MARKER_END);
+  const sep = withoutDiscipline.trimEnd() ? '\n\n' : '';
+  const next = `${withoutDiscipline.trimEnd()}${sep}${block}`;
+  if (next === current) {
+    log(`unchanged: ${filePath}`);
+    return;
+  }
+  backupOnce(filePath);
+  if (DRY_RUN) {
+    trackPath(filePath, exists ? 'update' : 'create');
+    log(`dry-run: would ${exists ? 'update' : 'create'} ${filePath} (discipline)`);
+    return;
+  }
+  fs.writeFileSync(filePath, next, { mode: 0o644 });
+  trackPath(filePath, exists ? 'update' : 'create');
+  log(`${exists ? 'updated' : 'created'}: ${filePath} (discipline)`);
+}
+
 function installClaudeMcp() {
   const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
   const settingsPath = path.join(claudeDir, 'settings.json');
@@ -218,6 +320,172 @@ function installClaudeMcp() {
   // short pointer to avoid token-wasting duplication.
   upsertFencedBlock(path.join(claudeDir, 'CLAUDE.md'), CAVE_TOOLS_POINTER_BLOCK);
   upsertFencedBlock(path.join(claudeDir, 'skills', 'caveman', 'SKILL.md'), CAVE_TOOLS_POINTER_BLOCK);
+  upsertDisciplineBlock(path.join(claudeDir, 'CLAUDE.md'));
+}
+
+// Codex CLI install: MCP server in config.toml + rules block in AGENTS.md +
+// hooks.json SessionStart echo (mirrors caveman's .codex/hooks.json pattern).
+// Codex reads AGENTS.md each session; the hook is auto-activation parity with
+// Claude Code's SessionStart. Idempotent via marker checks.
+const CODEX_HOOK_MARKER = 'CAVE-TOOLS ACTIVE';
+
+function codexConfigDir() {
+  return path.join(HOME, '.codex');
+}
+
+function upsertTomlSection(content, header, bodyLines) {
+  // Surgical TOML section upsert. Not a full parser — finds `[header]` and
+  // replaces its body until the next section header (or EOF), else appends.
+  const headerRe = new RegExp(`^\\[\\s*${header.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s*\\]\\s*$`, 'm');
+  const sectionStart = content.search(headerRe);
+  if (sectionStart === -1) {
+    // Append new section.
+    const block = `\n[${header}]\n${bodyLines.join('\n')}\n`;
+    const next = content.endsWith('\n') || content === '' ? content + block : content + '\n' + block;
+    return next;
+  }
+  // Find the line index where the header starts.
+  const lineStart = content.lastIndexOf('\n', sectionStart) + 1;
+  // Find the next section header after this one (a line starting with '[').
+  const after = content.slice(sectionStart);
+  const nextSectionMatch = after.slice(after.indexOf('\n') + 1).match(/\n\[[^\]]+\]/);
+  const nextSectionRel = nextSectionMatch ? nextSectionMatch.index + 1 : -1;
+  const sectionEnd = nextSectionRel === -1 ? content.length : sectionStart + after.indexOf('\n') + 1 + nextSectionRel;
+  const before = content.slice(0, lineStart);
+  const afterSection = content.slice(sectionEnd);
+  const block = `[${header}]\n${bodyLines.join('\n')}\n`;
+  return `${before}${block}${before.endsWith('\n') || before === '' ? '' : '\n'}${afterSection}`;
+}
+
+function installCodex() {
+  const codexDir = codexConfigDir();
+  const configPath = path.join(codexDir, 'config.toml');
+  const agentsMd = path.join(codexDir, 'AGENTS.md');
+  const hooksPath = path.join(codexDir, 'hooks.json');
+
+  if (!fs.existsSync(codexDir)) {
+    log(`skip (not installed): Codex CLI → ${codexDir}`);
+    return;
+  }
+
+  // 1. MCP server in config.toml — upsert [mcp_servers.cave-tools] section.
+  const currentConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
+  if (/\[\s*mcp_servers\.cave-tools\s*\]/.test(currentConfig)) {
+    log(`unchanged: ${configPath} [mcp_servers.cave-tools] already present`);
+  } else {
+    const mcpBody = [
+      'command = "node"',
+      `args = ["${CAVE_TOOLS_CLI}", "mcp"]`,
+    ];
+    const nextConfig = upsertTomlSection(currentConfig, 'mcp_servers.cave-tools', mcpBody);
+    backupOnce(configPath);
+    if (DRY_RUN) {
+      trackPath(configPath, 'update');
+      log(`dry-run: would upsert [mcp_servers.cave-tools] into ${configPath}`);
+    } else {
+      fs.writeFileSync(configPath, nextConfig, { mode: 0o644 });
+      trackPath(configPath, 'update');
+      log(`updated: ${configPath} [mcp_servers.cave-tools]`);
+    }
+  }
+
+  // 2. Rules block in AGENTS.md.
+  upsertFencedBlock(agentsMd, CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
+  upsertDisciplineBlock(agentsMd);
+
+  // 3. Hooks enable + SessionStart echo. Idempotent via marker check.
+  //    Flip [features] hooks = false → true.
+  if (fs.existsSync(configPath)) {
+    const cfg = fs.readFileSync(configPath, 'utf8');
+    if (/\[\s*features\s*\]/.test(cfg) && /^\s*hooks\s*=\s*false\s*$/m.test(cfg)) {
+      const nextCfg = cfg.replace(/^(\s*)hooks\s*=\s*false\s*$/m, '$1hooks = true');
+      backupOnce(configPath);
+      if (DRY_RUN) {
+        trackPath(configPath, 'update');
+        log(`dry-run: would flip hooks = false → true in ${configPath}`);
+      } else {
+        fs.writeFileSync(configPath, nextCfg, { mode: 0o644 });
+        trackPath(configPath, 'update');
+        log(`updated: ${configPath} [features] hooks = true`);
+      }
+    } else if (!/\[\s*features\s*\]/.test(cfg)) {
+      // No [features] section — append one.
+      const nextCfg = cfg + (cfg.endsWith('\n') ? '' : '\n') + '\n[features]\nhooks = true\n';
+      backupOnce(configPath);
+      if (DRY_RUN) {
+        trackPath(configPath, 'update');
+        log(`dry-run: would append [features] hooks = true to ${configPath}`);
+      } else {
+        fs.writeFileSync(configPath, nextCfg, { mode: 0o644 });
+        trackPath(configPath, 'update');
+        log(`updated: ${configPath} appended [features] hooks = true`);
+      }
+    } else {
+      log(`unchanged: ${configPath} hooks already enabled (or feature section present)`);
+    }
+  }
+
+  //    Write hooks.json with a SessionStart echo (only if ours missing).
+  const hooksBody = JSON.stringify({
+    SessionStart: [{
+      matcher: 'startup|resume',
+      hooks: [{
+        type: 'command',
+        command: `echo '${CODEX_HOOK_MARKER}. Prefer cave__read/cave__bash/cave__grep/cave__find/cave__ls/cave__write/cave__edit/cave__apply_patch/cave__websearch over built-ins. Do not double-wrap rtk inside cave__bash.'`,
+        timeout: 5,
+        statusMessage: 'Loading cave-tools rules...',
+      }],
+    }],
+  }, null, 2) + '\n';
+
+  if (fs.existsSync(hooksPath)) {
+    const existing = fs.readFileSync(hooksPath, 'utf8');
+    if (existing.includes(CODEX_HOOK_MARKER)) {
+      log(`unchanged: ${hooksPath} already has cave-tools SessionStart hook`);
+    } else {
+      // Append our hook to the existing hooks.json. Merge SessionStart arrays.
+      // Best-effort parse; if it fails, back up + overwrite.
+      try {
+        const parsed = JSON.parse(existing);
+        if (!Array.isArray(parsed.SessionStart)) parsed.SessionStart = [];
+        const ours = JSON.parse(hooksBody).SessionStart[0];
+        const hasOurs = parsed.SessionStart.some((g) =>
+          Array.isArray(g.hooks) && g.hooks.some((h) =>
+            typeof h.command === 'string' && h.command.includes(CODEX_HOOK_MARKER)));
+        if (!hasOurs) parsed.SessionStart.push(ours);
+        const merged = JSON.stringify(parsed, null, 2) + '\n';
+        backupOnce(hooksPath);
+        if (DRY_RUN) {
+          trackPath(hooksPath, 'update');
+          log(`dry-run: would merge cave-tools hook into ${hooksPath}`);
+        } else {
+          fs.writeFileSync(hooksPath, merged, { mode: 0o644 });
+          trackPath(hooksPath, 'update');
+          log(`updated: ${hooksPath} merged cave-tools SessionStart hook`);
+        }
+      } catch (_) {
+        backupOnce(hooksPath);
+        if (DRY_RUN) {
+          trackPath(hooksPath, 'update');
+          log(`dry-run: would overwrite ${hooksPath} (existing parse failed)`);
+        } else {
+          fs.writeFileSync(hooksPath, hooksBody, { mode: 0o644 });
+          trackPath(hooksPath, 'update');
+          log(`updated: ${hooksPath} (overwrote unparseable existing)`);
+        }
+      }
+    }
+  } else {
+    if (DRY_RUN) {
+      trackPath(hooksPath, 'create');
+      log(`dry-run: would create ${hooksPath}`);
+    } else {
+      ensureDir(path.dirname(hooksPath));
+      fs.writeFileSync(hooksPath, hooksBody, { mode: 0o644 });
+      trackPath(hooksPath, 'create');
+      log(`created: ${hooksPath}`);
+    }
+  }
 }
 
 function opencodeConfigDir() {
@@ -226,6 +494,14 @@ function opencodeConfigDir() {
     return path.join(process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming'), 'opencode');
   }
   return path.join(HOME, '.config', 'opencode');
+}
+
+function zcodeConfigDir() {
+  return path.join(HOME, '.zcode');
+}
+
+function genericAgentsMcpPath() {
+  return path.join(HOME, '.agents', 'mcp.json');
 }
 
 function installOpencodeMcp() {
@@ -260,6 +536,32 @@ function installOpencodeMcp() {
     path.join(configDir, 'agent'),
     path.join(process.cwd(), '.opencode', 'agent'),
   ]);
+  upsertDisciplineBlock(path.join(configDir, 'AGENTS.md'));
+}
+
+function installZcodeMcp() {
+  const zcodeDir = zcodeConfigDir();
+  const genericMcpPath = genericAgentsMcpPath();
+  backupGlobalRule(path.join(zcodeDir, 'AGENTS.md'), 'zcode-AGENTS.md');
+  backupGlobalRule(path.join(zcodeDir, 'skills', 'cave-tools', 'SKILL.md'), 'zcode-cave-tools-SKILL.md');
+
+  const mcpConfig = readJson(genericMcpPath);
+  if (!mcpConfig.mcpServers || typeof mcpConfig.mcpServers !== 'object' || Array.isArray(mcpConfig.mcpServers)) {
+    mcpConfig.mcpServers = {};
+  }
+
+  mcpConfig.mcpServers['cave-tools'] = {
+    command: 'node',
+    args: [CAVE_TOOLS_CLI, 'mcp'],
+  };
+
+  writeJson(genericMcpPath, mcpConfig);
+  log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${genericMcpPath} mcpServers.cave-tools (ZCode import source)`);
+
+  upsertFencedBlock(path.join(zcodeDir, 'AGENTS.md'), CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
+  upsertDisciplineBlock(path.join(zcodeDir, 'AGENTS.md'));
+  writeText(path.join(zcodeDir, 'skills', 'cave-tools', 'SKILL.md'), ZCODE_CAVE_TOOLS_SKILL);
+  log('note: in ZCode, open Settings → MCP Servers → Import → Generic .agents, then import cave-tools');
 }
 
 function injectOpencodeAgentDefs(agentDirs) {
@@ -306,6 +608,7 @@ function installMcpServersTarget(label, configPath, detectPath) {
 function targetDefinitions() {
   return [
     { key: 'claude', label: 'Claude Code', configPath: claudeMcpJsonPath(), detectPath: process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude'), special: 'claude' },
+    { key: 'codex', label: 'Codex CLI', configPath: path.join(HOME, '.codex', 'config.toml'), detectPath: path.join(HOME, '.codex'), special: 'codex' },
     { key: 'gemini', label: 'Gemini CLI', configPath: path.join(HOME, '.gemini', 'settings.json'), detectPath: path.join(HOME, '.gemini'), shape: 'mcpServers' },
     { key: 'antigravity', label: 'Antigravity IDE', configPath: path.join(HOME, '.gemini', 'antigravity', 'mcp_config.json'), detectPath: path.join(HOME, '.gemini', 'antigravity'), shape: 'mcpServers' },
     { key: 'antigravity-cli', label: 'Antigravity CLI', configPath: path.join(HOME, '.gemini', 'antigravity-cli', 'mcp_config.json'), detectPath: path.join(HOME, '.gemini', 'antigravity-cli'), shape: 'mcpServers' },
@@ -315,6 +618,7 @@ function targetDefinitions() {
     { key: 'kiro', label: 'Kiro CLI', configPath: path.join(HOME, '.kiro', 'settings', 'mcp.json'), detectPath: path.join(HOME, '.kiro'), shape: 'mcpServers', rules: 'kiro' },
     { key: 'cursor', label: 'Cursor', configPath: path.join(HOME, '.cursor', 'mcp.json'), detectPath: path.join(HOME, '.cursor'), shape: 'mcpServers' },
     { key: 'opencode', label: 'OpenCode', configPath: path.join(opencodeConfigDir(), 'opencode.json'), detectPath: opencodeConfigDir(), special: 'opencode' },
+    { key: 'zcode', label: 'ZCode', configPath: path.join(zcodeConfigDir(), 'AGENTS.md'), detectPath: zcodeConfigDir(), special: 'zcode' },
   ];
 }
 
@@ -367,12 +671,16 @@ async function selectTargets(targets) {
     const arg = args[i];
     if (arg === '--') continue;
     if (arg === '--help' || arg === '-h') {
-      log('Usage: pnpm run install:agents -- [--all|--agent <name>|--list|--dry-run|--verbose]');
+      log('Usage: pnpm run install:agents -- [--all|--agent <name>|--with-extra-rules|--list|--dry-run|--verbose]');
       log('Targets: ' + targets.map((target) => target.key).join(', '));
+      log('Flags:');
+      log('  --with-extra-rules  Also write the cave-discipline block (cave-tools + RTK-proxy +');
+      log('                      codebase-memory-mcp + mcp-init-wait + subagent rules). Off by default.');
       process.exit(0);
     }
     if (arg === '--dry-run') continue;
     if (arg === '--verbose') continue;
+    if (arg === '--with-extra-rules') continue;
     if (arg === '--list') {
       printTargets(targets);
       process.exit(0);
@@ -416,7 +724,9 @@ function installSelectedTargets(targets) {
     installSharedCavemanSkill();
     installCaveToolsClaudeHooks();
   }
+  if (keys.has('codex')) installCodex();
   if (keys.has('opencode')) installOpencodeMcp();
+  if (keys.has('zcode')) installZcodeMcp();
 
   for (const target of targets) {
     if (target.shape === 'mcpServers') installMcpServersTarget(target.label, target.configPath, target.detectPath);
@@ -426,6 +736,7 @@ function installSelectedTargets(targets) {
     installGeminiAndAntigravityRules();
   }
   if (keys.has('kiro')) installKiroRules();
+  if (keys.has('cursor')) installCursorRules();
 }
 
 function installGeminiAndAntigravityRules() {
@@ -437,6 +748,17 @@ function installGeminiAndAntigravityRules() {
 
   upsertFencedBlock(path.join(geminiDir, 'GEMINI.md'), CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
   upsertFencedBlock(path.join(geminiDir, 'AGENTS.md'), CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
+  upsertDisciplineBlock(path.join(geminiDir, 'AGENTS.md'));
+
+  // Antigravity variants have their own rules locations alongside the shared
+  // gemini config. With --with-extra-rules, write the discipline block to the
+  // cli/AGENTS.md and the ide/agents/ dir so both variants pick it up.
+  if (WITH_EXTRA_RULES) {
+    const agCliAgents = path.join(geminiDir, 'antigravity-cli', 'AGENTS.md');
+    if (fs.existsSync(path.dirname(agCliAgents))) upsertDisciplineBlock(agCliAgents);
+    const agIdeAgentsDir = path.join(geminiDir, 'antigravity-ide', 'agents');
+    if (fs.existsSync(agIdeAgentsDir)) upsertDisciplineBlock(path.join(agIdeAgentsDir, 'cave-discipline.md'));
+  }
 }
 
 function installKiroRules() {
@@ -446,6 +768,38 @@ function installKiroRules() {
     return;
   }
   upsertFencedBlock(path.join(kiroDir, 'steering', 'cave-tools.md'), CAVE_TOOLS_BLOCK);
+  // kiro convention: one steering file per concern. Discipline gets its own.
+  upsertDisciplineBlock(path.join(kiroDir, 'steering', 'cave-discipline.md'));
+}
+
+// Cursor rules live in ~/.cursor/rules/*.mdc with YAML frontmatter. The
+// discipline block gets its own .mdc file (alwaysApply: true) so Cursor loads
+// it every session. Only runs with --with-extra-rules.
+function installCursorRules() {
+  if (!WITH_EXTRA_RULES) return;
+  const cursorRulesDir = path.join(HOME, '.cursor', 'rules');
+  if (!fs.existsSync(cursorRulesDir)) return;
+  const discPath = path.join(cursorRulesDir, 'cave-discipline.mdc');
+  const frontmatter = '---\ndescription: Cave discipline rules — cave-tools MCP, RTK, codebase-memory-mcp, MCP init, subagent propagation.\nglobs: *\nalwaysApply: true\n---\n\n';
+  const body = fs.readFileSync(DISCIPLINE_RULES_PATH, 'utf8').trimEnd() + '\n';
+  const block = `${DISCIPLINE_MARKER_BEGIN}\n${body}${DISCIPLINE_MARKER_END}\n`;
+  const next = frontmatter + block;
+  if (fs.existsSync(discPath)) {
+    const current = fs.readFileSync(discPath, 'utf8');
+    if (current === next) {
+      log(`unchanged: ${discPath}`);
+      return;
+    }
+    backupOnce(discPath);
+  }
+  if (DRY_RUN) {
+    trackPath(discPath, 'create');
+    log(`dry-run: would create ${discPath}`);
+    return;
+  }
+  fs.writeFileSync(discPath, next, { mode: 0o644 });
+  trackPath(discPath, 'create');
+  log(`created: ${discPath}`);
 }
 
 function installSharedCavemanSkill() {

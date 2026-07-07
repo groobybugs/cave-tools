@@ -74,12 +74,18 @@ pnpm run install:agents
 pnpm run remove:agents
 pnpm run install:agents -- --list
 pnpm run install:agents -- --dry-run --verbose --all
-pnpm run install:agents -- --agent claude,gemini
+pnpm run install:agents -- --agent claude,codex,gemini,zcode
+pnpm run install:agents -- --all --with-extra-rules
 pnpm run remove:agents -- --dry-run --verbose --agent antigravity,antigravity-backup
 pnpm run remove:agents -- --all
+pnpm run remove:agents -- --all --with-extra-rules
 ```
 
 Installer/remover detect installed clients and prompt when run in an interactive terminal. Use `--all` for all detected targets, `--agent <name>` for one or more targets, `--dry-run` to print planned writes/removals without changing files, and `--verbose` to print the modified/planned file paths summary. Missing clients are skipped unless explicitly selected, then their installer still respects the target detect path.
+
+**`--with-extra-rules`** (opt-in) also writes a second fenced block — `<!-- cave-discipline-begin -->` — into every selected target's rules file, bundling five rules: (1) prefer cave-tools MCP, (2) prefix non-cave-tools bash with `rtk` (fallback `rtk proxy`), (3) use codebase-memory-mcp and `index_repository` at init, (4) wait for MCP init before proceeding, (5) subagents must follow these rules too. Off by default — personal/team extras layered on top of the standard cave-tools block. Pass the same flag to `remove:agents` to strip only the discipline block (leaves the cave-tools block intact).
+
+Supported targets: `claude`, `codex`, `gemini`, `antigravity`, `antigravity-cli`, `antigravity-ide`, `antigravity-shared`, `antigravity-backup`, `kiro`, `cursor`, `opencode`, `zcode`. Run `pnpm run install:agents -- --list` to see which are detected on this machine.
 
 Some clients use a different wrapper key:
 
@@ -95,6 +101,7 @@ Some clients use a different wrapper key:
 | Kiro CLI    | `~/.kiro/settings/mcp.json`                                   | `mcpServers`                                   |
 | Cursor      | `~/.cursor/mcp.json`                                          | `mcpServers`                                   |
 | opencode    | `~/.config/opencode/opencode.json`                            | `mcp` with `type: "local"` and `command` array |
+| ZCode       | `~/.agents/mcp.json` import source, plus `~/.zcode/AGENTS.md` | `mcpServers`                                   |
 
 opencode example:
 
@@ -279,6 +286,25 @@ Antigravity and Gemini CLI have no `deny`/hook system — enforcement is the glo
 - These files do **not** support `@file` imports — inline the rules directly. A bare `@RTK.md` line is silently ignored, so paste the actual content.
 - Optionally disable the built-in `Read`/`Grep`/`Glob`/`Bash` in the IDE tool toggles so the model falls back to `cave__*`.
 - Antigravity caches MCP tool schemas under `~/.gemini/antigravity*/mcp/cave-tools/*.json`. Installer does not write those cache files; Antigravity recreates them after it connects to the configured MCP server. Remover deletes the cache dirs so stale tools disappear after uninstall.
+
+### ZCode
+
+ZCode reads user-level instructions from `~/.zcode/AGENTS.md` and user-level skills from `~/.zcode/skills/<skill-name>/SKILL.md`. It can import MCP servers from the generic external-agent config at `~/.agents/mcp.json`.
+
+The installer target `zcode` writes:
+
+- `~/.agents/mcp.json` with `mcpServers.cave-tools`
+- `~/.zcode/AGENTS.md` with the Cave Tools guidance block
+- `~/.zcode/skills/cave-tools/SKILL.md` with a ZCode-compatible Cave Tools skill
+
+After running `pnpm run install:agents -- --agent zcode`, open ZCode and import the MCP server once:
+
+1. Open **Settings -> MCP Servers**.
+2. Click **Import**.
+3. Choose **Generic `.agents`**.
+4. Select `cave-tools` and import it into the user or workspace scope.
+
+ZCode stores imported servers in its own `.zcode` configuration. The installer intentionally writes only the documented import source instead of guessing that internal file format.
 
 ### Other MCP clients
 

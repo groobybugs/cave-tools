@@ -9,8 +9,11 @@ const HOME = os.homedir();
 
 const MARKER_BEGIN = '<!-- cave-tools-begin -->';
 const MARKER_END = '<!-- cave-tools-end -->';
+const DISCIPLINE_MARKER_BEGIN = '<!-- cave-discipline-begin -->';
+const DISCIPLINE_MARKER_END = '<!-- cave-discipline-end -->';
 const DRY_RUN = process.argv.includes('--dry-run');
 const VERBOSE = process.argv.includes('--verbose');
+const WITH_EXTRA_RULES = process.argv.includes('--with-extra-rules');
 const touchedPaths = new Map();
 
 function log(message) {
@@ -85,13 +88,41 @@ function writeJson(filePath, value) {
 }
 
 function removeFencedBlock(content) {
+  return removeFencedBlockGeneric(content, MARKER_BEGIN, MARKER_END);
+}
+
+function removeFencedBlockGeneric(content, beginMarker, endMarker) {
   let next = content;
   while (true) {
-    const begin = next.indexOf(MARKER_BEGIN);
-    const end = next.indexOf(MARKER_END);
+    const begin = next.indexOf(beginMarker);
+    const end = next.indexOf(endMarker);
     if (begin === -1 || end === -1 || end <= begin) return next;
-    next = next.slice(0, begin).trimEnd() + '\n\n' + next.slice(end + MARKER_END.length).trimStart();
+    next = next.slice(0, begin).trimEnd() + '\n\n' + next.slice(end + endMarker.length).trimStart();
   }
+}
+
+// Strip only the discipline block (--with-extra-rules). Leaves the cave-tools
+// block intact unless the caller is doing a full remove.
+function removeDisciplineBlock(filePath) {
+  if (!fs.existsSync(filePath)) {
+    log(`skip (missing): ${filePath}`);
+    return;
+  }
+  const current = fs.readFileSync(filePath, 'utf8');
+  const next = removeFencedBlockGeneric(current, DISCIPLINE_MARKER_BEGIN, DISCIPLINE_MARKER_END).trimEnd() + '\n';
+  if (next === current) {
+    log(`unchanged: ${filePath}`);
+    return;
+  }
+  backupOnce(filePath);
+  if (DRY_RUN) {
+    trackPath(filePath, 'update');
+    log(`dry-run: would strip discipline block from ${filePath}`);
+    return;
+  }
+  fs.writeFileSync(filePath, next, { mode: 0o644 });
+  trackPath(filePath, 'update');
+  log(`updated: ${filePath} stripped discipline block`);
 }
 
 function removeBlock(filePath) {
@@ -178,9 +209,46 @@ function opencodeConfigDir() {
   return path.join(HOME, '.config', 'opencode');
 }
 
+function zcodeConfigDir() {
+  return path.join(HOME, '.zcode');
+}
+
+function genericAgentsMcpPath() {
+  return path.join(HOME, '.agents', 'mcp.json');
+}
+
+function removeZcodeMcp() {
+  removeMcpServersTarget('ZCode generic .agents import source', genericAgentsMcpPath());
+  removeBlock(path.join(zcodeConfigDir(), 'AGENTS.md'));
+  removeZcodeGeneratedSkill();
+}
+
+function removeZcodeGeneratedSkill() {
+  const skillPath = path.join(zcodeConfigDir(), 'skills', 'cave-tools', 'SKILL.md');
+  if (!fs.existsSync(skillPath)) {
+    log(`skip (missing): ${skillPath}`);
+    return;
+  }
+  const current = fs.readFileSync(skillPath, 'utf8');
+  if (!current.includes(MARKER_BEGIN) || !current.includes(MARKER_END)) {
+    log(`unchanged: ${skillPath}`);
+    return;
+  }
+  backupOnce(skillPath);
+  if (DRY_RUN) {
+    trackPath(skillPath, 'remove');
+    log(`dry-run: would remove ${skillPath}`);
+    return;
+  }
+  fs.unlinkSync(skillPath);
+  trackPath(skillPath, 'remove');
+  log(`removed: ${skillPath}`);
+}
+
 function targetDefinitions() {
   return [
     { key: 'claude', label: 'Claude Code', configPath: claudeMcpJsonPath(), detectPath: claudeConfigDir(), special: 'claude' },
+    { key: 'codex', label: 'Codex CLI', configPath: path.join(HOME, '.codex', 'config.toml'), detectPath: path.join(HOME, '.codex'), special: 'codex' },
     { key: 'gemini', label: 'Gemini CLI', configPath: path.join(HOME, '.gemini', 'settings.json'), detectPath: path.join(HOME, '.gemini'), shape: 'mcpServers' },
     { key: 'antigravity', label: 'Antigravity IDE', configPath: path.join(HOME, '.gemini', 'antigravity', 'mcp_config.json'), detectPath: path.join(HOME, '.gemini', 'antigravity'), shape: 'mcpServers', cacheDir: path.join(HOME, '.gemini', 'antigravity', 'mcp', 'cave-tools') },
     { key: 'antigravity-cli', label: 'Antigravity CLI', configPath: path.join(HOME, '.gemini', 'antigravity-cli', 'mcp_config.json'), detectPath: path.join(HOME, '.gemini', 'antigravity-cli'), shape: 'mcpServers', cacheDir: path.join(HOME, '.gemini', 'antigravity-cli', 'mcp', 'cave-tools') },
@@ -190,6 +258,7 @@ function targetDefinitions() {
     { key: 'kiro', label: 'Kiro CLI', configPath: path.join(HOME, '.kiro', 'settings', 'mcp.json'), detectPath: path.join(HOME, '.kiro'), shape: 'mcpServers' },
     { key: 'cursor', label: 'Cursor', configPath: path.join(HOME, '.cursor', 'mcp.json'), detectPath: path.join(HOME, '.cursor'), shape: 'mcpServers' },
     { key: 'opencode', label: 'OpenCode', configPath: path.join(opencodeConfigDir(), 'opencode.json'), detectPath: opencodeConfigDir(), special: 'opencode' },
+    { key: 'zcode', label: 'ZCode', configPath: path.join(zcodeConfigDir(), 'AGENTS.md'), detectPath: zcodeConfigDir(), special: 'zcode' },
   ];
 }
 
@@ -242,12 +311,15 @@ async function selectTargets(targets) {
     const arg = args[i];
     if (arg === '--') continue;
     if (arg === '--help' || arg === '-h') {
-      log('Usage: pnpm run remove:agents -- [--all|--agent <name>|--list|--dry-run|--verbose]');
+      log('Usage: pnpm run remove:agents -- [--all|--agent <name>|--with-extra-rules|--list|--dry-run|--verbose]');
       log('Targets: ' + targets.map((target) => target.key).join(', '));
+      log('Flags:');
+      log('  --with-extra-rules  Also strip the cave-discipline block (default: leave it in place).');
       process.exit(0);
     }
     if (arg === '--dry-run') continue;
     if (arg === '--verbose') continue;
+    if (arg === '--with-extra-rules') continue;
     if (arg === '--list') {
       printTargets(targets);
       process.exit(0);
@@ -399,6 +471,111 @@ function removeAntigravityOauthToken(target) {
   log(`${DRY_RUN ? 'dry-run: would update' : 'updated'}: ${tokenPath} removed cave-tools OAuth token`);
 }
 
+// Codex CLI removal: strip [mcp_servers.cave-tools] TOML section, remove the
+// AGENTS.md fenced block, delete hooks.json (only if it contains our marker),
+// and flip [features] hooks = true → false ONLY if no other SessionStart hook
+// remains (avoid clobbering caveman's hook enablement).
+function removeCodex() {
+  const codexDir = path.join(HOME, '.codex');
+  const configPath = path.join(codexDir, 'config.toml');
+  const agentsMd = path.join(codexDir, 'AGENTS.md');
+  const hooksPath = path.join(codexDir, 'hooks.json');
+  const CODEX_HOOK_MARKER = 'CAVE-TOOLS ACTIVE';
+
+  // 1. Strip [mcp_servers.cave-tools] from config.toml.
+  if (fs.existsSync(configPath)) {
+    const cfg = fs.readFileSync(configPath, 'utf8');
+    const sectionRe = /\n*\[\s*mcp_servers\.cave-tools\s*\]\s*\n[^\[]*/g;
+    if (sectionRe.test(cfg)) {
+      const nextCfg = cfg.replace(sectionRe, '\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+      backupOnce(configPath);
+      if (DRY_RUN) {
+        trackPath(configPath, 'update');
+        log(`dry-run: would strip [mcp_servers.cave-tools] from ${configPath}`);
+      } else {
+        fs.writeFileSync(configPath, nextCfg, { mode: 0o644 });
+        trackPath(configPath, 'update');
+        log(`updated: ${configPath} stripped [mcp_servers.cave-tools]`);
+      }
+    } else {
+      log(`unchanged: ${configPath} no [mcp_servers.cave-tools] section`);
+    }
+
+    // Flip hooks = true → false only if hooks.json no longer needs it.
+    if (fs.existsSync(hooksPath)) {
+      const hooks = fs.readFileSync(hooksPath, 'utf8');
+      const stillNeeded = hooks.includes('SessionStart') && !hooks.includes(CODEX_HOOK_MARKER);
+      // Also check for any non-cave-tools SessionStart hook.
+      const otherHooksPresent = hooks.includes('SessionStart') && (
+        hooks.includes('CAVEMAN') || hooks.includes('caveman') ||
+        /"command"\s*:\s*"echo[^"]*caveman/i.test(hooks));
+      const shouldFlip = /^\s*hooks\s*=\s*true\s*$/m.test(cfg) && !stillNeeded && !otherHooksPresent;
+      if (shouldFlip) {
+        const nextCfg = cfg.replace(/^(\s*)hooks\s*=\s*true\s*$/m, '$1hooks = false');
+        backupOnce(configPath);
+        if (!DRY_RUN) {
+          fs.writeFileSync(configPath, nextCfg, { mode: 0o644 });
+          trackPath(configPath, 'update');
+          log(`updated: ${configPath} [features] hooks = false (no other hooks remain)`);
+        } else {
+          trackPath(configPath, 'update');
+          log(`dry-run: would flip hooks = true → false in ${configPath}`);
+        }
+      }
+    }
+  }
+
+  // 2. Remove AGENTS.md fenced block.
+  removeBlock(agentsMd);
+
+  // 3. Remove our hook entry from hooks.json (merge-safe), or delete file if
+  //    only ours remains.
+  if (fs.existsSync(hooksPath)) {
+    const hooks = fs.readFileSync(hooksPath, 'utf8');
+    if (hooks.includes(CODEX_HOOK_MARKER)) {
+      try {
+        const parsed = JSON.parse(hooks);
+        if (Array.isArray(parsed.SessionStart)) {
+          parsed.SessionStart = parsed.SessionStart
+            .map((g) => g && Array.isArray(g.hooks) ? {
+              ...g,
+              hooks: g.hooks.filter((h) => !(typeof h?.command === 'string' && h.command.includes(CODEX_HOOK_MARKER))),
+            } : g)
+            .filter((g) => !g || !Array.isArray(g.hooks) || g.hooks.length > 0);
+          if (parsed.SessionStart.length === 0) delete parsed.SessionStart;
+        }
+        const remainingKeys = Object.keys(parsed).filter((k) => k !== 'SessionStart');
+        if (parsed.SessionStart === undefined && remainingKeys.length === 0) {
+          // Only our hook was there — delete the file.
+          if (DRY_RUN) {
+            trackPath(hooksPath, 'remove');
+            log(`dry-run: would delete ${hooksPath} (only cave-tools hook present)`);
+          } else {
+            fs.unlinkSync(hooksPath);
+            trackPath(hooksPath, 'remove');
+            log(`removed: ${hooksPath} (only cave-tools hook present)`);
+          }
+        } else {
+          const merged = JSON.stringify(parsed, null, 2) + '\n';
+          backupOnce(hooksPath);
+          if (DRY_RUN) {
+            trackPath(hooksPath, 'update');
+            log(`dry-run: would strip cave-tools hook from ${hooksPath}`);
+          } else {
+            fs.writeFileSync(hooksPath, merged, { mode: 0o644 });
+            trackPath(hooksPath, 'update');
+            log(`updated: ${hooksPath} stripped cave-tools hook`);
+          }
+        }
+      } catch (_) {
+        log(`skip (unparseable): ${hooksPath} — remove manually`);
+      }
+    } else {
+      log(`unchanged: ${hooksPath} no cave-tools hook`);
+    }
+  }
+}
+
 function removeSelectedTargets(targets) {
   const keys = new Set(targets.map((target) => target.key));
 
@@ -409,9 +586,21 @@ function removeSelectedTargets(targets) {
     removeBlock(path.join(claudeConfigDir(), 'skills', 'caveman', 'SKILL.md'));
     removeBlock(path.join(HOME, '.agents', 'skills', 'caveman', 'SKILL.md'));
     removeKnownFiles();
+    if (WITH_EXTRA_RULES) removeDisciplineBlock(path.join(claudeConfigDir(), 'CLAUDE.md'));
   }
 
-  if (keys.has('opencode')) removeOpencodeMcp();
+  if (keys.has('codex')) {
+    if (WITH_EXTRA_RULES) removeDisciplineBlock(path.join(HOME, '.codex', 'AGENTS.md'));
+    removeCodex();
+  }
+  if (keys.has('opencode')) {
+    removeOpencodeMcp();
+    if (WITH_EXTRA_RULES) removeDisciplineBlock(path.join(opencodeConfigDir(), 'AGENTS.md'));
+  }
+  if (keys.has('zcode')) {
+    removeZcodeMcp();
+    if (WITH_EXTRA_RULES) removeDisciplineBlock(path.join(zcodeConfigDir(), 'AGENTS.md'));
+  }
 
   for (const target of targets) {
     if (target.shape === 'mcpServers') removeMcpServersTarget(target.label, target.configPath);
@@ -424,8 +613,36 @@ function removeSelectedTargets(targets) {
   if ([...keys].some((key) => key === 'gemini' || key.startsWith('antigravity'))) {
     removeBlock(path.join(HOME, '.gemini', 'GEMINI.md'));
     removeBlock(path.join(HOME, '.gemini', 'AGENTS.md'));
+    if (WITH_EXTRA_RULES) {
+      removeDisciplineBlock(path.join(HOME, '.gemini', 'AGENTS.md'));
+      removeDisciplineBlock(path.join(HOME, '.gemini', 'antigravity-cli', 'AGENTS.md'));
+      removeDisciplineBlock(path.join(HOME, '.gemini', 'antigravity-ide', 'agents', 'cave-discipline.md'));
+    }
   }
-  if (keys.has('kiro')) removeKiroGeneratedRule();
+  if (keys.has('kiro')) {
+    removeKiroGeneratedRule();
+    if (WITH_EXTRA_RULES) removeDisciplineBlock(path.join(HOME, '.kiro', 'steering', 'cave-discipline.md'));
+  }
+  if (keys.has('cursor') && WITH_EXTRA_RULES) {
+    // Cursor discipline rule is a standalone .mdc — delete the whole file.
+    const discPath = path.join(HOME, '.cursor', 'rules', 'cave-discipline.mdc');
+    if (fs.existsSync(discPath)) {
+      const content = fs.readFileSync(discPath, 'utf8');
+      if (content.includes(DISCIPLINE_MARKER_BEGIN)) {
+        backupOnce(discPath);
+        if (DRY_RUN) {
+          trackPath(discPath, 'remove');
+          log(`dry-run: would remove ${discPath}`);
+        } else {
+          fs.unlinkSync(discPath);
+          trackPath(discPath, 'remove');
+          log(`removed: ${discPath}`);
+        }
+      } else {
+        log(`unchanged: ${discPath} (no discipline block)`);
+      }
+    }
+  }
 }
 
 try {
