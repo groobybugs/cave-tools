@@ -4,8 +4,6 @@ export interface RunCommandOptions {
   cwd?: string;
   timeout: number;
   shell?: string;
-  /** @deprecated use maxBytes. Kept as alias for back-compat. */
-  maxCaptureBytes?: number;
   /** Max bytes retained in memory per stream (stdout, stderr). Default 100KB. */
   maxBytes?: number;
   /** Max lines retained in the final tail per stream. Default 2000. */
@@ -22,11 +20,6 @@ export interface RunCommandResult {
   timedOut: boolean;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
-  /** Reserved for future spill-to-file support (currently always undefined — the
-   * ring buffer bounds memory without spilling). Kept in the interface so bash.ts
-   * can surface a spill note when re-added without a breaking change. */
-  stdoutPath?: string;
-  stderrPath?: string;
 }
 
 export const defaultShell = (): string =>
@@ -113,7 +106,7 @@ export function runCommand(command: string, options: RunCommandOptions): Promise
       windowsHide: process.platform === "win32",
     });
 
-    const maxBytes = options.maxBytes ?? options.maxCaptureBytes ?? 100 * 1024;
+    const maxBytes = options.maxBytes ?? 100 * 1024;
     const maxLines = options.maxLines ?? 2000;
     const stdoutCap = new BoundedCapture(maxBytes, maxLines);
     const stderrCap = new BoundedCapture(maxBytes, maxLines);

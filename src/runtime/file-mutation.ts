@@ -19,7 +19,7 @@ function hasUtf8Bom(content: Uint8Array): boolean {
   return content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf;
 }
 
-function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+export function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 

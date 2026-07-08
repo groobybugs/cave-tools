@@ -2,7 +2,7 @@
 name: cave-tools
 description: >
   Token-saving file/shell/web tool layer (cave__read / cave__bash / cave__grep / cave__find /
-  cave__ls / cave__write / cave__edit / cave__apply_patch / cave__websearch / cave__compress / cave__status). Auto-activates every session.
+  cave__ls / cave__write / cave__edit / cave__apply_patch / cave__websearch / cave__webfetch / cave__compress / cave__status). Auto-activates every session.
   Use when the user says "use cave-tools", invokes /cave-tools, asks to save tokens,
   or whenever file/shell operations are needed.
 ---
@@ -23,6 +23,7 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
 - Use `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace/indentation-tolerant matching); `cave__apply_patch` for multi-file add/update/delete/move patches.
 - Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived if large, and budget-compressed.
+- Use `cave__webfetch` to fetch a specific URL and return markdown/text/html (or a base64 image block); output is redacted, archived if large, and budget-compressed.
 - After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next `cave__read` returns fresh content (not a stub).
 - Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - Use `cave__status` to check RTK availability, cache state, savings %, budgets.
@@ -63,4 +64,4 @@ Yes: `cave__read` returns stub → edit with built-in Edit → call `cave__inval
 
 ## Savings
 
-Run `cave-tools status` (CLI) or `cave__status` (MCP) for reduction %, hit rate, RTK rewrites, budgets. The statusline badge shows the live summary as `[CAVE-TOOLS] ↓X% • Yk tok`.
+Run `cave-tools status` (CLI) or `cave__status` (MCP) for reduction %, hit rate, RTK rewrites, budgets. The statusline badge shows the live summary as `[CAVE-TOOLS] ↓X% • Yk tok` (or `[CAVE-TOOLS] ↓X% • Ncache` on a fresh session with no tokens saved yet).

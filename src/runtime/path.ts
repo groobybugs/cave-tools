@@ -1,4 +1,4 @@
-import { lstat, mkdir, realpath, stat } from "fs/promises";
+import { mkdir, realpath, stat } from "fs/promises";
 import path from "path";
 
 export function toPosixPath(value: string): string {
@@ -29,14 +29,6 @@ export async function resolveExistingDirectory(value?: string): Promise<string> 
 
 export async function ensureParentDirectory(filePath: string): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
-}
-
-export async function isSymlink(value: string): Promise<boolean> {
-  try {
-    return (await lstat(value)).isSymbolicLink();
-  } catch {
-    return false;
-  }
 }
 
 export async function resolveMutationTarget(filePath: string): Promise<{ canonical: string; existed: boolean }> {

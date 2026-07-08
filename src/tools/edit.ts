@@ -3,7 +3,7 @@ import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { invalidateFileCache, recordEdit } from "../compression/utils.js";
 import { findReplacement } from "./replacers.js";
-import { writeIfUnchanged } from "../runtime/file-mutation.js";
+import { decodeUtf8PreserveBom, joinBom, writeIfUnchanged } from "../runtime/file-mutation.js";
 
 // Adapt new_string line endings to match the matched span's style so an edit
 // against a CRLF file doesn't inject lone LFs (and vice-versa).
@@ -13,17 +13,6 @@ function adaptLineEndings(search: string, newString: string): string {
   if (searchCRLF && !newCRLF) return newString.replace(/\n/g, "\r\n");
   if (!searchCRLF && newCRLF) return newString.replace(/\r\n/g, "\n");
   return newString;
-}
-
-function decodeUtf8PreserveBom(content: Uint8Array): { text: string; bom: boolean } {
-  const bom = content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf;
-  const text = new TextDecoder("utf-8", { fatal: true }).decode(bom ? content.slice(3) : content);
-  return { text, bom };
-}
-
-function joinBom(text: string, bom: boolean): string {
-  const stripped = text.replace(/^\uFEFF+/, "");
-  return bom ? `\uFEFF${stripped}` : stripped;
 }
 
 function findClosestLineHint(content: string, oldStr: string): string {

@@ -19,12 +19,21 @@ import { lsTool } from "./tools/ls.js";
 import { editTool } from "./tools/edit.js";
 import { applyPatchTool } from "./tools/apply-patch.js";
 import { websearchTool } from "./tools/websearch.js";
+import { webfetchTool } from "./tools/webfetch.js";
 import { pruneDeadSessions } from "./compression/utils.js";
+import { readFileSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
+
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+const packageVersion = JSON.parse(
+  readFileSync(join(moduleDir, "..", "package.json"), "utf-8"),
+).version as string;
 
 const server = new Server(
   {
     name: "cave-tools",
-    version: "0.1.0",
+    version: packageVersion,
   },
   {
     capabilities: {
@@ -44,6 +53,7 @@ const tools: Tool[] = [
   editTool,
   applyPatchTool,
   websearchTool,
+  webfetchTool,
   compressTool,
   statusTool,
   configureTool,
@@ -83,6 +93,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ) as Promise<CallToolResult>;
     case "cave__websearch":
       return websearchTool.handler(
+        args as Record<string, unknown>,
+      ) as Promise<CallToolResult>;
+    case "cave__webfetch":
+      return webfetchTool.handler(
         args as Record<string, unknown>,
       ) as Promise<CallToolResult>;
     case "cave__compress":

@@ -60,14 +60,6 @@ const PATTERNS: RedactPattern[] = [
 
 let redactionCount = 0;
 
-export function getRedactionCount(): number {
-  return redactionCount;
-}
-
-export function resetRedactionCount(): void {
-  redactionCount = 0;
-}
-
 export function redactSecrets(input: string): string {
   let result = input;
 

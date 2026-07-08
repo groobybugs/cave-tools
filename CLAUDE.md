@@ -136,3 +136,29 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 
 Overall average: **60-90% token reduction** on common development operations.
 <!-- /rtk-instructions -->
+
+<!-- cave-tools-instructions -->
+# Cave Tools — token-optimized MCP
+
+Cave Tools provides optimized drop-in replacements for built-in file/shell/web
+tools. Same results, fewer tokens (RTK rewriting, structured JSON/XML extraction,
+per-tool line budgets, dedup cache, redaction, archiving). Prefer these over
+built-ins.
+
+## Tools
+- `cave__read` instead of Read — dedup cache + line budgets.
+- `cave__grep`, `cave__find`, `cave__ls` instead of Grep/Glob/shell `ls`.
+- `cave__bash` instead of Bash — RTK + structured extraction + line budgets.
+- `cave__write` to create/overwrite a single file; `cave__edit` for fuzzy string replacement.
+- `cave__apply_patch` for multi-file add/update/delete/move patches.
+- `cave__invalidate` to refresh the read dedup cache after external edits.
+- `cave__websearch` (Exa/Parallel) and `cave__webfetch` (URL → markdown/text/html) for web content.
+- `cave__compress` to shrink large pasted/tool text; `cave__status` for savings stats.
+- `cave__configure` to set per-tool budgets, reset cache, or reset stats.
+
+## Golden Rules
+- Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
+- Read before edit. Do not batch read + edit in parallel.
+- `cave__write`/`cave__edit` write to disk; `cave__invalidate` is cache-only.
+- In Plan Mode / read-only phase, never call write-capable tools (`cave__write`, `cave__edit`, `cave__apply_patch`, or mutating shell commands).
+<!-- /cave-tools-instructions -->

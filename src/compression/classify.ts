@@ -61,7 +61,3 @@ export function classifyCommand(command: string): OutputPolicy {
 
   return "compressible";
 }
-
-export function isProtectedPolicy(policy: OutputPolicy): boolean {
-  return policy === "passthrough" || policy === "verbatim";
-}

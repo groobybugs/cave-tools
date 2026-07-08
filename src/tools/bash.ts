@@ -111,9 +111,6 @@ export const bashTool: Tool & {
         result.signal !== null;
       const capture = captureNotice(result.stdoutTruncated, result.stderrTruncated);
       const captureNote = capture ? `\n\n${capture}` : "";
-      const spillNote = result.stdoutPath
-        ? `\n\n[Full output spilled to: ${result.stdoutPath}]`
-        : "";
       const exitNote = result.timedOut
         ? `\n\n[timed out after ${timeout}ms - process group killed]`
         : result.signal
@@ -131,7 +128,7 @@ export const bashTool: Tool & {
           content: [
             {
               type: "text",
-              text: `${processed}${spillNote}${captureNote}${exitNote}`,
+              text: `${processed}${captureNote}${exitNote}`,
             },
           ],
           ...markError,
@@ -157,7 +154,7 @@ export const bashTool: Tool & {
           content: [
             {
               type: "text",
-              text: `${processed}${archiveNote}${spillNote}${captureNote}${exitNote}`,
+              text: `${processed}${archiveNote}${captureNote}${exitNote}`,
             },
           ],
           ...markError,
@@ -178,7 +175,7 @@ export const bashTool: Tool & {
         content: [
           {
             type: "text",
-            text: `${processed}${archiveNote}${spillNote}${captureNote}${exitNote}`,
+            text: `${processed}${archiveNote}${captureNote}${exitNote}`,
           },
         ],
         ...markError,

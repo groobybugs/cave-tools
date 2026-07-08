@@ -10,6 +10,8 @@ import { statusTool } from "./dist/tools/status.js";
 import { writeTool } from "./dist/tools/write.js";
 import { invalidateTool } from "./dist/tools/invalidate.js";
 import { websearchTool, parseWebsearchResponse } from "./dist/tools/websearch.js";
+import { webfetchTool } from "./dist/tools/webfetch.js";
+import { configureTool } from "./dist/tools/configure.js";
 import {
   compactJson,
   compactJsonl,
@@ -18,6 +20,8 @@ import {
   recordEdit,
   shouldForceFull,
   getBounceStats,
+  getAllBudgets,
+  applyBudget,
 } from "./dist/compression/utils.js";
 import { classifyCommand } from "./dist/compression/classify.js";
 import {
@@ -31,9 +35,10 @@ import {
   getCodebookSize,
 } from "./dist/compression/codebook.js";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 
 async function test() {
   console.log("Testing Cave Tools...\n");
@@ -233,27 +238,156 @@ async function test() {
   console.log();
 
   console.log("3. Testing cave__grep:");
-  const grepResult = await grepTool.handler({
-    pattern: "Cave Tools",
-    path: ".",
-    glob: "README.md",
-    limit: 5,
-  });
-  console.log(grepResult.content[0].text);
+  const grepDir = mkdtempSync(join(tmpdir(), "cave-grep-"));
+  try {
+    writeFileSync(join(grepDir, "a.ts"), "export const ALPHA = 1;\nexport const beta = 2;\n", "utf-8");
+    writeFileSync(join(grepDir, "b.md"), "# Title\nALPHA reference here\n", "utf-8");
+
+    const grepMatches = await grepTool.handler({
+      pattern: "ALPHA",
+      path: grepDir,
+      limit: 10,
+    });
+    assert.equal(grepMatches.isError, undefined);
+    const gText = grepMatches.content[0].text;
+    assert.match(gText, /a\.ts:1: export const ALPHA = 1/);
+    assert.match(gText, /b\.md:2: ALPHA reference here/);
+
+    // glob filter restricts to .ts only.
+    const grepTsOnly = await grepTool.handler({
+      pattern: "ALPHA",
+      path: grepDir,
+      glob: "*.ts",
+      limit: 10,
+    });
+    assert.match(grepTsOnly.content[0].text, /a\.ts:1:/);
+    assert.doesNotMatch(grepTsOnly.content[0].text, /b\.md/);
+
+    // literal mode treats regex metachars as plain text.
+    writeFileSync(join(grepDir, "lit.txt"), "price is $5.00 each\n", "utf-8");
+    const grepLiteral = await grepTool.handler({
+      pattern: "$5.00",
+      path: grepDir,
+      glob: "lit.txt",
+      literal: true,
+      limit: 5,
+    });
+    assert.match(grepLiteral.content[0].text, /lit\.txt:1: price is \$5\.00 each/);
+    // Without literal, "$5.00" is a regex that won't match the literal dollar.
+    const grepRegex = await grepTool.handler({
+      pattern: "$5.00",
+      path: grepDir,
+      glob: "lit.txt",
+      limit: 5,
+    });
+    assert.equal(grepRegex.content[0].text, "No matches found");
+
+    // ignoreCase matches different casing.
+    const grepCI = await grepTool.handler({
+      pattern: "alpha",
+      path: grepDir,
+      glob: "a.ts",
+      ignoreCase: true,
+      limit: 5,
+    });
+    assert.match(grepCI.content[0].text, /a\.ts:1: export const ALPHA = 1/);
+
+    // context lines emit `-`-prefixed neighbors.
+    const grepCtx = await grepTool.handler({
+      pattern: "beta",
+      path: grepDir,
+      glob: "a.ts",
+      context: 1,
+      limit: 5,
+    });
+    assert.match(grepCtx.content[0].text, /a\.ts:2: export const beta = 2/);
+    assert.match(grepCtx.content[0].text, /a\.ts-1- export const ALPHA = 1/);
+
+    // missing path surfaces an error.
+    const grepMissing = await grepTool.handler({
+      pattern: "x",
+      path: join(grepDir, "nope"),
+      limit: 5,
+    });
+    assert.equal(grepMissing.isError, true);
+    assert.match(grepMissing.content[0].text, /Path not found/);
+  } finally {
+    rmSync(grepDir, { recursive: true, force: true });
+  }
+  console.log("cave__grep tests passed");
   console.log();
 
   console.log("4. Testing cave__find:");
-  const findResult = await findTool.handler({
-    pattern: "*.md",
-    path: ".",
-    limit: 5,
-  });
-  console.log(findResult.content[0].text);
+  const findDir = mkdtempSync(join(tmpdir(), "cave-find-"));
+  try {
+    mkdirSync(join(findDir, "sub"), { recursive: true });
+    writeFileSync(join(findDir, "top.md"), "x\n", "utf-8");
+    writeFileSync(join(findDir, "sub", "deep.ts"), "y\n", "utf-8");
+    writeFileSync(join(findDir, "ignore.txt"), "z\n", "utf-8");
+
+    const findMd = await findTool.handler({ pattern: "*.md", path: findDir, limit: 50 });
+    assert.equal(findMd.isError, undefined);
+    assert.match(findMd.content[0].text, /top\.md/);
+    assert.doesNotMatch(findMd.content[0].text, /\.ts/);
+
+    const findRecursive = await findTool.handler({ pattern: "**/*.ts", path: findDir, limit: 50 });
+    assert.match(findRecursive.content[0].text, /sub\/deep\.ts/);
+
+    // limit truncation notice.
+    const findLimited = await findTool.handler({ pattern: "*", path: findDir, limit: 1 });
+    assert.match(findLimited.content[0].text, /1 results limit reached/);
+
+    // missing directory.
+    const findMissing = await findTool.handler({ pattern: "*", path: join(findDir, "missing"), limit: 5 });
+    assert.equal(findMissing.isError, true);
+    assert.match(findMissing.content[0].text, /Path not found or not a directory/);
+  } finally {
+    rmSync(findDir, { recursive: true, force: true });
+  }
+  console.log("cave__find tests passed");
   console.log();
 
   console.log("5. Testing cave__ls:");
-  const lsResult = await lsTool.handler({ path: ".", limit: 10 });
-  console.log(lsResult.content[0].text);
+  const lsDir = mkdtempSync(join(tmpdir(), "cave-ls-"));
+  try {
+    mkdirSync(join(lsDir, "dir"), { recursive: true });
+    writeFileSync(join(lsDir, "file-a.txt"), "a\n", "utf-8");
+    writeFileSync(join(lsDir, "file-b.md"), "b\n", "utf-8");
+    writeFileSync(join(lsDir, ".hidden"), "h\n", "utf-8");
+
+    const lsAll = await lsTool.handler({ path: lsDir, limit: 50 });
+    assert.equal(lsAll.isError, undefined);
+    const lsText = lsAll.content[0].text;
+    // directories sorted first, dotfiles included.
+    assert.match(lsText, /^dir\//m);
+    assert.match(lsText, /\.hidden/m);
+    assert.match(lsText, /file-a\.txt/m);
+    assert.ok(lsText.indexOf("dir/") < lsText.indexOf("file-a.txt"), "directories list before files");
+
+    // pagination via offset.
+    const lsPage = await lsTool.handler({ path: lsDir, limit: 2, offset: 2 });
+    assert.match(lsPage.content[0].text, /Directory listing truncated.*offset=4/);
+
+    // symlink escape guard: a symlink pointing outside the dir is filtered.
+    try {
+      writeFileSync(join(tmpdir(), "cave-ls-escape.txt"), "outside\n", "utf-8");
+      const { symlinkSync } = await import("node:fs");
+      symlinkSync(join(tmpdir(), "cave-ls-escape.txt"), join(lsDir, "escape-link"), "file");
+    } catch {
+      // symlink creation may be unsupported on some platforms; skip if so.
+    }
+    const lsSymlink = await lsTool.handler({ path: lsDir, limit: 50 });
+    assert.doesNotMatch(lsSymlink.content[0].text, /escape-link/, "symlink escaping the dir is filtered");
+
+    // missing directory.
+    const lsMissing = await lsTool.handler({ path: join(lsDir, "nope"), limit: 5 });
+    assert.equal(lsMissing.isError, true);
+    assert.match(lsMissing.content[0].text, /Path not found or not a directory/);
+  } finally {
+    rmSync(lsDir, { recursive: true, force: true });
+    rmSync(join(tmpdir(), "cave-ls-escape.txt"), { force: true });
+  }
+  console.log("cave__ls tests passed");
   console.log();
 
   console.log("6. Testing cave__edit:");
@@ -1031,7 +1165,330 @@ async function test() {
   // Test status
   console.log("8. Testing cave__status:");
   const statusResult = await statusTool.handler({});
-  console.log(statusResult.content[0].text);
+  const statusText = statusResult.content[0].text;
+  assert.equal(statusResult.isError, undefined);
+  assert.match(statusText, /=== Cave Tools Status ===/);
+  assert.match(statusText, /RTK Available:/);
+  assert.match(statusText, /Cache Stats:/);
+  assert.match(statusText, /Output trimming:/);
+  assert.match(statusText, /Budget Configuration:/);
+  assert.match(statusText, /bash: max=/);
+  console.log("cave__status tests passed");
+  console.log();
+
+  // Test configure
+  console.log("9. Testing cave__configure:");
+  {
+    // set_budget applies and is observable via getAllBudgets + applyBudget.
+    const setRes = await configureTool.handler({
+      action: "set_budget",
+      tool_name: "grep",
+      max_lines: 5,
+      head_lines: 2,
+      tail_lines: 2,
+    });
+    assert.equal(setRes.isError, undefined);
+    assert.match(setRes.content[0].text, /Set budget for grep: max=5, head=2, tail=2/);
+    assert.equal(getAllBudgets().grep.maxLines, 5);
+    const trimmed = applyBudget("a\nb\nc\nd\ne\nf\ng\n", "grep");
+    assert.ok(trimmed.includes("lines truncated"), "budget tightening truncates long output");
+
+    // invalid tool name still sets an entry (configure is permissive); verify
+    // it does not throw and reports the name back.
+    const badTool = await configureTool.handler({
+      action: "set_budget",
+      tool_name: "no-such-tool",
+      max_lines: 10,
+    });
+    assert.equal(badTool.isError, undefined);
+    assert.match(badTool.content[0].text, /no-such-tool/);
+    // restore default-ish budget for grep so later tests aren't affected.
+    await configureTool.handler({
+      action: "set_budget",
+      tool_name: "grep",
+      max_lines: 120,
+      head_lines: 60,
+      tail_lines: 60,
+    });
+
+    // reset_cache clears the dedup cache.
+    const cacheRes = await configureTool.handler({ action: "reset_cache" });
+    assert.equal(cacheRes.isError, undefined);
+    assert.match(cacheRes.content[0].text, /Cache reset/);
+
+    // reset_stats zeroes counters.
+    const statsRes = await configureTool.handler({ action: "reset_stats" });
+    assert.equal(statsRes.isError, undefined);
+    assert.match(statsRes.content[0].text, /Statistics reset/);
+
+    // unknown action returns an error-text result.
+    const unknownRes = await configureTool.handler({ action: "frobnicate" });
+    assert.equal(unknownRes.isError, true);
+    assert.match(unknownRes.content[0].text, /Unknown action: frobnicate/);
+  }
+  console.log("cave__configure tests passed");
+  console.log();
+
+  // Test bash edge cases
+  console.log("10. Testing cave__bash edge cases:");
+  {
+    // negative timeout rejected.
+    const negTimeout = await bashTool.handler({
+      command: "echo hi",
+      description: "negative timeout",
+      timeout: -1,
+    });
+    assert.equal(negTimeout.isError, true);
+    assert.match(negTimeout.content[0].text, /Invalid timeout value: -1/);
+
+    // oversize timeout rejected.
+    const bigTimeout = await bashTool.handler({
+      command: "echo hi",
+      description: "oversize timeout",
+      timeout: 10 * 60 * 1000 + 1,
+    });
+    assert.equal(bigTimeout.isError, true);
+    assert.match(bigTimeout.content[0].text, /must be <= 600000ms/);
+
+    // classification + truncation: verbatim policy (`cat`) keeps head+tail when
+    // output exceeds 500 lines; compressible policy (`seq`) applies budget trim.
+    const verbatimDir = mkdtempSync(join(tmpdir(), "cave-bash-verbatim-"));
+    try {
+      const longFile = join(verbatimDir, "long.txt");
+      writeFileSync(longFile, Array.from({ length: 600 }, (_, i) => `row ${i + 1}`).join("\n") + "\n", "utf-8");
+      const verbatim = await bashTool.handler({
+        command: `cat ${longFile}`,
+        description: "verbatim policy long output",
+        allowFailure: true,
+      });
+      assert.equal(verbatim.isError, undefined, verbatim.content[0].text);
+      assert.match(verbatim.content[0].text, /lines truncated/);
+
+      // secret redaction on/off toggles within the same bash call.
+      const redactOn = await bashTool.handler({
+        command: "echo 'Authorization: Bearer sk-aaaa-bbbb-cccc-dddd-eeee'",
+        description: "redaction on",
+      });
+      assert.match(redactOn.content[0].text, /\[REDACTED:Bearer token\]/);
+      const redactOff = await bashTool.handler({
+        command: "echo 'Authorization: Bearer sk-aaaa-bbbb-cccc-dddd-eeee'",
+        description: "redaction off",
+        redact_secrets: false,
+      });
+      assert.match(redactOff.content[0].text, /sk-aaaa-bbbb-cccc-dddd-eeee/);
+    } finally {
+      rmSync(verbatimDir, { recursive: true, force: true });
+    }
+
+    // compressible (`seq`) gets budgeted when output exceeds the bash budget.
+    const compressible = await bashTool.handler({
+      command: "seq 1 200",
+      description: "compressible long output",
+      allowFailure: true,
+    });
+    assert.equal(compressible.isError, undefined, compressible.content[0].text);
+    assert.match(compressible.content[0].text, /lines truncated/);
+
+    // allowFailure suppresses isError on non-zero exit.
+    const soft = await bashTool.handler({
+      command: "sh -c 'exit 3'",
+      description: "soft fail",
+      allowFailure: true,
+    });
+    assert.equal(soft.isError, undefined);
+    assert.match(soft.content[0].text, /\[exit: 3\]/);
+
+    // archive threshold: retained output (>50KB) gets archived. Each line is
+    // ~40 chars; 2000 retained lines exceed the 50KB archive threshold.
+    const big = await bashTool.handler({
+      command: "yes 'abcdefghijklmnopqrstuvwxyz0123456789-abcdefghij' | head -n 2000",
+      description: "archive-sized output",
+      allowFailure: true,
+    });
+    assert.equal(big.isError, undefined, big.content[0].text);
+    assert.match(big.content[0].text, /\[Archived:/);
+  }
+  console.log("cave__bash edge case tests passed");
+  console.log();
+
+  // Test read edge cases
+  console.log("11. Testing cave__read edge cases:");
+  const readEdgeDir = mkdtempSync(join(tmpdir(), "cave-read-edge-"));
+  try {
+    // binary rejection via NUL byte.
+    const binFile = join(readEdgeDir, "bin.dat");
+    writeFileSync(binFile, Buffer.from([0x00, 0x01, 0x02, 0x03]));
+    const binResult = await readTool.handler({ file_path: binFile });
+    assert.equal(binResult.isError, true);
+    assert.match(binResult.content[0].text, /Cannot read binary file:.*bin\.dat/);
+
+    // binary rejection via known extension.
+    const zipFile = join(readEdgeDir, "blob.zip");
+    writeFileSync(zipFile, "PK\x03\x04");
+    const zipResult = await readTool.handler({ file_path: zipFile });
+    assert.equal(zipResult.isError, true);
+
+    // image magic byte → image content block.
+    const pngFile = join(readEdgeDir, "pixel.png");
+    const pngBytes = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    ]);
+    writeFileSync(pngFile, pngBytes);
+    const pngResult = await readTool.handler({ file_path: pngFile });
+    assert.equal(pngResult.isError, undefined);
+    assert.equal(pngResult.content[0].type, "image");
+    assert.equal(pngResult.content[0].mimeType, "image/png");
+
+    // offset/limit slicing.
+    const linesFile = join(readEdgeDir, "lines.txt");
+    writeFileSync(linesFile, Array.from({ length: 50 }, (_, i) => `L${i + 1}`).join("\n") + "\n", "utf-8");
+    const slice = await readTool.handler({ file_path: linesFile, offset: 10, limit: 3 });
+    assert.match(slice.content[0].text, /L10/);
+    assert.match(slice.content[0].text, /L12/);
+    assert.doesNotMatch(slice.content[0].text, /L13/);
+
+    // missing file surfaces a "did you mean" style hint.
+    const missing = await readTool.handler({ file_path: join(readEdgeDir, "linnes.txt") });
+    assert.equal(missing.isError, true);
+    assert.match(missing.content[0].text, /File not found/);
+
+    // signatures mode on a TS file emits only signatures.
+    const tsFile = join(readEdgeDir, "mod.ts");
+    writeFileSync(
+      tsFile,
+      "export function add(a: number, b: number): number {\n  return a + b;\n}\n\nexport class Box {\n  constructor(public v: number) {}\n}\n",
+      "utf-8",
+    );
+    const sigs = await readTool.handler({ file_path: tsFile, mode: "signatures" });
+    assert.match(sigs.content[0].text, /export fn add/);
+    assert.doesNotMatch(sigs.content[0].text, /return a \+ b/);
+
+    // aggressive mode strips comments.
+    const jsFile = join(readEdgeDir, "code.js");
+    writeFileSync(jsFile, "// header comment\nconst x = 1;\n\n\n\nconst y = 2;\n", "utf-8");
+    const agg = await readTool.handler({ file_path: jsFile, mode: "aggressive" });
+    assert.doesNotMatch(agg.content[0].text, /header comment/);
+    assert.match(agg.content[0].text, /const x = 1/);
+  } finally {
+    rmSync(readEdgeDir, { recursive: true, force: true });
+  }
+  console.log("cave__read edge case tests passed");
+  console.log();
+
+  // Test webfetch
+  console.log("12. Testing cave__webfetch:");
+  {
+    // Missing URL.
+    const noUrl = await webfetchTool.handler({ format: "markdown" });
+    assert.equal(noUrl.isError, true);
+    assert.match(noUrl.content[0].text, /url is required/);
+
+    // Non-http(s) rejected.
+    const badScheme = await webfetchTool.handler({ url: "ftp://example.com" });
+    assert.equal(badScheme.isError, true);
+    assert.match(badScheme.content[0].text, /URL must start with http:\/\/ or https:\/\//);
+
+    // Spin up a local HTTP server for fixture responses.
+    const server = createServer((req, res) => {
+      const url = req.url || "/";
+      if (url === "/text") {
+        res.setHeader("content-type", "text/plain");
+        res.end("hello plain text");
+      } else if (url === "/html") {
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        res.end(
+          "<!DOCTYPE html><html><head><script>var x=1;</script><style>body{}</style></head>" +
+            "<body><h1>Title</h1><p>Hello <a href=\"/x\">link</a> world</p><p>Second paragraph.</p></body></html>",
+        );
+      } else if (url === "/meta") {
+        // Real-world page with void elements (meta/link) in <head> — must not
+        // suppress body content. Also exercises <pre><code> nesting.
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        res.end(
+          "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><link rel=\"stylesheet\" href=\"/x.css\">" +
+            "<title>Test</title></head><body><h1>Body Title</h1><p>Body text survives.</p>" +
+            "<pre><code>code line 1\nline 2</code></pre></body></html>",
+        );
+      } else if (url === "/img") {
+        res.setHeader("content-type", "image/png");
+        res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      } else if (url === "/big") {
+        res.setHeader("content-type", "text/plain");
+        res.end("x".repeat(6 * 1024 * 1024));
+      } else {
+        res.statusCode = 404;
+        res.end("not found");
+      }
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const base = `http://127.0.0.1:${port}`;
+    try {
+      // text format returns body as-is for text/plain.
+      const textRes = await webfetchTool.handler({ url: `${base}/text`, format: "text" });
+      assert.equal(textRes.isError, undefined, textRes.content[0].text);
+      assert.match(textRes.content[0].text, /hello plain text/);
+
+      // markdown format converts HTML: heading emitted, script/style stripped, link rendered.
+      const mdRes = await webfetchTool.handler({ url: `${base}/html`, format: "markdown" });
+      assert.equal(mdRes.isError, undefined, mdRes.content[0].text);
+      const md = mdRes.content[0].text;
+      assert.match(md, /# Title/);
+      assert.match(md, /\[link\]\(\/x\)/);
+      assert.doesNotMatch(md, /var x=1/);
+      assert.doesNotMatch(md, /body\{\}/);
+
+      // text format on HTML strips tags and skips script/style.
+      const htmlText = await webfetchTool.handler({ url: `${base}/html`, format: "text" });
+      assert.match(htmlText.content[0].text, /Title/);
+      assert.match(htmlText.content[0].text, /Hello/);
+      assert.doesNotMatch(htmlText.content[0].text, /<script>|<style>|var x=1/);
+
+      // html format returns raw HTML.
+      const rawHtml = await webfetchTool.handler({ url: `${base}/html`, format: "html" });
+      assert.match(rawHtml.content[0].text, /<h1>Title<\/h1>/);
+
+      // image → base64 image content block.
+      const imgRes = await webfetchTool.handler({ url: `${base}/img` });
+      assert.equal(imgRes.isError, undefined);
+      const imgBlock = imgRes.content.find((c) => c.type === "image");
+      assert.ok(imgBlock, "image response includes an image content block");
+      assert.equal(imgBlock.mimeType, "image/png");
+
+      // 5MB cap rejects oversized responses.
+      const bigRes = await webfetchTool.handler({ url: `${base}/big`, timeout: 10 });
+      assert.equal(bigRes.isError, true);
+      assert.match(bigRes.content[0].text, /Response too large \(exceeds 5MB limit\)/);
+
+      // timeout validation: negative timeout falls back to default (no crash).
+      const negTimeout = await webfetchTool.handler({ url: `${base}/text`, timeout: -5 });
+      assert.equal(negTimeout.isError, undefined);
+      assert.match(negTimeout.content[0].text, /hello plain text/);
+
+      // Void elements (meta/link) in <head> must not suppress body content.
+      const metaMd = await webfetchTool.handler({ url: `${base}/meta`, format: "markdown" });
+      assert.equal(metaMd.isError, undefined, metaMd.content[0].text);
+      assert.match(metaMd.content[0].text, /Body Title/);
+      assert.match(metaMd.content[0].text, /Body text survives\./);
+      // <pre><code> → fenced block, no stray inline backticks from <code>.
+      assert.match(metaMd.content[0].text, /```/);
+      assert.match(metaMd.content[0].text, /code line 1/);
+
+      const metaText = await webfetchTool.handler({ url: `${base}/meta`, format: "text" });
+      assert.equal(metaText.isError, undefined, metaText.content[0].text);
+      assert.match(metaText.content[0].text, /Body text survives\./);
+      assert.doesNotMatch(metaText.content[0].text, /utf-8|x\.css/);
+
+      // Non-2xx status is an error, not success content.
+      const notFound = await webfetchTool.handler({ url: `${base}/nonexistent`, timeout: 10 });
+      assert.equal(notFound.isError, true);
+      assert.match(notFound.content[0].text, /Request failed with status 404/);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+  console.log("cave__webfetch tests passed");
   console.log();
 
   console.log("All tests passed!");

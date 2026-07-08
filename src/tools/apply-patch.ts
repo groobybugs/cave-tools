@@ -4,7 +4,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolResult } from "../types.js";
 import { invalidateFileCache, recordEdit } from "../compression/utils.js";
 import { ensureParentDirectory, resolveMutationTarget, toPosixPath } from "../runtime/path.js";
-import { decodeUtf8PreserveBom, joinBom, lockedWrite, writeIfUnchanged } from "../runtime/file-mutation.js";
+import { decodeUtf8PreserveBom, joinBom, lockedWrite, sameBytes, writeIfUnchanged } from "../runtime/file-mutation.js";
 
 interface UpdateFileChunk {
   old_lines: string[];
@@ -720,10 +720,6 @@ async function applyPlannedChanges(changes: PlannedChange[]): Promise<void> {
     invalidateFileCache(change.movePath);
     recordEdit(change.moveTarget);
   }
-}
-
-function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
 function relativize(absolute: string): string {

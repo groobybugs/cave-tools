@@ -134,6 +134,7 @@ All tool names use the MCP names exported by the server.
 | `cave__write`     | Write a single file (create/overwrite, or `truncate` to empty). Auto-invalidates dedup cache. | Cave Tools-specific write tool.                                     |
 | `cave__apply_patch` | Apply add/update/delete/move patches with verification before any disk write; preserves UTF-8 BOM and invalidates the read dedup cache for changed paths. Write-time failures after verification may leave partial state. | Based on `apply_patch`, with Cave cache integration. |
 | `cave__websearch` | Search current web via Exa/Parallel MCP backends, then redact/archive/budget-compress output. | Based on `websearch`, with Cave compression.                         |
+| `cave__webfetch`  | Fetch a URL and return markdown/text/html (or a base64 image block); output is redacted, archived if large, and budget-compressed. | Based on `webfetch`, with Cave compression.                          |
 | `cave__invalidate`| Invalidate the read dedup cache for one or more paths without touching disk.              | Cave Tools-specific cache tool.                                    |
 | `cave__compress`  | Optimize arbitrary text down to fewer tokens (structured extraction + line budgets).     | Cave Tools-specific helper.                                         |
 | `cave__status`    | Show RTK availability, cache stats, and budgets.                                          | Cave Tools-specific helper.                                         |
@@ -151,6 +152,7 @@ Use this instruction block in agent rules:
 - Use `cave__bash` instead of the built-in shell tool for commands. Optimized drop-in replacement: tries RTK command rewriting when `rtk` is available, then structured JSON/XML extraction and output budgets.
 - Use `cave__edit` / `cave__write` for single-file changes and `cave__apply_patch` for multi-file add/update/delete/move patches.
 - Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived if large, and budget-compressed.
+- Use `cave__webfetch` to fetch a specific URL and return it as markdown/text/html (or a base64 image block); output is redacted, archived if large, and budget-compressed.
 - After using any edit/write tool outside Cave Tools, call `cave__invalidate` with the changed file path(s) to refresh the read dedup cache.
 - Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - Use `cave__status` to check RTK availability, cache state, and budget settings when the user asks about savings.
@@ -171,16 +173,16 @@ Instruction blocks are advisory — agents may still reach for the built-in `Rea
 
 ### Claude Code (`~/.claude/settings.json`)
 
-Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting with status `2` and emitting a message to stderr.
+Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting with status `2` and emitting a message to stderr. The installer wires a single mode-aware redirect group; this section documents the equivalent manual setup.
 
-1. Register the hook in `~/.claude/settings.json`:
+1. Register the hooks in `~/.claude/settings.json`:
 
    ```json
    {
      "hooks": {
        "PreToolUse": [
          {
-           "matcher": "Read|Grep|Glob",
+           "matcher": "Read|Grep|Glob|Edit|Write",
            "hooks": [
              {
                "type": "command",
@@ -188,11 +190,20 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
                "timeout": 3
              }
            ]
-         },
+         }
+       ],
+       "SessionStart": [
          {
-           "matcher": "Bash",
            "hooks": [
-             { "type": "command", "command": "rtk hook claude" }
+             { "type": "command", "command": "cave-tools status --emit-statusline", "timeout": 3, "async": true }
+           ]
+         }
+       ],
+       "PostToolUse": [
+         {
+           "matcher": "mcp__cave-tools__.*",
+           "hooks": [
+             { "type": "command", "command": "cave-tools status --emit-statusline", "timeout": 3, "async": true }
            ]
          }
        ]
@@ -200,42 +211,27 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
    }
    ```
 
-   The `Bash` matcher is optional — it preserves RTK rewriting on built-in Bash. `cave__bash` already calls `rtk` internally, so falling all the way back to `cave__bash` is even better.
+   The single `PreToolUse` matcher `Read|Grep|Glob|Edit|Write` covers all built-ins Cave Tools replaces. (`cave__bash` already calls `rtk` internally, so there is no separate Bash matcher.)
 
-2. Drop this hook script at `~/.claude/hooks/cave-tools-redirect.sh` and make it executable (`chmod +x`):
+2. Copy the mode-aware redirect script into place and make it executable:
 
    ```bash
-   #!/usr/bin/env bash
-   INPUT=$(cat)
-
-   TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
-   FPATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
-
-   case "$TOOL" in
-     Read)
-       # Allow built-in Read for binary formats cave__read returns as base64 image blocks.
-       case "$FPATH" in
-         *.png|*.jpg|*.jpeg|*.gif|*.webp|*.bmp|*.svg|*.pdf) exit 0 ;;
-       esac
-       echo "BLOCKED: Use cave__read instead of Read — it's the optimized drop-in replacement (dedup + line budgets)." >&2
-       exit 2
-       ;;
-     Grep)
-       echo "BLOCKED: Use cave__grep instead of Grep — it's the optimized drop-in replacement (ripgrep + line budgets)." >&2
-       exit 2
-       ;;
-     Glob)
-        echo "BLOCKED: Use cave__find instead of Glob — it's the optimized drop-in replacement (ripgrep-backed search)." >&2
-       exit 2
-       ;;
-   esac
-
-   exit 0
+   cp claude/hooks/cave-tools-redirect.sh ~/.claude/hooks/cave-tools-redirect.sh
+   chmod +x ~/.claude/hooks/cave-tools-redirect.sh
    ```
 
-   Since `0.2.0`, `cave__read` reads images (and PDFs) as MCP `image` content blocks, so the `*.png|*.jpg|...` allowlist branch above is **optional** — delete it to route every read through Cave Tools. Keep or extend the allowlist only if you deliberately want certain formats handled by the built-in `Read` instead.
+   The script reads `$CLAUDE_CONFIG_DIR/.cave-tools-active` (defaulting to `~/.claude/.cave-tools-active`) to pick a mode:
 
-3. Restart Claude Code. Built-in `Read`, `Grep`, and `Glob` now exit with a helpful error pointing the agent at `cave__read` / `cave__grep` / `cave__find`. The harness retries with the suggested tool automatically.
+   | Mode       | Behavior                                                                                  |
+   | ---------- | ---------------------------------------------------------------------------------------- |
+   | `off`      | exits 0, no blocking (skill dormant)                                                    |
+   | `hint`     | exits 0, no blocking (rules injected only; model self-corrects)                         |
+   | `enforce`  | blocks `Read`/`Grep`/`Glob` and points the agent at the `cave__*` equivalent (default)   |
+   | `strict`   | above + blocks `Edit`/`Write` on a path that was not previously read via `cave__read`    |
+
+   When the flag file is missing the script defaults to `enforce`, preserving the original blocker behavior. `Read` calls for image/PDF/SVG extensions pass through because `cave__read` returns those as MCP `image`/`resource` blocks and some clients handle the built-in path more directly.
+
+3. Restart Claude Code. Built-in `Read`, `Grep`, `Glob`, and (in `strict` mode) `Edit`/`Write` now exit with a helpful error pointing the agent at the `cave__*` equivalent. The harness retries with the suggested tool automatically.
 
 ### Grok Build CLI (`~/.grok/config.toml` + `~/.grok/hooks/`)
 

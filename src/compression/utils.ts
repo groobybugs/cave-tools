@@ -5,7 +5,6 @@ import {
   listSessionStats as listDbSessionStats,
   markSessionEnded,
   registerReadPath as registerDbReadPath,
-  sessionsDir,
   upsertSessionStats,
 } from "../storage/db.js";
 import type {
@@ -116,14 +115,6 @@ async function persistStats(): Promise<void> {
   } catch {
     // Non-fatal: stats persistence is best-effort.
   }
-}
-
-export function getSessionStatsFile(): string {
-  return "sqlite:cave-tools.db:sessions";
-}
-
-export function getStatsSessionsDir(): string {
-  return sessionsDir();
 }
 
 export async function getLifetimeStats(): Promise<LifetimeStats> {
