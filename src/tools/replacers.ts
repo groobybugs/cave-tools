@@ -215,6 +215,19 @@ function* EscapeNormalizedReplacer(content: string, find: string): Generator<str
   }
 }
 
+// Match when `find` includes extra leading/trailing whitespace the file lacks.
+function* TrimmedBoundaryReplacer(content: string, find: string): Generator<string> {
+  const trimmedFind = find.trim();
+  if (trimmedFind === find) return;
+  if (content.includes(trimmedFind)) yield trimmedFind;
+  const lines = content.split("\n");
+  const findLines = find.split("\n");
+  for (let i = 0; i <= lines.length - findLines.length; i++) {
+    const block = lines.slice(i, i + findLines.length).join("\n");
+    if (block.trim() === trimmedFind) yield block;
+  }
+}
+
 // Anchor on first + last line, accept if >= 50% of middle non-empty lines match
 // when trimmed. Looser than BlockAnchor. Requires >= 3 lines.
 function* ContextAwareReplacer(content: string, find: string): Generator<string> {
@@ -244,6 +257,17 @@ function* ContextAwareReplacer(content: string, find: string): Generator<string>
   }
 }
 
+// Yields every exact occurrence of `find`, enabling replaceAll to replace each one.
+function* MultiOccurrenceReplacer(content: string, find: string): Generator<string> {
+  let startIndex = 0;
+  while (true) {
+    const index = content.indexOf(find, startIndex);
+    if (index === -1) break;
+    yield find;
+    startIndex = index + find.length;
+  }
+}
+
 const REPLACERS: Replacer[] = [
   SimpleReplacer,
   LineTrimmedReplacer,
@@ -251,14 +275,19 @@ const REPLACERS: Replacer[] = [
   WhitespaceNormalizedReplacer,
   IndentationFlexibleReplacer,
   EscapeNormalizedReplacer,
+  TrimmedBoundaryReplacer,
   ContextAwareReplacer,
+  MultiOccurrenceReplacer,
 ];
 
 // Guard against a short `find` matching a wildly larger span (e.g. a single
 // normalized line collapsing onto a giant region).
-function isDisproportionate(find: string, candidate: string): boolean {
-  if (candidate.length <= find.length) return false;
-  return candidate.length > Math.max(find.length * 3, find.length + 200);
+function isDisproportionateMatch(search: string, oldString: string): boolean {
+  const oldLines = oldString.split("\n").length;
+  const searchLines = search.split("\n").length;
+  if (searchLines >= Math.max(oldLines + 3, oldLines * 2)) return true;
+  if (oldLines === 1) return false;
+  return search.trim().length > Math.max(oldString.trim().length + 500, oldString.trim().length * 4);
 }
 
 export interface MatchResult {
@@ -284,7 +313,7 @@ export function findReplacement(
       if (!candidate) continue;
       const index = content.indexOf(candidate);
       if (index === -1) continue;
-      if (isDisproportionate(find, candidate)) continue;
+      if (isDisproportionateMatch(candidate, find)) continue;
 
       if (replaceAll) return { search: candidate, index };
 
@@ -296,5 +325,5 @@ export function findReplacement(
   }
 
   if (nonUniqueSeen) return { error: "non-unique", nonUnique: true };
-  return { error: "not-found" };
+  return { error: "not-found: could not find oldString in the file. Re-read the file and provide the full exact oldString for the intended replacement." };
 }

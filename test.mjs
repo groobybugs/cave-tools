@@ -203,7 +203,7 @@ async function test() {
 
   // Archive tests
   console.log("2g. Testing archive:");
-  await cleanupArchives(0);
+  await cleanupArchives(-1);
   const smallOutput = "small";
   assert.equal(await archiveIfLarge(smallOutput, "echo small"), null, "small output not archived");
 
@@ -214,7 +214,7 @@ async function test() {
 
   const expanded = await expandArchive(archived.id);
   assert.equal(expanded, bigOutput, "archive round-trip");
-  await cleanupArchives(0);
+  await cleanupArchives(-1);
   assert.equal(await expandArchive(archived.id), null, "cleanup removed archive");
   console.log("Archive tests passed");
   console.log();

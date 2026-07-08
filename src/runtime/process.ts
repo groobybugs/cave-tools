@@ -22,8 +22,9 @@ export interface RunCommandResult {
   timedOut: boolean;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
-  /** Present when output exceeded the in-memory budget and was spilled to disk.
-   * The returned stdout/stderr are the bounded tail; the file holds the full record. */
+  /** Reserved for future spill-to-file support (currently always undefined — the
+   * ring buffer bounds memory without spilling). Kept in the interface so bash.ts
+   * can surface a spill note when re-added without a breaking change. */
   stdoutPath?: string;
   stderrPath?: string;
 }

@@ -77,7 +77,7 @@ export const editTool: Tool & {
 } = {
   name: "cave__edit",
   description:
-    "Optimized drop-in replacement for the built-in Edit. Replaces old_string with new_string; fails if old_string is missing or non-unique (unless replace_all). Uses a fuzzy replacer chain (exact → line-trimmed → block-anchor → whitespace-normalized → indentation-flexible → escape-normalized → context-aware), so small indentation/whitespace/escape drift in old_string still matches. Supports batch edits via `edits[]`. Adapts CRLF/LF automatically and invalidates the read dedup cache.",
+    "Optimized drop-in replacement for the built-in Edit. Replaces old_string with new_string; fails if old_string is missing or non-unique (unless replace_all). Uses a fuzzy replacer chain (exact → line-trimmed → block-anchor → whitespace-normalized → indentation-flexible → escape-normalized → trimmed-boundary → context-aware → multi-occurrence), so small indentation/whitespace/escape drift in old_string still matches. Supports batch edits via `edits[]`. Adapts CRLF/LF automatically and invalidates the read dedup cache.",
   inputSchema: {
     type: "object",
     properties: {
@@ -152,7 +152,7 @@ export const editTool: Tool & {
       if (match.nonUnique) {
         return err("old_string is not unique (2+ matches). Add more context or set replace_all.");
       }
-      return err(`old_string not found in file.${findClosestLineHint(content, oldString)}`);
+      return err(`${match.error ?? "old_string not found in file"}.${findClosestLineHint(content, oldString)}`);
     }
 
     const search = match.search;
@@ -211,7 +211,7 @@ async function handleBatchEdits(
       if (match.nonUnique) {
         return err(`edits[${i}]: old_string is not unique (2+ matches). Add more context or set replace_all.`);
       }
-      return err(`edits[${i}]: old_string not found in file.`);
+      return err(`edits[${i}]: ${match.error ?? "old_string not found in file."}`);
     }
 
     matched.push({
