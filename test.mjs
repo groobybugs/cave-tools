@@ -1408,6 +1408,7 @@ async function test() {
         res.end(
           "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><link rel=\"stylesheet\" href=\"/x.css\">" +
             "<title>Test</title></head><body><h1>Body Title</h1><p>Body text survives.</p>" +
+            "<p>alpha<br>beta</p><hr>" +
             "<pre><code>code line 1\nline 2</code></pre></body></html>",
         );
       } else if (url === "/img") {
@@ -1474,6 +1475,10 @@ async function test() {
       // <pre><code> → fenced block, no stray inline backticks from <code>.
       assert.match(metaMd.content[0].text, /```/);
       assert.match(metaMd.content[0].text, /code line 1/);
+      // <br> renders a line break and <hr> renders a rule (void-tag skip must
+      // not swallow their handlers).
+      assert.match(metaMd.content[0].text, /alpha\nbeta/);
+      assert.match(metaMd.content[0].text, /^---$/m);
 
       const metaText = await webfetchTool.handler({ url: `${base}/meta`, format: "text" });
       assert.equal(metaText.isError, undefined, metaText.content[0].text);

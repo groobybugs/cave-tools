@@ -113,8 +113,10 @@ const CONTAINER_SKIP_TAGS = new Set(["script", "style", "noscript", "iframe", "o
 
 // Void elements: never have closing tags, never carry inner content. Dropping
 // them must NOT touch skipDepth or everything after <meta charset> would vanish.
+// br/hr are void too but stay out of this set: the markdown converter renders
+// them explicitly, and this set is checked before the tag handlers run.
 const VOID_TAGS = new Set([
-  "meta", "link", "base", "br", "hr", "img", "input", "area", "source", "track", "col", "wbr", "embed",
+  "meta", "link", "base", "img", "input", "area", "source", "track", "col", "wbr", "embed",
 ]);
 
 const BLOCK_TAGS = new Set(["p", "div", "section", "article", "header", "footer", "main", "aside", "li", "tr", "blockquote"]);
