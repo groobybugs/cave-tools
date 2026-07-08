@@ -74,18 +74,19 @@ pnpm run install:agents
 pnpm run remove:agents
 pnpm run install:agents -- --list
 pnpm run install:agents -- --dry-run --verbose --all
-pnpm run install:agents -- --agent claude,codex,gemini,zcode
+pnpm run install:agents -- --agent claude,codex,gemini,grok,zcode
 pnpm run install:agents -- --all --with-extra-rules
 pnpm run remove:agents -- --dry-run --verbose --agent antigravity,antigravity-backup
 pnpm run remove:agents -- --all
 pnpm run remove:agents -- --all --with-extra-rules
+./install.sh --agent grok --dry-run --verbose
 ```
 
 Installer/remover detect installed clients and prompt when run in an interactive terminal. Use `--all` for all detected targets, `--agent <name>` for one or more targets, `--dry-run` to print planned writes/removals without changing files, and `--verbose` to print the modified/planned file paths summary. Missing clients are skipped unless explicitly selected, then their installer still respects the target detect path.
 
 **`--with-extra-rules`** (opt-in) also writes a second fenced block — `<!-- cave-discipline-begin -->` — into every selected target's rules file, bundling five rules: (1) prefer cave-tools MCP, (2) prefix non-cave-tools bash with `rtk` (fallback `rtk proxy`), (3) use codebase-memory-mcp and `index_repository` at init, (4) wait for MCP init before proceeding, (5) subagents must follow these rules too. Off by default — personal/team extras layered on top of the standard cave-tools block. Pass the same flag to `remove:agents` to strip only the discipline block (leaves the cave-tools block intact).
 
-Supported targets: `claude`, `codex`, `gemini`, `antigravity`, `antigravity-cli`, `antigravity-ide`, `antigravity-shared`, `antigravity-backup`, `kiro`, `cursor`, `opencode`, `zcode`. Run `pnpm run install:agents -- --list` to see which are detected on this machine.
+Supported targets: `claude`, `codex`, `gemini`, `antigravity`, `antigravity-cli`, `antigravity-ide`, `antigravity-shared`, `antigravity-backup`, `kiro`, `cursor`, `opencode`, `grok`, `zcode`. Run `pnpm run install:agents -- --list` to see which are detected on this machine.
 
 Some clients use a different wrapper key:
 
@@ -101,6 +102,7 @@ Some clients use a different wrapper key:
 | Kiro CLI    | `~/.kiro/settings/mcp.json`                                   | `mcpServers`                                   |
 | Cursor      | `~/.cursor/mcp.json`                                          | `mcpServers`                                   |
 | opencode    | `~/.config/opencode/opencode.json`                            | `mcp` with `type: "local"` and `command` array |
+| Grok Build CLI | `~/.grok/config.toml`, `~/.grok/hooks/cave-tools.json`     | TOML `[mcp_servers.cave-tools]` + native hooks |
 | ZCode       | `~/.agents/mcp.json` import source, plus `~/.zcode/AGENTS.md` | `mcpServers`                                   |
 
 opencode example:
@@ -234,6 +236,32 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
    Since `0.2.0`, `cave__read` reads images (and PDFs) as MCP `image` content blocks, so the `*.png|*.jpg|...` allowlist branch above is **optional** — delete it to route every read through Cave Tools. Keep or extend the allowlist only if you deliberately want certain formats handled by the built-in `Read` instead.
 
 3. Restart Claude Code. Built-in `Read`, `Grep`, and `Glob` now exit with a helpful error pointing the agent at `cave__read` / `cave__grep` / `cave__find`. The harness retries with the suggested tool automatically.
+
+### Grok Build CLI (`~/.grok/config.toml` + `~/.grok/hooks/`)
+
+Grok supports native MCP, skills, project rules, and blocking `PreToolUse` hooks. Install the Grok target from this checkout:
+
+```bash
+pnpm run install:agents -- --agent grok --dry-run --verbose
+pnpm run install:agents -- --agent grok
+```
+
+The installer writes:
+
+- `[mcp_servers.cave-tools]` in `~/.grok/config.toml`
+- `~/.grok/AGENTS.md` with the Cave Tools guidance block
+- `~/.grok/skills/cave-tools/SKILL.md`
+- `~/.grok/hooks/cave-tools.json` plus the small hook scripts it references
+
+Grok ignores `SessionStart` stdout, so always-on guidance lives in `AGENTS.md` and the skill. The Grok hook only uses `SessionStart` for the side effect of writing the cave-tools mode flag, then uses `PreToolUse` to deny built-in `read_file`, `grep`, and `list_dir` with a JSON `deny` reason that points the model to the matching `cave__*` tool. In `strict` mode it also blocks built-in edit/write aliases until the target has been read via `cave__read`.
+
+Verify after install:
+
+```bash
+grok mcp list
+grok mcp doctor cave-tools
+grok inspect
+```
 
 ### opencode (`~/.config/opencode/opencode.json`)
 
@@ -377,7 +405,7 @@ Invalidate cache after edits:
 
 Cave Tools is a fork/extraction of the tool layer from [Caveman Code](https://github.com/JuliusBrussee/caveman-code). It does not implement subagents, memory, editing, planning, or the TUI — only MCP tools other agents can call.
 
-Use Caveman Code if you want the full coding agent. Use Cave Tools if you want the optimized drop-in replacement tools inside Claude Code, Gemini CLI, Antigravity, Kiro CLI, Cursor, opencode, Codex, or another MCP client.
+Use Caveman Code if you want the full coding agent. Use Cave Tools if you want the optimized drop-in replacement tools inside Claude Code, Gemini CLI, Antigravity, Kiro CLI, Cursor, opencode, Codex, Grok, or another MCP client.
 
 ## License
 

@@ -166,6 +166,47 @@ function removeMcpServersTarget(label, configPath) {
   log(`${DRY_RUN ? 'dry-run: would update' : 'updated'}: ${configPath} removed mcpServers.cave-tools (${label})`);
 }
 
+function removeTomlSection(content, header) {
+  const lines = content.split('\n');
+  const start = lines.findIndex((line) => line.trim() === `[${header}]`);
+  if (start === -1) return content;
+
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      end = i;
+      break;
+    }
+  }
+
+  lines.splice(start, end - start);
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
+function removeGrokTomlMcp() {
+  const configPath = path.join(grokConfigDir(), 'config.toml');
+  if (!fs.existsSync(configPath)) {
+    log(`skip (missing): Grok Build CLI → ${configPath}`);
+    return;
+  }
+  const current = fs.readFileSync(configPath, 'utf8');
+  const next = removeTomlSection(current, 'mcp_servers.cave-tools');
+  if (next === current) {
+    log(`unchanged: ${configPath} has no [mcp_servers.cave-tools]`);
+    return;
+  }
+  backupOnce(configPath);
+  if (DRY_RUN) {
+    trackPath(configPath, 'update');
+    log(`dry-run: would remove [mcp_servers.cave-tools] from ${configPath}`);
+    return;
+  }
+  fs.writeFileSync(configPath, next.endsWith('\n') || next === '' ? next : `${next}\n`, { mode: 0o644 });
+  trackPath(configPath, 'update');
+  log(`updated: ${configPath} removed [mcp_servers.cave-tools]`);
+}
+
 function removeOpencodeMcp() {
   const configDir = process.env.XDG_CONFIG_HOME
     ? path.join(process.env.XDG_CONFIG_HOME, 'opencode')
@@ -213,6 +254,12 @@ function zcodeConfigDir() {
   return path.join(HOME, '.zcode');
 }
 
+function grokConfigDir() {
+  return process.env.GROK_HOME && process.env.GROK_HOME.trim()
+    ? process.env.GROK_HOME.trim()
+    : path.join(HOME, '.grok');
+}
+
 function genericAgentsMcpPath() {
   return path.join(HOME, '.agents', 'mcp.json');
 }
@@ -221,6 +268,51 @@ function removeZcodeMcp() {
   removeMcpServersTarget('ZCode generic .agents import source', genericAgentsMcpPath());
   removeBlock(path.join(zcodeConfigDir(), 'AGENTS.md'));
   removeZcodeGeneratedSkill();
+}
+
+function removeFileIfExists(filePath) {
+  if (!fs.existsSync(filePath)) {
+    log(`skip (missing): ${filePath}`);
+    return;
+  }
+  if (DRY_RUN) {
+    trackPath(filePath, 'remove');
+    log(`dry-run: would remove ${filePath}`);
+    return;
+  }
+  fs.unlinkSync(filePath);
+  trackPath(filePath, 'remove');
+  log(`removed: ${filePath}`);
+}
+
+function removeGrokGeneratedSkill() {
+  const skillPath = path.join(grokConfigDir(), 'skills', 'cave-tools', 'SKILL.md');
+  if (!fs.existsSync(skillPath)) {
+    log(`skip (missing): ${skillPath}`);
+    return;
+  }
+  const current = fs.readFileSync(skillPath, 'utf8');
+  if (!current.includes('cave__read') || !current.includes('cave__bash') || !current.includes('cave__apply_patch')) {
+    log(`unchanged: ${skillPath}`);
+    return;
+  }
+  backupOnce(skillPath);
+  removeFileIfExists(skillPath);
+}
+
+function removeGrok() {
+  const grokDir = grokConfigDir();
+  removeGrokTomlMcp();
+  removeBlock(path.join(grokDir, 'AGENTS.md'));
+  removeGrokGeneratedSkill();
+  for (const filePath of [
+    path.join(grokDir, 'hooks', 'cave-tools.json'),
+    path.join(grokDir, 'hooks', 'cave-tools-config.js'),
+    path.join(grokDir, 'hooks', 'cave-tools-activate.js'),
+    path.join(grokDir, 'hooks', 'cave-tools-redirect.sh'),
+  ]) {
+    removeFileIfExists(filePath);
+  }
 }
 
 function removeZcodeGeneratedSkill() {
@@ -258,6 +350,7 @@ function targetDefinitions() {
     { key: 'kiro', label: 'Kiro CLI', configPath: path.join(HOME, '.kiro', 'settings', 'mcp.json'), detectPath: path.join(HOME, '.kiro'), shape: 'mcpServers' },
     { key: 'cursor', label: 'Cursor', configPath: path.join(HOME, '.cursor', 'mcp.json'), detectPath: path.join(HOME, '.cursor'), shape: 'mcpServers' },
     { key: 'opencode', label: 'OpenCode', configPath: path.join(opencodeConfigDir(), 'opencode.json'), detectPath: opencodeConfigDir(), special: 'opencode' },
+    { key: 'grok', label: 'Grok Build CLI', configPath: path.join(grokConfigDir(), 'config.toml'), detectPath: grokConfigDir(), special: 'grok' },
     { key: 'zcode', label: 'ZCode', configPath: path.join(zcodeConfigDir(), 'AGENTS.md'), detectPath: zcodeConfigDir(), special: 'zcode' },
   ];
 }
@@ -604,6 +697,10 @@ function removeSelectedTargets(targets) {
   if (keys.has('opencode')) {
     removeOpencodeMcp();
     if (WITH_EXTRA_RULES) removeDisciplineBlock(path.join(opencodeConfigDir(), 'AGENTS.md'));
+  }
+  if (keys.has('grok')) {
+    removeGrok();
+    if (WITH_EXTRA_RULES) removeDisciplineBlock(path.join(grokConfigDir(), 'AGENTS.md'));
   }
   if (keys.has('zcode')) {
     removeZcodeMcp();

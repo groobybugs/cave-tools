@@ -370,6 +370,7 @@ function installCodex() {
 
   // 1. MCP server in config.toml — upsert [mcp_servers.cave-tools] section.
   const currentConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
+  const configExists = fs.existsSync(configPath);
   if (/\[\s*mcp_servers\.cave-tools\s*\]/.test(currentConfig)) {
     log(`unchanged: ${configPath} [mcp_servers.cave-tools] already present`);
   } else {
@@ -507,8 +508,48 @@ function zcodeConfigDir() {
   return path.join(HOME, '.zcode');
 }
 
+function grokConfigDir() {
+  return process.env.GROK_HOME && process.env.GROK_HOME.trim()
+    ? process.env.GROK_HOME.trim()
+    : path.join(HOME, '.grok');
+}
+
 function genericAgentsMcpPath() {
   return path.join(HOME, '.agents', 'mcp.json');
+}
+
+function findExecutable(name) {
+  const pathEnv = process.env.PATH || '';
+  const exts = process.platform === 'win32'
+    ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';')
+    : [''];
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const candidate = path.join(dir, process.platform === 'win32' && ext ? `${name}${ext.toLowerCase()}` : name);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch (_) {
+        // Try next PATH entry.
+      }
+    }
+  }
+  return null;
+}
+
+function resolveCaveToolsMcpCommand() {
+  if (findExecutable('cave-tools')) return { command: 'cave-tools', args: ['mcp'] };
+  if (fs.existsSync(CAVE_TOOLS_CLI)) return { command: process.execPath, args: [CAVE_TOOLS_CLI, 'mcp'] };
+  throw new Error('cannot configure Grok MCP: neither `cave-tools` is on PATH nor dist/cli.js exists. Run `pnpm run build` or install cave-tools first.');
+}
+
+function tomlString(value) {
+  return JSON.stringify(value);
+}
+
+function tomlArray(values) {
+  return `[${values.map(tomlString).join(', ')}]`;
 }
 
 function installOpencodeMcp() {
@@ -571,6 +612,85 @@ function installZcodeMcp() {
   log('note: in ZCode, open Settings → MCP Servers → Import → Generic .agents, then import cave-tools');
 }
 
+function installGrok() {
+  const grokDir = grokConfigDir();
+  const configPath = path.join(grokDir, 'config.toml');
+  const hooksDir = path.join(grokDir, 'hooks');
+  const skillsDir = path.join(grokDir, 'skills', 'cave-tools');
+  const agentsMd = path.join(grokDir, 'AGENTS.md');
+
+  if (!fs.existsSync(grokDir)) {
+    log(`skip (not installed): Grok Build CLI → ${grokDir}`);
+    return;
+  }
+
+  backupGlobalRule(agentsMd, 'grok-AGENTS.md');
+  backupGlobalRule(path.join(skillsDir, 'SKILL.md'), 'grok-cave-tools-SKILL.md');
+
+  const mcp = resolveCaveToolsMcpCommand();
+  const configExists = fs.existsSync(configPath);
+  const currentConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
+  const mcpBody = [
+    `command = ${tomlString(mcp.command)}`,
+    `args = ${tomlArray(mcp.args)}`,
+    'enabled = true',
+    'startup_timeout_sec = 30',
+  ];
+  const nextConfig = upsertTomlSection(currentConfig, 'mcp_servers.cave-tools', mcpBody);
+  if (nextConfig === currentConfig) {
+    log(`unchanged: ${configPath} [mcp_servers.cave-tools]`);
+  } else {
+    backupOnce(configPath);
+    if (DRY_RUN) {
+      trackPath(configPath, configExists ? 'update' : 'create');
+      log(`dry-run: would upsert [mcp_servers.cave-tools] into ${configPath}`);
+    } else {
+      ensureDir(path.dirname(configPath));
+      fs.writeFileSync(configPath, nextConfig, { mode: 0o644 });
+      trackPath(configPath, configExists ? 'update' : 'create');
+      log(`updated: ${configPath} [mcp_servers.cave-tools]`);
+    }
+  }
+
+  // Grok ignores SessionStart stdout, so put always-on guidance in AGENTS.md
+  // and install the skill in Grok's native skill path.
+  upsertFencedBlock(agentsMd, CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
+  upsertDisciplineBlock(agentsMd);
+  copyFile(path.join(CLAUDE_BUNDLE_DIR, 'skills/cave-tools/SKILL.md'), path.join(skillsDir, 'SKILL.md'), 0o644);
+
+  // Copy only hooks that are safe in Grok's model: activate writes the shared
+  // mode flag as a side effect, redirect enforces built-in tool replacement.
+  const activatePath = path.join(hooksDir, 'cave-tools-activate.js');
+  const redirectPath = path.join(hooksDir, 'cave-tools-redirect.sh');
+  copyFile(path.join(CLAUDE_BUNDLE_DIR, 'hooks/cave-tools-config.js'), path.join(hooksDir, 'cave-tools-config.js'), 0o644);
+  copyFile(path.join(CLAUDE_BUNDLE_DIR, 'hooks/cave-tools-activate.js'), activatePath, 0o755);
+  copyFile(path.join(CLAUDE_BUNDLE_DIR, 'hooks/cave-tools-redirect.sh'), redirectPath, 0o755);
+
+  const hooksPath = path.join(hooksDir, 'cave-tools.json');
+  const hooksBody = {
+    description: 'cave-tools Grok integration: writes mode flag and redirects built-in tools to cave__* MCP tools.',
+    hooks: {
+      SessionStart: [{
+        hooks: [{
+          type: 'command',
+          command: `${tomlString(process.execPath)} ${tomlString(activatePath)}`,
+          timeout: 5,
+        }],
+      }],
+      PreToolUse: [{
+        matcher: 'Read|Grep|Glob|Edit|Write|read_file|grep|list_dir|search_replace',
+        hooks: [{
+          type: 'command',
+          command: `bash ${tomlString(redirectPath)}`,
+          timeout: 3,
+        }],
+      }],
+    },
+  };
+  writeJson(hooksPath, hooksBody);
+  log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${hooksPath} hooks for Grok`);
+}
+
 function injectOpencodeAgentDefs(agentDirs) {
   for (const dir of agentDirs) {
     let entries;
@@ -625,6 +745,7 @@ function targetDefinitions() {
     { key: 'kiro', label: 'Kiro CLI', configPath: path.join(HOME, '.kiro', 'settings', 'mcp.json'), detectPath: path.join(HOME, '.kiro'), shape: 'mcpServers', rules: 'kiro' },
     { key: 'cursor', label: 'Cursor', configPath: path.join(HOME, '.cursor', 'mcp.json'), detectPath: path.join(HOME, '.cursor'), shape: 'mcpServers' },
     { key: 'opencode', label: 'OpenCode', configPath: path.join(opencodeConfigDir(), 'opencode.json'), detectPath: opencodeConfigDir(), special: 'opencode' },
+    { key: 'grok', label: 'Grok Build CLI', configPath: path.join(grokConfigDir(), 'config.toml'), detectPath: grokConfigDir(), special: 'grok' },
     { key: 'zcode', label: 'ZCode', configPath: path.join(zcodeConfigDir(), 'AGENTS.md'), detectPath: zcodeConfigDir(), special: 'zcode' },
   ];
 }
@@ -733,6 +854,7 @@ function installSelectedTargets(targets) {
   }
   if (keys.has('codex')) installCodex();
   if (keys.has('opencode')) installOpencodeMcp();
+  if (keys.has('grok')) installGrok();
   if (keys.has('zcode')) installZcodeMcp();
 
   for (const target of targets) {
