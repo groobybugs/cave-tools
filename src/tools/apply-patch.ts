@@ -1,9 +1,10 @@
-import { readFile, rm, writeFile } from "fs/promises";
+import { readFile, rm, stat, writeFile } from "fs/promises";
+import path from "path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolResult } from "../types.js";
 import { invalidateFileCache, recordEdit } from "../compression/utils.js";
-import { ensureParentDirectory, resolveMutationTarget } from "../runtime/path.js";
-import { writeIfUnchanged } from "../runtime/file-mutation.js";
+import { ensureParentDirectory, resolveMutationTarget, toPosixPath } from "../runtime/path.js";
+import { decodeUtf8PreserveBom, joinBom, lockedWrite, writeIfUnchanged } from "../runtime/file-mutation.js";
 
 interface UpdateFileChunk {
   old_lines: string[];
@@ -17,6 +18,31 @@ type Hunk =
   | { type: "delete"; path: string }
   | { type: "update"; path: string; move_path?: string; chunks: UpdateFileChunk[] };
 
+// PlannedChange represents one mutation, fully resolved and computed, ready
+// for atomic application. Build every PlannedChange before writing anything;
+// if planning throws, no files are touched.
+type PlannedChange =
+  | { type: "add"; path: string; target: string; content: string }
+  | { type: "delete"; path: string; target: string }
+  | {
+      type: "update";
+      path: string;
+      target: string;
+      sourceBytes: Uint8Array;
+      content: string;
+      bom: boolean;
+    }
+  | {
+      type: "move";
+      path: string;
+      target: string;
+      movePath: string;
+      moveTarget: string;
+      sourceBytes: Uint8Array;
+      content: string;
+      bom: boolean;
+    };
+
 // Normalize Unicode punctuation to ASCII equivalents (like Rust's normalize_unicode)
 function normalizeUnicode(str: string): string {
   return str
@@ -24,7 +50,7 @@ function normalizeUnicode(str: string): string {
     .replace(/[“”„‟]/g, '"')
     .replace(/[‐‑‒–—―]/g, "-")
     .replace(/…/g, "...")
-    .replace(/ /g, " ");
+    .replace(/\u00A0/g, " ");
 }
 
 type Comparator = (a: string, b: string) => boolean;
@@ -128,7 +154,7 @@ function parseUpdateFileChunks(lines: string[], startIdx: number): { chunks: Upd
   const chunks: UpdateFileChunk[] = [];
   let i = startIdx;
 
-  // Backward-compatible whole-file blob: no @@ context headers.
+  // Backward-compatible whole-file blob: no @@ context headers. Cave extension.
   if (i < lines.length && !lines[i].startsWith("***") && !lines[i].startsWith("@@")) {
     const oldLines: string[] = [];
     const newLines: string[] = [];
@@ -225,8 +251,17 @@ function parseAddFileContent(lines: string[], startIdx: number): { content: stri
   return { content, nextIdx: i };
 }
 
+function stripHeredoc(input: string): string {
+  // Match heredoc patterns like: cat <<'EOF'\n...\nEOF or <<EOF\n...\nEOF
+  const heredocMatch = input.match(/^(?:cat\s+)?<<['"]?(\w+)['"]?\s*\n([\s\S]*?)\n\1\s*$/);
+  if (heredocMatch) {
+    return heredocMatch[2];
+  }
+  return input;
+}
+
 function parsePatch(patchText: string): { hunks: Hunk[] } {
-  const cleaned = patchText.replace(/\r\n/g, "\n").trim();
+  const cleaned = stripHeredoc(patchText.replace(/\r\n/g, "\n").trim());
   const lines = cleaned.split("\n");
   const hunks: Hunk[] = [];
   let i = 0;
@@ -373,10 +408,333 @@ function err(text: string): ToolResult {
   return { content: [{ type: "text", text: `Error: ${text}` }], isError: true };
 }
 
+// Wrap inner errors with the opencode-style verification prefix so agents can
+// tell the patch is rejected, not a transient IO failure.
+function verificationError(reason: string): Error {
+  return new Error(`apply_patch verification failed: ${reason}`);
+}
+
+interface UpdateBucket {
+  sourceBytes: Uint8Array;
+  bom: boolean;
+  decodedText: string;
+  firstPath: string;
+  movePath?: string;
+}
+
+// Read source once per canonical path and apply each chunk-set on top of the
+// previously-computed buffer. First call seeds the bucket; later calls append
+// on top of the planned buffer so duplicate update sections don't race
+// writeIfUnchanged during apply.
+async function ensureUpdateBucket(
+  existing: UpdateBucket | undefined,
+  canonical: string,
+  chunks: UpdateFileChunk[],
+  firstPath: string,
+  movePath: string | undefined,
+): Promise<UpdateBucket> {
+  if (!existing) {
+    let sourceBytes: Buffer;
+    try {
+      sourceBytes = await readFile(canonical);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw verificationError(`Failed to read file to update: ${canonical} (${message})`);
+    }
+    let decoded: { text: string; bom: boolean };
+    try {
+      decoded = decodeUtf8PreserveBom(new Uint8Array(sourceBytes));
+    } catch {
+      throw verificationError(`File is not valid UTF-8: ${canonical}`);
+    }
+    let derived: string;
+    try {
+      derived = deriveNewContents(canonical, chunks, decoded.text);
+    } catch (error) {
+      throw verificationError(error instanceof Error ? error.message : String(error));
+    }
+    return {
+      sourceBytes: new Uint8Array(sourceBytes),
+      bom: decoded.bom,
+      decodedText: derived,
+      firstPath,
+      movePath,
+    };
+  }
+  let derived: string;
+  try {
+    derived = deriveNewContents(canonical, chunks, existing.decodedText);
+  } catch (error) {
+    throw verificationError(error instanceof Error ? error.message : String(error));
+  }
+  existing.decodedText = derived;
+  if (movePath !== undefined) existing.movePath = movePath;
+  return existing;
+}
+
+// planning phase — resolve paths, read source files, compute resulting
+// contents. Any error here aborts before any disk mutation. Duplicate update
+// sections for the same canonical path are coalesced so subsequent hunks
+// derive from the planned buffer, not the on-disk original. Every canonical
+// path touched by the patch must appear at most once across add / update /
+// move / delete so apply can't race itself.
+async function planPatch(hunks: Hunk[]): Promise<PlannedChange[]> {
+  const changes: PlannedChange[] = [];
+  const updateBuckets = new Map<string, UpdateBucket>();
+  const addByPath = new Set<string>();
+  const deleteByPath = new Set<string>();
+  const updateInPlace = new Set<string>();
+  const moveSources = new Set<string>();
+  const moveDestinations = new Set<string>();
+
+  const reserveWrite = (canonical: string, conflictLabel: string): void => {
+    if (addByPath.has(canonical)) throw verificationError(`${conflictLabel} ${canonical}: already added by patch`);
+    if (deleteByPath.has(canonical)) throw verificationError(`${conflictLabel} ${canonical}: already deleted by patch`);
+    if (updateInPlace.has(canonical)) throw verificationError(`${conflictLabel} ${canonical}: already updated by patch`);
+    if (moveDestinations.has(canonical)) throw verificationError(`${conflictLabel} ${canonical}: already a move destination`);
+    if (moveSources.has(canonical)) throw verificationError(`${conflictLabel} ${canonical}: already a move source`);
+  };
+
+  for (const hunk of hunks) {
+    if (hunk.type === "add") {
+      const target = await resolveMutationTarget(hunk.path);
+      const canonical = target.canonical;
+      reserveWrite(canonical, "Patch adds");
+      if (updateBuckets.has(canonical)) {
+        throw verificationError(`Patch adds same path as a planned update: ${canonical}`);
+      }
+      if (target.existed) {
+        let info;
+        try {
+          info = await stat(canonical);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw verificationError(`Failed to read file for add: ${canonical} (${message})`);
+        }
+        if (info.isDirectory()) {
+          throw verificationError(`Cannot write file over directory: ${canonical}`);
+        }
+      }
+      addByPath.add(canonical);
+      const content =
+        hunk.contents.endsWith("\n") || hunk.contents === "" ? hunk.contents : `${hunk.contents}\n`;
+      changes.push({ type: "add", path: hunk.path, target: canonical, content });
+      continue;
+    }
+
+    if (hunk.type === "delete") {
+      const target = await resolveMutationTarget(hunk.path);
+      const canonical = target.canonical;
+      if (addByPath.has(canonical)) {
+        throw verificationError(`Patch adds and deletes same path: ${canonical}`);
+      }
+      if (deleteByPath.has(canonical)) {
+        throw verificationError(`Patch deletes same path more than once: ${canonical}`);
+      }
+      if (updateBuckets.has(canonical)) {
+        throw verificationError(`Patch updates and deletes same path: ${canonical}`);
+      }
+      if (moveSources.has(canonical)) {
+        throw verificationError(`Patch moves and deletes same path: ${canonical}`);
+      }
+      if (moveDestinations.has(canonical)) {
+        throw verificationError(`Patch deletes a path that is also a move destination: ${canonical}`);
+      }
+      if (!target.existed) {
+        throw verificationError(`Failed to read file for deletion: ${canonical}`);
+      }
+      let info;
+      try {
+        info = await stat(canonical);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw verificationError(`Failed to read file for deletion: ${canonical} (${message})`);
+      }
+      if (info.isDirectory()) {
+        throw verificationError(`Cannot delete directory with Delete File: ${canonical}`);
+      }
+      deleteByPath.add(canonical);
+      changes.push({ type: "delete", path: hunk.path, target: canonical });
+      continue;
+    }
+
+    // update / move
+    const target = await resolveMutationTarget(hunk.path);
+    const canonical = target.canonical;
+    if (addByPath.has(canonical)) {
+      throw verificationError(`Patch adds and updates same path: ${canonical}`);
+    }
+    if (deleteByPath.has(canonical)) {
+      throw verificationError(`Patch updates and deletes same path: ${canonical}`);
+    }
+    if (moveSources.has(canonical) && !updateBuckets.has(canonical)) {
+      throw verificationError(`Patch updates another move's source: ${canonical}`);
+    }
+    if (hunk.move_path && moveDestinations.has(canonical)) {
+      throw verificationError(`Patch moves a path that is also a move destination: ${canonical}`);
+    }
+    if (!target.existed) {
+      throw verificationError(`Failed to read file to update: ${canonical}`);
+    }
+
+    if (hunk.move_path) {
+      const moveTarget = await resolveMutationTarget(hunk.move_path);
+      if (moveTarget.canonical === canonical) {
+        throw verificationError(`Move source and destination resolve to same path: ${canonical}`);
+      }
+      if (moveDestinations.has(moveTarget.canonical)) {
+        throw verificationError(`Patch moves multiple sources to same destination: ${moveTarget.canonical}`);
+      }
+      if (moveSources.has(moveTarget.canonical)) {
+        throw verificationError(`Patch move destination is also a move source: ${moveTarget.canonical}`);
+      }
+      if (addByPath.has(moveTarget.canonical)) {
+        throw verificationError(`Patch move destination is also added: ${moveTarget.canonical}`);
+      }
+      if (updateInPlace.has(moveTarget.canonical)) {
+        throw verificationError(`Patch move destination is also updated: ${moveTarget.canonical}`);
+      }
+      if (deleteByPath.has(moveTarget.canonical)) {
+        throw verificationError(`Patch move destination is also deleted: ${moveTarget.canonical}`);
+      }
+      if (moveTarget.existed) {
+        let info;
+        try {
+          info = await stat(moveTarget.canonical);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw verificationError(`Failed to read move destination: ${moveTarget.canonical} (${message})`);
+        }
+        if (info.isDirectory()) {
+          throw verificationError(`Cannot write file over directory: ${moveTarget.canonical}`);
+        }
+      }
+      const existing = updateBuckets.get(canonical);
+      if (existing && existing.movePath && existing.movePath !== hunk.move_path) {
+        throw verificationError(`Patch moves same source to different destinations: ${canonical}`);
+      }
+      moveSources.add(canonical);
+      moveDestinations.add(moveTarget.canonical);
+      const bucket = await ensureUpdateBucket(
+        existing,
+        canonical,
+        hunk.chunks,
+        hunk.path,
+        hunk.move_path,
+      );
+      updateBuckets.set(canonical, bucket);
+      continue;
+    }
+
+    // in-place update: must not collide with move destinations.
+    if (moveDestinations.has(canonical)) {
+      throw verificationError(`Patch updates a path that is also a move destination: ${canonical}`);
+    }
+    updateInPlace.add(canonical);
+    const bucket = await ensureUpdateBucket(
+      updateBuckets.get(canonical),
+      canonical,
+      hunk.chunks,
+      hunk.path,
+      undefined,
+    );
+    updateBuckets.set(canonical, bucket);
+  }
+
+  // Materialize one planned update per canonical source path.
+  for (const [canonical, bucket] of updateBuckets) {
+    if (bucket.movePath) {
+      const moveTarget = await resolveMutationTarget(bucket.movePath);
+      if (moveTarget.canonical === canonical) {
+        throw verificationError(`Move source and destination resolve to same path: ${canonical}`);
+      }
+      changes.push({
+        type: "move",
+        path: bucket.firstPath,
+        target: canonical,
+        movePath: bucket.movePath,
+        moveTarget: moveTarget.canonical,
+        sourceBytes: bucket.sourceBytes,
+        content: bucket.decodedText,
+        bom: bucket.bom,
+      });
+    } else {
+      changes.push({
+        type: "update",
+        path: bucket.firstPath,
+        target: canonical,
+        sourceBytes: bucket.sourceBytes,
+        content: bucket.decodedText,
+        bom: bucket.bom,
+      });
+    }
+  }
+
+  return changes;
+}
+
+// apply phase — only invoked after planPatch succeeds. Write-time failures may
+// leave partial state; caller surfaces the error. File writes go through
+// per-file locks so concurrent write/edit calls cannot interleave.
+async function applyPlannedChanges(changes: PlannedChange[]): Promise<void> {
+  for (const change of changes) {
+    if (change.type === "add") {
+      await lockedWrite(change.target, change.content);
+      invalidateFileCache(change.target);
+      invalidateFileCache(change.path);
+      recordEdit(change.target);
+      continue;
+    }
+
+    if (change.type === "delete") {
+      await rm(change.target);
+      invalidateFileCache(change.target);
+      invalidateFileCache(change.path);
+      continue;
+    }
+
+    // update / move share BOM-preserving write semantics.
+    const payload = joinBom(change.content, change.bom);
+
+    if (change.type === "update") {
+      await writeIfUnchanged(change.target, change.sourceBytes, payload);
+      invalidateFileCache(change.target);
+      invalidateFileCache(change.path);
+      recordEdit(change.target);
+      continue;
+    }
+
+    // move: re-check source unchanged before writing destination + removing
+    // source. If the source moved/changed under us, abort to avoid clobbering
+    // an unrelated file. Destination write goes through lockedWrite so
+    // concurrent edit/write calls cannot interleave on the dest path.
+    const current = await readFile(change.target);
+    if (!sameBytes(new Uint8Array(current), change.sourceBytes)) {
+      throw new Error(`File changed after it was read: ${change.target}`);
+    }
+    await lockedWrite(change.moveTarget, payload);
+    await rm(change.target);
+    invalidateFileCache(change.target);
+    invalidateFileCache(change.path);
+    invalidateFileCache(change.moveTarget);
+    invalidateFileCache(change.movePath);
+    recordEdit(change.moveTarget);
+  }
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+function relativize(absolute: string): string {
+  const rel = path.relative(process.cwd(), absolute);
+  return rel && !rel.startsWith("..") ? toPosixPath(rel) : toPosixPath(absolute);
+}
+
 export const applyPatchTool: Tool & { handler: (args: Record<string, unknown>) => Promise<ToolResult> } = {
   name: "cave__apply_patch",
   description:
-    "Apply one patch containing add, update, delete, and move file operations. Operations apply sequentially; if a later operation fails, earlier operations remain applied and are reported.",
+    "Apply one patch containing add, update, delete, and move file operations. Every patch operation is verified before any disk write; if a write-time error occurs after verification, partial state may remain on disk.",
   inputSchema: {
     type: "object",
     properties: {
@@ -397,63 +755,33 @@ export const applyPatchTool: Tool & { handler: (args: Record<string, unknown>) =
     } catch (error) {
       return err(`apply_patch verification failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-    if (hunks.length === 0) return err("patch rejected: empty patch");
-
-    const applied: string[] = [];
-    const fail = (path: string) =>
-      err(
-        applied.length === 0
-          ? `Unable to apply patch at ${path}`
-          : `Patch partially applied before failing at ${path}. Applied: ${applied.join(", ")}`,
-      );
-
-    for (const hunk of hunks) {
-      try {
-        const target = await resolveMutationTarget(hunk.path);
-
-        if (hunk.type === "add") {
-          await ensureParentDirectory(target.canonical);
-          const contents =
-            hunk.contents.endsWith("\n") || hunk.contents === "" ? hunk.contents : `${hunk.contents}\n`;
-          await writeFile(target.canonical, contents, { encoding: "utf-8", flag: "wx" });
-          invalidateFileCache(target.canonical);
-          invalidateFileCache(hunk.path);
-          recordEdit(target.canonical);
-          applied.push(`A ${hunk.path}`);
-        } else if (hunk.type === "delete") {
-          await rm(target.canonical);
-          invalidateFileCache(target.canonical);
-          invalidateFileCache(hunk.path);
-          applied.push(`D ${hunk.path}`);
-        } else {
-          const source = await readFile(target.canonical);
-          const content = new TextDecoder("utf-8", { fatal: true }).decode(source);
-          const next = deriveNewContents(hunk.path, hunk.chunks, content);
-
-          if (hunk.move_path) {
-            const moveTarget = await resolveMutationTarget(hunk.move_path);
-            await ensureParentDirectory(moveTarget.canonical);
-            await writeFile(moveTarget.canonical, next, { encoding: "utf-8" });
-            await rm(target.canonical);
-            invalidateFileCache(target.canonical);
-            invalidateFileCache(hunk.path);
-            invalidateFileCache(moveTarget.canonical);
-            invalidateFileCache(hunk.move_path);
-            recordEdit(moveTarget.canonical);
-            applied.push(`R ${hunk.path} -> ${hunk.move_path}`);
-          } else {
-            await writeIfUnchanged(target.canonical, source, next);
-            invalidateFileCache(target.canonical);
-            invalidateFileCache(hunk.path);
-            recordEdit(target.canonical);
-            applied.push(`M ${hunk.path}`);
-          }
-        }
-      } catch {
-        return fail(hunk.path);
-      }
+    if (hunks.length === 0) {
+      const normalized = patchText.replace(/\r\n/g, "\n").trim();
+      if (normalized === "*** Begin Patch\n*** End Patch") return err("patch rejected: empty patch");
+      return err("apply_patch verification failed: no hunks found");
     }
 
-    return ok(["Applied patch sequentially:", ...applied].join("\n"));
+    let changes: PlannedChange[];
+    try {
+      changes = await planPatch(hunks);
+    } catch (error) {
+      return err(error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      await applyPlannedChanges(changes);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return err(`apply_patch apply failed: ${message}`);
+    }
+
+    const summary = changes.map((change) => {
+      if (change.type === "add") return `A ${relativize(change.target)}`;
+      if (change.type === "delete") return `D ${relativize(change.target)}`;
+      if (change.type === "move") return `M ${relativize(change.moveTarget)}`;
+      return `M ${relativize(change.target)}`;
+    });
+
+    return ok(`Success. Updated the following files:\n${summary.join("\n")}`);
   },
 };

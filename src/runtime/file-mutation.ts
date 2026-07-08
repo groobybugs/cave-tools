@@ -13,12 +13,20 @@ function joinBom(text: string, bom: boolean): string {
   return bom ? `\uFEFF${stripped}` : stripped;
 }
 
+export { joinBom };
+
 function hasUtf8Bom(content: Uint8Array): boolean {
   return content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf;
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+export function decodeUtf8PreserveBom(content: Uint8Array): { text: string; bom: boolean } {
+  const bom = hasUtf8Bom(content);
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bom ? content.slice(3) : content);
+  return { text, bom };
 }
 
 async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {

@@ -31,7 +31,7 @@ import {
   getCodebookSize,
 } from "./dist/compression/codebook.js";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -586,6 +586,8 @@ async function test() {
     });
     assert.equal(patchAdd.isError, undefined, patchAdd.content[0].text);
     assert.equal(readFileSync(addFile, "utf-8"), "one\ntwo\n");
+    assert.match(patchAdd.content[0].text, /Success\. Updated the following files:/);
+    assert.match(patchAdd.content[0].text, new RegExp(`A .*added\\.txt`));
 
     const patchUpdate = await applyPatchTool.handler({
       patchText: `*** Begin Patch\n*** Update File: ${addFile}\n@@\n-one\n+ONE\n two\n*** End Patch`,
@@ -598,6 +600,367 @@ async function test() {
     });
     assert.equal(patchDelete.isError, undefined, patchDelete.content[0].text);
     assert.throws(() => readFileSync(addFile, "utf-8"));
+
+    // add/update/delete in one patch, plus nested-dir add.
+    const combinedDir = mkdtempSync(join(patchDir, "combined-"));
+    const nested = join(combinedDir, "nested", "new.txt");
+    const modify = join(combinedDir, "modify.txt");
+    const del = join(combinedDir, "delete.txt");
+    writeFileSync(modify, "line1\nline2\n");
+    writeFileSync(del, "obsolete\n");
+    const combined = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Add File: ${nested}\n+created\n*** Delete File: ${del}\n*** Update File: ${modify}\n@@\n-line2\n+changed\n*** End Patch`,
+    });
+    assert.equal(combined.isError, undefined, combined.content[0].text);
+    assert.equal(readFileSync(nested, "utf-8"), "created\n");
+    assert.equal(readFileSync(modify, "utf-8"), "line1\nchanged\n");
+    assert.throws(() => readFileSync(del, "utf-8"));
+    assert.match(combined.content[0].text, /A .*nested\/new\.txt/);
+    assert.match(combined.content[0].text, /D .*delete\.txt/);
+    assert.match(combined.content[0].text, /M .*modify\.txt/);
+
+    // multiple hunks in one file.
+    const multi = join(combinedDir, "multi.txt");
+    writeFileSync(multi, "line1\nline2\nline3\nline4\n");
+    const multiPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${multi}\n@@\n-line2\n+changed2\n@@\n-line4\n+changed4\n*** End Patch`,
+    });
+    assert.equal(multiPatch.isError, undefined, multiPatch.content[0].text);
+    assert.equal(readFileSync(multi, "utf-8"), "line1\nchanged2\nline3\nchanged4\n");
+
+    // insert-only hunk.
+    const insertOnly = join(combinedDir, "insert_only.txt");
+    writeFileSync(insertOnly, "alpha\nomega\n");
+    const insertPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${insertOnly}\n@@\n alpha\n+beta\n omega\n*** End Patch`,
+    });
+    assert.equal(insertPatch.isError, undefined, insertPatch.content[0].text);
+    assert.equal(readFileSync(insertOnly, "utf-8"), "alpha\nbeta\nomega\n");
+
+    // appends trailing newline on update.
+    const noNewline = join(combinedDir, "no_newline.txt");
+    writeFileSync(noNewline, "no newline at end");
+    const appendPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${noNewline}\n@@\n-no newline at end\n+first line\n+second line\n*** End Patch`,
+    });
+    assert.equal(appendPatch.isError, undefined, appendPatch.content[0].text);
+    const appended = readFileSync(noNewline, "utf-8");
+    assert.ok(appended.endsWith("\n"));
+    assert.equal(appended, "first line\nsecond line\n");
+
+    // move to nested dir.
+    const moveDir = mkdtempSync(join(patchDir, "move-"));
+    const moveSrc = join(moveDir, "old", "name.txt");
+    mkdirSync(join(moveDir, "old"), { recursive: true });
+    writeFileSync(moveSrc, "old content\n");
+    const movePatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${moveSrc}\n*** Move to: ${join(moveDir, "renamed", "dir", "name.txt")}\n@@\n-old content\n+new content\n*** End Patch`,
+    });
+    assert.equal(movePatch.isError, undefined, movePatch.content[0].text);
+    assert.throws(() => readFileSync(moveSrc, "utf-8"));
+    assert.equal(readFileSync(join(moveDir, "renamed", "dir", "name.txt"), "utf-8"), "new content\n");
+    assert.match(movePatch.content[0].text, /M .*renamed.*name\.txt|M .*name\.txt/);
+
+    // move overwrites existing destination.
+    const moveOverwriteSrc = join(moveDir, "old2", "name.txt");
+    const moveOverwriteDst = join(moveDir, "renamed2", "dir", "name.txt");
+    mkdirSync(join(moveDir, "old2"), { recursive: true });
+    mkdirSync(join(moveDir, "renamed2", "dir"), { recursive: true });
+    writeFileSync(moveOverwriteSrc, "from\n");
+    writeFileSync(moveOverwriteDst, "existing\n");
+    const moveOverwritePatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${moveOverwriteSrc}\n*** Move to: ${moveOverwriteDst}\n@@\n-from\n+new\n*** End Patch`,
+    });
+    assert.equal(moveOverwritePatch.isError, undefined, moveOverwritePatch.content[0].text);
+    assert.throws(() => readFileSync(moveOverwriteSrc, "utf-8"));
+    assert.equal(readFileSync(moveOverwriteDst, "utf-8"), "new\n");
+
+    // add overwrites existing file (opencode parity).
+    const dupFile = join(combinedDir, "duplicate.txt");
+    writeFileSync(dupFile, "old content\n");
+    const dupPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Add File: ${dupFile}\n+new content\n*** End Patch`,
+    });
+    assert.equal(dupPatch.isError, undefined, dupPatch.content[0].text);
+    assert.equal(readFileSync(dupFile, "utf-8"), "new content\n");
+
+    // update missing target rejects with verification message.
+    const missingUpdate = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${join(combinedDir, "missing.txt")}\n@@\n-nope\n+better\n*** End Patch`,
+    });
+    assert.equal(missingUpdate.isError, true);
+    assert.match(missingUpdate.content[0].text, /apply_patch verification failed: Failed to read file to update/);
+
+    // delete missing target rejects.
+    const missingDelete = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Delete File: ${join(combinedDir, "missing.txt")}\n*** End Patch`,
+    });
+    assert.equal(missingDelete.isError, true);
+    assert.match(missingDelete.content[0].text, /apply_patch verification failed: Failed to read file for deletion/);
+
+    // invalid hunk header rejects.
+    const invalidHdr = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Frobnicate File: foo\n*** End Patch`,
+    });
+    assert.equal(invalidHdr.isError, true);
+    assert.match(invalidHdr.content[0].text, /apply_patch verification failed/);
+
+    // empty patch rejects.
+    const emptyPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** End Patch`,
+    });
+    assert.equal(emptyPatch.isError, true);
+    assert.match(emptyPatch.content[0].text, /patch rejected: empty patch/);
+
+    // verification failure leaves no side effects (atomicity).
+    const atomicDir = mkdtempSync(join(patchDir, "atomic-"));
+    const atomicPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Add File: ${join(atomicDir, "created.txt")}\n+hello\n*** Update File: ${join(atomicDir, "missing.txt")}\n@@\n-old\n+new\n*** End Patch`,
+    });
+    assert.equal(atomicPatch.isError, true);
+    assert.throws(() => readFileSync(join(atomicDir, "created.txt"), "utf-8"));
+
+    // missing context rejects, target unchanged.
+    const ctxDir = mkdtempSync(join(patchDir, "ctx-"));
+    const ctxFile = join(ctxDir, "modify.txt");
+    writeFileSync(ctxFile, "line1\nline2\n");
+    const ctxPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${ctxFile}\n@@\n-missing\n+changed\n*** End Patch`,
+    });
+    assert.equal(ctxPatch.isError, true);
+    assert.match(ctxPatch.content[0].text, /apply_patch verification failed/);
+    assert.equal(readFileSync(ctxFile, "utf-8"), "line1\nline2\n");
+
+    // end-of-file anchor.
+    const eofFile = join(ctxDir, "tail.txt");
+    writeFileSync(eofFile, "alpha\nlast\n");
+    const eofPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${eofFile}\n@@\n-last\n+end\n*** End of File\n*** End Patch`,
+    });
+    assert.equal(eofPatch.isError, undefined, eofPatch.content[0].text);
+    assert.equal(readFileSync(eofFile, "utf-8"), "alpha\nend\n");
+
+    // @@ context disambiguation.
+    const ctxAmbFile = join(ctxDir, "multi_ctx.txt");
+    writeFileSync(ctxAmbFile, "fn a\nx=10\ny=2\nfn b\nx=10\ny=20\n");
+    const ctxAmbPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${ctxAmbFile}\n@@ fn b\n-x=10\n+x=11\n*** End Patch`,
+    });
+    assert.equal(ctxAmbPatch.isError, undefined, ctxAmbPatch.content[0].text);
+    assert.equal(readFileSync(ctxAmbFile, "utf-8"), "fn a\nx=10\ny=2\nfn b\nx=11\ny=20\n");
+
+    // trailing-whitespace match.
+    const wsFile = join(ctxDir, "trailing_ws.txt");
+    writeFileSync(wsFile, "line1  \nline2\nline3   \n");
+    const wsPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${wsFile}\n@@\n-line2\n+changed\n*** End Patch`,
+    });
+    assert.equal(wsPatch.isError, undefined, wsPatch.content[0].text);
+    assert.equal(readFileSync(wsFile, "utf-8"), "line1  \nchanged\nline3   \n");
+
+    // leading-whitespace match.
+    const leadWsFile = join(ctxDir, "leading_ws.txt");
+    writeFileSync(leadWsFile, "  line1\nline2\n  line3\n");
+    const leadWsPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${leadWsFile}\n@@\n-line2\n+changed\n*** End Patch`,
+    });
+    assert.equal(leadWsPatch.isError, undefined, leadWsPatch.content[0].text);
+    assert.equal(readFileSync(leadWsFile, "utf-8"), "  line1\nchanged\n  line3\n");
+
+    // Unicode punctuation match.
+    const uniFile = join(ctxDir, "unicode.txt");
+    writeFileSync(uniFile, `He said \u201Chello\u201D\nsome\u2014dash\nend\n`);
+    const uniPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${uniFile}\n@@\n-He said "hello"\n+He said "hi"\n*** End Patch`,
+    });
+    assert.equal(uniPatch.isError, undefined, uniPatch.content[0].text);
+    assert.equal(readFileSync(uniFile, "utf-8"), `He said "hi"\nsome\u2014dash\nend\n`);
+
+    // BOM preservation on update.
+    const bomFile = join(ctxDir, "bom.cs");
+    writeFileSync(bomFile, "\uFEFFusing System;\n\nclass Test {}\n");
+    const bomPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${bomFile}\n@@\n class Test {}\n+class Next {}\n*** End Patch`,
+    });
+    assert.equal(bomPatch.isError, undefined, bomPatch.content[0].text);
+    const bomResult = readFileSync(bomFile, "utf-8");
+    assert.equal(bomResult.charCodeAt(0), 0xfeff);
+    assert.equal(bomResult.slice(1), "using System;\n\nclass Test {}\nclass Next {}\n");
+
+    // BOM preservation on move.
+    const bomMoveSrc = join(ctxDir, "bom_move_src.cs");
+    const bomMoveDst = join(ctxDir, "bom_move_dst.cs");
+    writeFileSync(bomMoveSrc, "\uFEFFhello\n");
+    const bomMovePatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${bomMoveSrc}\n*** Move to: ${bomMoveDst}\n@@\n-hello\n+world\n*** End Patch`,
+    });
+    assert.equal(bomMovePatch.isError, undefined, bomMovePatch.content[0].text);
+    assert.throws(() => readFileSync(bomMoveSrc, "utf-8"));
+    const movedBom = readFileSync(bomMoveDst, "utf-8");
+    assert.equal(movedBom.charCodeAt(0), 0xfeff);
+    assert.equal(movedBom.slice(1), "world\n");
+
+    // Cave extension: non-@@ update shape still works.
+    const legacyFile = join(ctxDir, "legacy.txt");
+    writeFileSync(legacyFile, "alpha\nbeta\n");
+    const legacyPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${legacyFile}\n-alpha\n+ALPHA\n beta\n*** End Patch`,
+    });
+    assert.equal(legacyPatch.isError, undefined, legacyPatch.content[0].text);
+    assert.equal(readFileSync(legacyFile, "utf-8"), "ALPHA\nbeta\n");
+
+    // Delete of a directory is rejected before writes; earlier add must not
+    // be applied.
+    const dirDeleteDir = mkdtempSync(join(patchDir, "dir-delete-"));
+    const dirToDelete = join(dirDeleteDir, "dir");
+    mkdirSync(dirToDelete, { recursive: true });
+    const dirDeletePatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Add File: ${join(dirDeleteDir, "new.txt")}\n+before\n*** Delete File: ${dirToDelete}\n*** End Patch`,
+    });
+    assert.equal(dirDeletePatch.isError, true);
+    assert.match(dirDeletePatch.content[0].text, /Cannot delete directory with Delete File/);
+    // Add hunk must NOT have been applied (verification phase rejected the patch).
+    assert.throws(() => readFileSync(join(dirDeleteDir, "new.txt"), "utf-8"));
+
+    // Duplicate *** Update File: sections for the same path coalesce — final
+    // state combines both hunks instead of failing writeIfUnchanged mid-apply.
+    const dupUpdatesDir = mkdtempSync(join(patchDir, "dup-updates-"));
+    const dupUpdatesFile = join(dupUpdatesDir, "dup.txt");
+    writeFileSync(dupUpdatesFile, "a\nb\nc\n");
+    const dupUpdatePatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${dupUpdatesFile}\n@@\n-a\n+A\n*** Update File: ${dupUpdatesFile}\n@@\n-c\n+C\n*** End Patch`,
+    });
+    assert.equal(dupUpdatePatch.isError, undefined, dupUpdatePatch.content[0].text);
+    assert.equal(readFileSync(dupUpdatesFile, "utf-8"), "A\nb\nC\n");
+
+    // Move to same canonical path as source is rejected.
+    const selfMoveDir = mkdtempSync(join(patchDir, "self-move-"));
+    const selfMoveSrc = join(selfMoveDir, "self.txt");
+    writeFileSync(selfMoveSrc, "stay\n");
+    const selfMovePatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${selfMoveSrc}\n*** Move to: ${selfMoveSrc}\n@@\n-stay\n+changed\n*** End Patch`,
+    });
+    assert.equal(selfMovePatch.isError, true);
+    assert.match(selfMovePatch.content[0].text, /Move source and destination resolve to same path/);
+    assert.equal(readFileSync(selfMoveSrc, "utf-8"), "stay\n");
+
+    // Heredoc-wrapped patch text is unwrapped before parsing.
+    const heredocDir = mkdtempSync(join(patchDir, "heredoc-"));
+    const heredocFile = join(heredocDir, "heredoc_test.txt");
+    const heredocPatch = await applyPatchTool.handler({
+      patchText: `cat <<'EOF'\n*** Begin Patch\n*** Add File: ${heredocFile}\n+heredoc content\n*** End Patch\nEOF`,
+    });
+    assert.equal(heredocPatch.isError, undefined, heredocPatch.content[0].text);
+    assert.equal(readFileSync(heredocFile, "utf-8"), "heredoc content\n");
+
+    const heredocNoCat = join(heredocDir, "heredoc_no_cat.txt");
+    const heredocPatch2 = await applyPatchTool.handler({
+      patchText: `<<EOF\n*** Begin Patch\n*** Add File: ${heredocNoCat}\n+no cat prefix\n*** End Patch\nEOF`,
+    });
+    assert.equal(heredocPatch2.isError, undefined, heredocPatch2.content[0].text);
+    assert.equal(readFileSync(heredocNoCat, "utf-8"), "no cat prefix\n");
+
+    // NBSP normalization: file has U+00A0, patch has normal space — should match.
+    const nbspDir = mkdtempSync(join(patchDir, "nbsp-"));
+    const nbspFile = join(nbspDir, "nbsp.txt");
+    writeFileSync(nbspFile, "line1\u00A0end\nline2\n");
+    const nbspPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${nbspFile}\n@@\n-line1 end\n+line1 changed\n*** End Patch`,
+    });
+    assert.equal(nbspPatch.isError, undefined, nbspPatch.content[0].text);
+    assert.equal(readFileSync(nbspFile, "utf-8"), "line1 changed\nline2\n");
+
+    // Move + Add to same destination rejected; both writes do not occur.
+    const moveAddDir = mkdtempSync(join(patchDir, "move-add-"));
+    const moveAddSrc = join(moveAddDir, "src.txt");
+    const moveAddDst = join(moveAddDir, "dst.txt");
+    writeFileSync(moveAddSrc, "src\n");
+    const moveAddPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${moveAddSrc}\n*** Move to: ${moveAddDst}\n@@\n-src\n+from-src\n*** Add File: ${moveAddDst}\n+from-add\n*** End Patch`,
+    });
+    assert.equal(moveAddPatch.isError, true);
+    assert.match(moveAddPatch.content[0].text, /already added|already a move destination|move destination is also added/);
+    // Source and destination both untouched.
+    assert.equal(readFileSync(moveAddSrc, "utf-8"), "src\n");
+    assert.throws(() => readFileSync(moveAddDst, "utf-8"));
+
+    // Move + Update destination rejected.
+    const moveUpdDir = mkdtempSync(join(patchDir, "move-upd-"));
+    const moveUpdSrc = join(moveUpdDir, "src.txt");
+    const moveUpdDst = join(moveUpdDir, "dst.txt");
+    writeFileSync(moveUpdSrc, "src\n");
+    writeFileSync(moveUpdDst, "existing\n");
+    const moveUpdPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${moveUpdSrc}\n*** Move to: ${moveUpdDst}\n@@\n-src\n+from-src\n*** Update File: ${moveUpdDst}\n@@\n-existing\n+changed\n*** End Patch`,
+    });
+    assert.equal(moveUpdPatch.isError, true);
+    assert.match(moveUpdPatch.content[0].text, /move destination is also updated|updates a path that is also a move destination/);
+
+    // Two moves to same destination rejected.
+    const moveTwoDir = mkdtempSync(join(patchDir, "move-two-"));
+    const moveTwoA = join(moveTwoDir, "a.txt");
+    const moveTwoB = join(moveTwoDir, "b.txt");
+    const moveTwoDst = join(moveTwoDir, "shared.txt");
+    writeFileSync(moveTwoA, "A\n");
+    writeFileSync(moveTwoB, "B\n");
+    const moveTwoPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${moveTwoA}\n*** Move to: ${moveTwoDst}\n@@\n-A\n+from-A\n*** Update File: ${moveTwoB}\n*** Move to: ${moveTwoDst}\n@@\n-B\n+from-B\n*** End Patch`,
+    });
+    assert.equal(moveTwoPatch.isError, true);
+    assert.match(moveTwoPatch.content[0].text, /moves multiple sources to same destination/);
+
+    // Move destination then delete same destination rejected.
+    const moveDelDir = mkdtempSync(join(patchDir, "move-del-"));
+    const moveDelSrc = join(moveDelDir, "src.txt");
+    const moveDelDst = join(moveDelDir, "dst.txt");
+    writeFileSync(moveDelSrc, "src\n");
+    writeFileSync(moveDelDst, "dst\n");
+    const moveDelPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${moveDelSrc}\n*** Move to: ${moveDelDst}\n@@\n-src\n+from-src\n*** Delete File: ${moveDelDst}\n*** End Patch`,
+    });
+    assert.equal(moveDelPatch.isError, true);
+    assert.match(moveDelPatch.content[0].text, /deletes a path that is also a move destination/);
+    assert.equal(readFileSync(moveDelSrc, "utf-8"), "src\n");
+    assert.equal(readFileSync(moveDelDst, "utf-8"), "dst\n");
+
+    // Move swap rejected before writes.
+    const swapDir = mkdtempSync(join(patchDir, "move-swap-"));
+    const swapA = join(swapDir, "a.txt");
+    const swapB = join(swapDir, "b.txt");
+    writeFileSync(swapA, "A\n");
+    writeFileSync(swapB, "B\n");
+    const swapPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Update File: ${swapA}\n*** Move to: ${swapB}\n@@\n-A\n+from-A\n*** Update File: ${swapB}\n*** Move to: ${swapA}\n@@\n-B\n+from-B\n*** End Patch`,
+    });
+    assert.equal(swapPatch.isError, true);
+    assert.match(swapPatch.content[0].text, /move destination|move source/);
+    assert.equal(readFileSync(swapA, "utf-8"), "A\n");
+    assert.equal(readFileSync(swapB, "utf-8"), "B\n");
+
+    // Add over directory rejected before earlier add writes.
+    const addDirDir = mkdtempSync(join(patchDir, "add-dir-"));
+    const addDirTarget = join(addDirDir, "dir-target");
+    mkdirSync(addDirTarget, { recursive: true });
+    const addDirPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Add File: ${join(addDirDir, "created.txt")}\n+created\n*** Add File: ${addDirTarget}\n+bad\n*** End Patch`,
+    });
+    assert.equal(addDirPatch.isError, true);
+    assert.match(addDirPatch.content[0].text, /Cannot write file over directory/);
+    assert.throws(() => readFileSync(join(addDirDir, "created.txt"), "utf-8"));
+
+    // Move over directory rejected before earlier add writes.
+    const moveDirTargetRoot = mkdtempSync(join(patchDir, "move-dir-target-"));
+    const moveDirSource = join(moveDirTargetRoot, "src.txt");
+    const moveDirTarget = join(moveDirTargetRoot, "dir-target");
+    mkdirSync(moveDirTarget, { recursive: true });
+    writeFileSync(moveDirSource, "src\n");
+    const moveDirPatch = await applyPatchTool.handler({
+      patchText: `*** Begin Patch\n*** Add File: ${join(moveDirTargetRoot, "created.txt")}\n+created\n*** Update File: ${moveDirSource}\n*** Move to: ${moveDirTarget}\n@@\n-src\n+from-src\n*** End Patch`,
+    });
+    assert.equal(moveDirPatch.isError, true);
+    assert.match(moveDirPatch.content[0].text, /Cannot write file over directory/);
+    assert.throws(() => readFileSync(join(moveDirTargetRoot, "created.txt"), "utf-8"));
+    assert.equal(readFileSync(moveDirSource, "utf-8"), "src\n");
   } finally {
     rmSync(patchDir, { recursive: true, force: true });
   }
