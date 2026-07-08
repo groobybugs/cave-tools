@@ -99,6 +99,8 @@ export const bashTool: Tool & {
         timeout,
         cwd,
         shell: defaultShell(),
+        maxBytes: 100 * 1024, // generous; cave's budget table tightens further downstream
+        maxLines: 2000,
       });
 
       // Exit code as data: non-zero (and timeout/signal) are reported inline
@@ -109,6 +111,9 @@ export const bashTool: Tool & {
         result.signal !== null;
       const capture = captureNotice(result.stdoutTruncated, result.stderrTruncated);
       const captureNote = capture ? `\n\n${capture}` : "";
+      const spillNote = result.stdoutPath
+        ? `\n\n[Full output spilled to: ${result.stdoutPath}]`
+        : "";
       const exitNote = result.timedOut
         ? `\n\n[timed out after ${timeout}ms - process group killed]`
         : result.signal
@@ -126,7 +131,7 @@ export const bashTool: Tool & {
           content: [
             {
               type: "text",
-              text: `${processed}${captureNote}${exitNote}`,
+              text: `${processed}${spillNote}${captureNote}${exitNote}`,
             },
           ],
           ...markError,
@@ -152,7 +157,7 @@ export const bashTool: Tool & {
           content: [
             {
               type: "text",
-              text: `${processed}${archiveNote}${captureNote}${exitNote}`,
+              text: `${processed}${archiveNote}${spillNote}${captureNote}${exitNote}`,
             },
           ],
           ...markError,
@@ -173,7 +178,7 @@ export const bashTool: Tool & {
         content: [
           {
             type: "text",
-            text: `${processed}${archiveNote}${captureNote}${exitNote}`,
+            text: `${processed}${archiveNote}${spillNote}${captureNote}${exitNote}`,
           },
         ],
         ...markError,
