@@ -426,16 +426,21 @@ function installCodex() {
   }
 
   //    Write hooks.json with a SessionStart echo (only if ours missing).
+  //    Codex's hooks.json schema requires events nested under a "hooks" wrapper:
+  //    { "hooks": { "SessionStart": [...] } }. A root-level SessionStart is
+  //    rejected ("unknown field `SessionStart`, expected `description` or `hooks`").
   const hooksBody = JSON.stringify({
-    SessionStart: [{
-      matcher: 'startup|resume',
-      hooks: [{
-        type: 'command',
-        command: `echo '${CODEX_HOOK_MARKER}. Prefer cave__read/cave__bash/cave__grep/cave__find/cave__ls/cave__write/cave__edit/cave__apply_patch/cave__websearch over built-ins. Do not double-wrap rtk inside cave__bash.'`,
-        timeout: 5,
-        statusMessage: 'Loading cave-tools rules...',
+    hooks: {
+      SessionStart: [{
+        matcher: 'startup|resume',
+        hooks: [{
+          type: 'command',
+          command: `echo '${CODEX_HOOK_MARKER}. Prefer cave__read/cave__bash/cave__grep/cave__find/cave__ls/cave__write/cave__edit/cave__apply_patch/cave__websearch over built-ins. Do not double-wrap rtk inside cave__bash.'`,
+          timeout: 5,
+          statusMessage: 'Loading cave-tools rules...',
+        }],
       }],
-    }],
+    },
   }, null, 2) + '\n';
 
   if (fs.existsSync(hooksPath)) {
@@ -443,16 +448,18 @@ function installCodex() {
     if (existing.includes(CODEX_HOOK_MARKER)) {
       log(`unchanged: ${hooksPath} already has cave-tools SessionStart hook`);
     } else {
-      // Append our hook to the existing hooks.json. Merge SessionStart arrays.
-      // Best-effort parse; if it fails, back up + overwrite.
+      // Append our hook to the existing hooks.json. Merge into hooks.SessionStart
+      // (creating the hooks wrapper if the file lacks it). Best-effort parse;
+      // if it fails, back up + overwrite.
       try {
         const parsed = JSON.parse(existing);
-        if (!Array.isArray(parsed.SessionStart)) parsed.SessionStart = [];
-        const ours = JSON.parse(hooksBody).SessionStart[0];
-        const hasOurs = parsed.SessionStart.some((g) =>
+        if (!parsed.hooks || typeof parsed.hooks !== 'object' || Array.isArray(parsed.hooks)) parsed.hooks = {};
+        if (!Array.isArray(parsed.hooks.SessionStart)) parsed.hooks.SessionStart = [];
+        const ours = JSON.parse(hooksBody).hooks.SessionStart[0];
+        const hasOurs = parsed.hooks.SessionStart.some((g) =>
           Array.isArray(g.hooks) && g.hooks.some((h) =>
             typeof h.command === 'string' && h.command.includes(CODEX_HOOK_MARKER)));
-        if (!hasOurs) parsed.SessionStart.push(ours);
+        if (!hasOurs) parsed.hooks.SessionStart.push(ours);
         const merged = JSON.stringify(parsed, null, 2) + '\n';
         backupOnce(hooksPath);
         if (DRY_RUN) {

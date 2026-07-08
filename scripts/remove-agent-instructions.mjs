@@ -535,17 +535,25 @@ function removeCodex() {
     if (hooks.includes(CODEX_HOOK_MARKER)) {
       try {
         const parsed = JSON.parse(hooks);
-        if (Array.isArray(parsed.SessionStart)) {
-          parsed.SessionStart = parsed.SessionStart
+        // Codex nests events under a "hooks" wrapper: { hooks: { SessionStart: [...] } }.
+        // Strip our hook from parsed.hooks.SessionStart (the correct location).
+        // Also clean up any stray root-level SessionStart left by older buggy
+        // installs that wrote it at the root.
+        for (const root of [parsed.hooks, parsed]) {
+          if (!root || !Array.isArray(root.SessionStart)) continue;
+          root.SessionStart = root.SessionStart
             .map((g) => g && Array.isArray(g.hooks) ? {
               ...g,
               hooks: g.hooks.filter((h) => !(typeof h?.command === 'string' && h.command.includes(CODEX_HOOK_MARKER))),
             } : g)
             .filter((g) => !g || !Array.isArray(g.hooks) || g.hooks.length > 0);
-          if (parsed.SessionStart.length === 0) delete parsed.SessionStart;
+          if (root.SessionStart.length === 0) delete root.SessionStart;
         }
-        const remainingKeys = Object.keys(parsed).filter((k) => k !== 'SessionStart');
-        if (parsed.SessionStart === undefined && remainingKeys.length === 0) {
+        // If the root-level SessionStart (the buggy one) is now empty/absent and
+        // hooks is empty too, the file is vestigial — delete it.
+        const hooksEmpty = !parsed.hooks || Object.keys(parsed.hooks).length === 0;
+        const rootKeys = Object.keys(parsed).filter((k) => k !== 'hooks');
+        if (hooksEmpty && rootKeys.length === 0) {
           // Only our hook was there — delete the file.
           if (DRY_RUN) {
             trackPath(hooksPath, 'remove');
