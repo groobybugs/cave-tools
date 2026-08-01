@@ -689,6 +689,148 @@ async function test() {
   console.log("cave__edit fuzzy replacer tests passed");
   console.log();
 
+  console.log("6f. Testing cave__edit line-range mode:");
+  const rangeDir = mkdtempSync(join(tmpdir(), "cave-edit-range-"));
+  try {
+    const { applyRangeEdit } = await import("./dist/tools/edit.js");
+    const { getFileHash } = await import("./dist/compression/utils.js");
+
+    // Pure helper
+    const h1 = applyRangeEdit("a\nb\nc\n", 2, 2, "B");
+    assert.equal(h1.ok, true);
+    assert.equal(h1.content, "a\nB\nc\n");
+
+    const hIns = applyRangeEdit("a\nb\n", 2, 1, "x");
+    assert.equal(hIns.ok, true);
+    assert.equal(hIns.content, "a\nx\nb\n");
+
+    const hDel = applyRangeEdit("a\nb\nc\n", 2, 3, "");
+    assert.equal(hDel.ok, true);
+    assert.equal(hDel.content, "a\n");
+
+    const hBad = applyRangeEdit("a\nb\n", 5, 5, "z");
+    assert.equal(hBad.ok, false);
+
+    // CRLF
+    const hCrlf = applyRangeEdit("a\r\nb\r\nc\r\n", 2, 2, "B");
+    assert.equal(hCrlf.ok, true);
+    assert.equal(hCrlf.content, "a\r\nB\r\nc\r\n");
+
+    // Handler: middle replace
+    const midFile = join(rangeDir, "mid.txt");
+    writeFileSync(midFile, "one\ntwo\nthree\nfour\n", "utf-8");
+    const mid = await editTool.handler({
+      file_path: midFile,
+      start_line: 2,
+      end_line: 3,
+      content: "TWO\nTHREE",
+    });
+    assert.equal(mid.isError, undefined, mid.content[0].text);
+    assert.equal(readFileSync(midFile, "utf-8"), "one\nTWO\nTHREE\nfour\n");
+
+    // Insert before line 2
+    const insFile = join(rangeDir, "ins.txt");
+    writeFileSync(insFile, "a\nb\n", "utf-8");
+    const ins = await editTool.handler({
+      file_path: insFile,
+      start_line: 2,
+      end_line: 1,
+      content: "x",
+    });
+    assert.equal(ins.isError, undefined, ins.content[0].text);
+    assert.equal(readFileSync(insFile, "utf-8"), "a\nx\nb\n");
+
+    // Insert before trailing empty line of "a\nb\n" → lines [a,b,""]
+    const appFile = join(rangeDir, "app.txt");
+    writeFileSync(appFile, "a\nb\n", "utf-8");
+    const app = await editTool.handler({
+      file_path: appFile,
+      start_line: 3,
+      end_line: 2,
+      content: "c",
+    });
+    assert.equal(app.isError, undefined, app.content[0].text);
+    assert.equal(readFileSync(appFile, "utf-8"), "a\nb\nc\n");
+
+    // Bounds fail
+    const bound = await editTool.handler({
+      file_path: midFile,
+      start_line: 99,
+      end_line: 99,
+      content: "x",
+    });
+    assert.equal(bound.isError, true);
+    assert.match(bound.content[0].text, /out of range/);
+
+    // Mutual exclusion
+    const both = await editTool.handler({
+      file_path: midFile,
+      old_string: "one",
+      new_string: "ONE",
+      start_line: 1,
+      end_line: 1,
+      content: "ONE",
+    });
+    assert.equal(both.isError, true);
+    assert.match(both.content[0].text, /either/);
+
+    // expected_hash mismatch
+    const hashFile = join(rangeDir, "hash.txt");
+    writeFileSync(hashFile, "hello\n", "utf-8");
+    const badHash = await editTool.handler({
+      file_path: hashFile,
+      start_line: 1,
+      end_line: 1,
+      content: "bye",
+      expected_hash: "deadbeefdeadbeef",
+    });
+    assert.equal(badHash.isError, true);
+    assert.match(badHash.content[0].text, /expected_hash mismatch/);
+
+    // expected_hash match (prefix)
+    const realHash = await getFileHash(hashFile);
+    assert.ok(realHash);
+    const goodHash = await editTool.handler({
+      file_path: hashFile,
+      start_line: 1,
+      end_line: 1,
+      content: "bye",
+      expected_hash: realHash.slice(0, 12),
+    });
+    assert.equal(goodHash.isError, undefined, goodHash.content[0].text);
+    assert.equal(readFileSync(hashFile, "utf-8"), "bye\n");
+
+    // Batch ranges high→low
+    const batchFile = join(rangeDir, "batch.txt");
+    writeFileSync(batchFile, "1\n2\n3\n4\n5\n", "utf-8");
+    const batch = await editTool.handler({
+      file_path: batchFile,
+      edits: [
+        { start_line: 1, end_line: 1, content: "A" },
+        { start_line: 4, end_line: 5, content: "D\nE" },
+      ],
+    });
+    assert.equal(batch.isError, undefined, batch.content[0].text);
+    assert.equal(readFileSync(batchFile, "utf-8"), "A\n2\n3\nD\nE\n");
+
+    // Read footer with line_numbers
+    const metaFile = join(rangeDir, "meta.txt");
+    writeFileSync(metaFile, "alpha\nbeta\n", "utf-8");
+    const metaRead = await readTool.handler({
+      file_path: metaFile,
+      line_numbers: true,
+      force: true,
+    });
+    assert.equal(metaRead.isError, undefined);
+    assert.match(metaRead.content[0].text, /00001\| alpha/);
+    assert.match(metaRead.content[0].text, /--- cave_edit_meta ---/);
+    assert.match(metaRead.content[0].text, /file_hash: [0-9a-f]{16}/);
+  } finally {
+    rmSync(rangeDir, { recursive: true, force: true });
+  }
+  console.log("cave__edit line-range tests passed");
+  console.log();
+
   console.log("6c. Testing cave__read force parameter:");
   const readForceDir = mkdtempSync(join(tmpdir(), "cave-read-force-"));
   try {

@@ -9,6 +9,7 @@ import {
   recordRead,
   shouldForceFull,
   readStubFor,
+  getFileHash,
 } from "../compression/utils.js";
 
 import { formatSignatures } from "../compression/signatures.js";
@@ -234,7 +235,8 @@ export const readTool: Tool & {
       },
       line_numbers: {
         type: "boolean",
-        description: "Prefix each line with a zero-padded line number for precise edits. Disables codebook compression. Default false.",
+        description:
+          "Prefix each line with a zero-padded line number for precise edits and append a cave_edit_meta footer (file_hash) for cave__edit range mode. Disables codebook compression. Default false.",
         default: false,
       },
       force: {
@@ -482,6 +484,16 @@ export const readTool: Tool & {
       if (lineNumbers) {
         // Numbered lines defeat cross-file codebook matching; skip it.
         outText = sel.body;
+        // Footer for line-range cave__edit: model copies file_hash → expected_hash.
+        const hash = await getFileHash(filePath);
+        const totalLines = lines.length;
+        const first = Math.max(1, offset);
+        const last = sel.lastReadLine;
+        outText +=
+          `\n--- cave_edit_meta ---\n` +
+          `path: ${filePath}\n` +
+          `lines: ${first}-${last} of ${totalLines}\n` +
+          (hash ? `file_hash: ${hash.slice(0, 16)}\n` : "");
       } else {
         addCodebookFile(filePath, content);
         const { text: codebookText, legend } = compressWithCodebook(sel.body);

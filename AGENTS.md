@@ -8,7 +8,7 @@ same results for fewer tokens. Prefer these over built-ins.
 - `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).
 - `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
 - `cave__bash` instead of Bash for every command — optimized drop-in replacement (RTK + structured extraction + line budgets).
-- `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace-tolerant matching).
+- `cave__write` to create/overwrite a single file; `cave__edit` for str-replace **or** line-range (`start_line`/`end_line`/`content` after numbered read; optional `expected_hash`).
 - `cave__apply_patch` for multi-file add/update/delete/move patches.
 - `cave__websearch` to search the web (Exa/Parallel) for current information.
 - `cave__webfetch` to fetch a specific URL and return markdown/text/html (or an image block).

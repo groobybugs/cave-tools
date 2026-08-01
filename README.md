@@ -132,7 +132,7 @@ All tool names use the MCP names exported by the server.
 | `cave__grep`      | Search file contents with `rg --json`, match limits, context lines, long-line truncation. | Based on `grep`.                                                    |
 | `cave__find`      | Find files by glob with ripgrep-backed search, Node fallback, relative paths, result limit. | Based on `glob` / search.                                           |
 | `cave__ls`        | List directory entries, directories first, sorted, directories suffixed with `/`, paginated. | Based on directory read/list behavior.                              |
-| `cave__edit`      | String replacement in a file (fuzzy whitespace/indentation-tolerant matching). Auto-invalidates dedup cache. | Cave Tools-specific edit tool.                                      |
+| `cave__edit`      | Str-replace (fuzzy) **or** line-range (`start_line`/`end_line`/`content`, optional `expected_hash`). Range mode skips echoing old text. Auto-invalidates dedup cache. | Cave Tools-specific edit tool.                                      |
 | `cave__write`     | Write a single file (create/overwrite, or `truncate` to empty). Auto-invalidates dedup cache. | Cave Tools-specific write tool.                                     |
 | `cave__apply_patch` | Apply add/update/delete/move patches with verification before any disk write; preserves UTF-8 BOM and invalidates the read dedup cache for changed paths. Write-time failures after verification may leave partial state. | Based on `apply_patch`, with Cave cache integration. |
 | `cave__websearch` | Search current web via Exa/Parallel MCP backends, then redact/archive/budget-compress output. | Based on `websearch`, with Cave compression.                         |
@@ -152,7 +152,7 @@ Use this instruction block in agent rules:
 - Use `cave__read` instead of the built-in read tool for file reads. Optimized drop-in replacement (read dedup + line budgets).
 - Use `cave__grep`, `cave__find`, and `cave__ls` instead of shell commands for file exploration when available. Optimized drop-in replacements that respect ignore rules and trim output to a line budget.
 - Use `cave__bash` instead of the built-in shell tool for commands. Optimized drop-in replacement: tries RTK command rewriting when `rtk` is available, then structured JSON/XML extraction and output budgets.
-- Use `cave__edit` / `cave__write` for single-file changes and `cave__apply_patch` for multi-file add/update/delete/move patches.
+- Use `cave__edit` / `cave__write` for single-file changes and `cave__apply_patch` for multi-file add/update/delete/move patches. For medium+ hunks prefer line-range: `cave__read` with `line_numbers=true`, then `cave__edit` with `start_line`/`end_line`/`content` (+ `expected_hash` from the footer).
 - Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived if large, and budget-compressed.
 - Use `cave__webfetch` to fetch a specific URL and return it as markdown/text/html (or a base64 image block); output is redacted, archived if large, and budget-compressed.
 - After using any edit/write tool outside Cave Tools, call `cave__invalidate` with the changed file path(s) to refresh the read dedup cache.

@@ -21,7 +21,8 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 - Use `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
 - Use `cave__bash` instead of Bash — optimized drop-in replacement. Tries `rtk rewrite <cmd>` when RTK available, then applies structured JSON/XML extraction + line budgets.
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
-- Use `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace/indentation-tolerant matching); `cave__apply_patch` for multi-file add/update/delete/move patches.
+- Use `cave__write` to create/overwrite a single file; `cave__edit` for str-replace **or** line-range edits; `cave__apply_patch` for multi-file add/update/delete/move patches.
+- **Line-range (token-cheap):** `cave__read` with `line_numbers=true`, then `cave__edit` with `start_line` + `end_line` + `content` (new body only). Pass `expected_hash` from the read footer when present. Insert before N: `end_line=start_line-1`. Tiny one-liners may still use `old_string`/`new_string`.
 - Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived if large, and budget-compressed.
 - Use `cave__webfetch` to fetch a specific URL and return markdown/text/html (or a base64 image block); output is redacted, archived if large, and budget-compressed.
 - After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next `cave__read` returns fresh content (not a stub).
