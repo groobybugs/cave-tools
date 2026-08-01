@@ -822,9 +822,110 @@ async function test() {
       force: true,
     });
     assert.equal(metaRead.isError, undefined);
-    assert.match(metaRead.content[0].text, /00001\| alpha/);
+    assert.match(metaRead.content[0].text, /00001:[0-9a-f]{2}\| alpha/);
     assert.match(metaRead.content[0].text, /--- cave_edit_meta ---/);
     assert.match(metaRead.content[0].text, /file_hash: [0-9a-f]{16}/);
+    assert.match(metaRead.content[0].text, /range_checksum: \d+-\d+:[0-9a-f]{8}/);
+
+    // v2: range checksum match/mismatch + move + delete flag + multi-file
+    const { rangeChecksum, applyMoveLines, lineTag } = await import("./dist/tools/line-range.js");
+    assert.equal(lineTag("alpha").length, 2);
+    const lines = ["a", "b", "c"];
+    const cs = rangeChecksum(lines, 1, 2);
+    assert.equal(cs.length, 8);
+
+    const csFile = join(rangeDir, "cs.txt");
+    writeFileSync(csFile, "a\nb\nc\n", "utf-8");
+    const csVal = rangeChecksum(["a", "b", "c", ""], 2, 2);
+    const csOk = await editTool.handler({
+      file_path: csFile,
+      start_line: 2,
+      end_line: 2,
+      content: "B",
+      expected_range_checksum: csVal,
+    });
+    assert.equal(csOk.isError, undefined, csOk.content[0].text);
+    assert.equal(readFileSync(csFile, "utf-8"), "a\nB\nc\n");
+
+    writeFileSync(csFile, "a\nb\nc\n", "utf-8");
+    const csBad = await editTool.handler({
+      file_path: csFile,
+      start_line: 2,
+      end_line: 2,
+      content: "B",
+      expected_range_checksum: "ffffffff",
+    });
+    assert.equal(csBad.isError, true);
+    assert.match(csBad.content[0].text, /expected_range_checksum mismatch/);
+    assert.match(csBad.content[0].text, /window:/);
+
+    // delete:true
+    const delFile = join(rangeDir, "del.txt");
+    writeFileSync(delFile, "1\n2\n3\n", "utf-8");
+    const del = await editTool.handler({
+      file_path: delFile,
+      start_line: 2,
+      end_line: 2,
+      delete: true,
+    });
+    assert.equal(del.isError, undefined, del.content[0].text);
+    assert.equal(readFileSync(delFile, "utf-8"), "1\n3\n");
+
+    // move
+    const mv = applyMoveLines("a\nb\nc\nd\n", 2, 3, 5);
+    assert.equal(mv.ok, true);
+    assert.equal(mv.content, "a\nd\nb\nc\n");
+    const mvFile = join(rangeDir, "mv.txt");
+    writeFileSync(mvFile, "a\nb\nc\nd\n", "utf-8");
+    const mvEdit = await editTool.handler({
+      file_path: mvFile,
+      start_line: 2,
+      end_line: 3,
+      insert_before: 5,
+    });
+    assert.equal(mvEdit.isError, undefined, mvEdit.content[0].text);
+    assert.equal(readFileSync(mvFile, "utf-8"), "a\nd\nb\nc\n");
+
+    // multi-file batch
+    const mf1 = join(rangeDir, "mf1.txt");
+    const mf2 = join(rangeDir, "mf2.txt");
+    writeFileSync(mf1, "x\n", "utf-8");
+    writeFileSync(mf2, "y\n", "utf-8");
+    const multi = await editTool.handler({
+      edits: [
+        { file_path: mf1, start_line: 1, end_line: 1, content: "X" },
+        { file_path: mf2, old_string: "y", new_string: "Y" },
+      ],
+    });
+    assert.equal(multi.isError, undefined, multi.content[0].text);
+    assert.equal(readFileSync(mf1, "utf-8"), "X\n");
+    assert.equal(readFileSync(mf2, "utf-8"), "Y\n");
+
+    // strict requires proof
+    const prevMode = process.env.CAVE_TOOLS_MODE;
+    process.env.CAVE_TOOLS_MODE = "strict";
+    try {
+      writeFileSync(csFile, "a\nb\n", "utf-8");
+      const strictFail = await editTool.handler({
+        file_path: csFile,
+        start_line: 1,
+        end_line: 1,
+        content: "A",
+      });
+      assert.equal(strictFail.isError, true);
+      assert.match(strictFail.content[0].text, /STRICT/);
+      const strictOk = await editTool.handler({
+        file_path: csFile,
+        start_line: 1,
+        end_line: 1,
+        content: "A",
+        expected_range_checksum: rangeChecksum(["a", "b", ""], 1, 1),
+      });
+      assert.equal(strictOk.isError, undefined, strictOk.content[0].text);
+    } finally {
+      if (prevMode === undefined) delete process.env.CAVE_TOOLS_MODE;
+      else process.env.CAVE_TOOLS_MODE = prevMode;
+    }
   } finally {
     rmSync(rangeDir, { recursive: true, force: true });
   }

@@ -1,9 +1,28 @@
 import { readFile } from "fs/promises";
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { getFileHash, invalidateFileCache, recordEdit } from "../compression/utils.js";
+import {
+  getFileHash,
+  invalidateFileCache,
+  recordEdit,
+  recordRangeEchoSaved,
+} from "../compression/utils.js";
 import { findReplacement } from "./replacers.js";
+import {
+  activeEditMode,
+  applyMoveLines,
+  applyRangeEdit,
+  verifyRangeChecksum,
+} from "./line-range.js";
 import { decodeUtf8PreserveBom, joinBom, writeIfUnchanged } from "../runtime/file-mutation.js";
+
+// Re-export for tests / external callers
+export {
+  applyRangeEdit,
+  applyMoveLines,
+  rangeChecksum,
+  lineTag,
+} from "./line-range.js";
 
 // Adapt new_string line endings to match the matched span's style so an edit
 // against a CRLF file doesn't inject lone LFs (and vice-versa).
@@ -13,81 +32,6 @@ function adaptLineEndings(search: string, newString: string): string {
   if (searchCRLF && !newCRLF) return newString.replace(/\n/g, "\r\n");
   if (!searchCRLF && newCRLF) return newString.replace(/\r\n/g, "\n");
   return newString;
-}
-
-function detectEol(content: string): "\r\n" | "\n" {
-  return content.includes("\r\n") ? "\r\n" : "\n";
-}
-
-/** Normalize to LF lines for indexing (same line-count model as cave__read). */
-function toLfLines(content: string): string[] {
-  return content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-}
-
-function fromLfLines(lines: string[], eol: "\r\n" | "\n"): string {
-  const body = lines.join("\n");
-  return eol === "\r\n" ? body.replace(/\n/g, "\r\n") : body;
-}
-
-/**
- * Replace inclusive 1-based lines [startLine, endLine] with replacement.
- * Insert before N: startLine=N, endLine=N-1.
- * Append after last: startLine=lineCount+1, endLine=lineCount.
- */
-export function applyRangeEdit(
-  content: string,
-  startLine: number,
-  endLine: number,
-  replacement: string,
-): { ok: true; content: string; lineCount: number } | { ok: false; error: string } {
-  if (!Number.isInteger(startLine) || !Number.isInteger(endLine)) {
-    return { ok: false, error: "start_line and end_line must be integers" };
-  }
-  if (startLine < 1) {
-    return { ok: false, error: `start_line must be >= 1 (got ${startLine})` };
-  }
-
-  const eol = detectEol(content);
-  const lines = toLfLines(content);
-  const lineCount = lines.length;
-  const isInsert = endLine === startLine - 1;
-
-  if (isInsert) {
-    if (startLine > lineCount + 1) {
-      return {
-        ok: false,
-        error: `insert start_line ${startLine} out of range (file has ${lineCount} lines; max insert is ${lineCount + 1})`,
-      };
-    }
-  } else {
-    if (endLine < startLine) {
-      return {
-        ok: false,
-        error: `end_line (${endLine}) must be >= start_line-1 (${startLine - 1}); use end_line=start_line-1 to insert`,
-      };
-    }
-    if (startLine > lineCount) {
-      return {
-        ok: false,
-        error: `start_line ${startLine} out of range (file has ${lineCount} lines)`,
-      };
-    }
-    if (endLine > lineCount) {
-      return {
-        ok: false,
-        error: `end_line ${endLine} out of range (file has ${lineCount} lines)`,
-      };
-    }
-  }
-
-  const adapted = replacement.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  // Empty string → delete range / empty insert. Trailing \n keeps final empty line.
-  const newLines = adapted.length === 0 ? [] : adapted.split("\n");
-
-  const before = lines.slice(0, startLine - 1);
-  const after = isInsert ? lines.slice(startLine - 1) : lines.slice(endLine);
-  const next = before.concat(newLines, after);
-  return { ok: true, content: fromLfLines(next, eol), lineCount };
 }
 
 function findClosestLineHint(content: string, oldStr: string): string {
@@ -134,6 +78,14 @@ interface RangeEdit {
   start_line: number;
   end_line: number;
   content: string;
+  expected_range_checksum?: string;
+}
+
+interface MoveEdit {
+  start_line: number;
+  end_line: number;
+  insert_before: number;
+  expected_range_checksum?: string;
 }
 
 interface MatchedEdit {
@@ -142,8 +94,22 @@ interface MatchedEdit {
   new_string: string;
 }
 
+function isMoveShape(edit: Record<string, unknown>): boolean {
+  return (
+    edit.insert_before !== undefined &&
+    edit.insert_before !== null &&
+    edit.start_line !== undefined &&
+    edit.start_line !== null
+  );
+}
+
 function isRangeShape(edit: Record<string, unknown>): boolean {
-  return edit.start_line !== undefined && edit.start_line !== null;
+  return (
+    edit.start_line !== undefined &&
+    edit.start_line !== null &&
+    !isMoveShape(edit) &&
+    (edit.content !== undefined || edit.delete === true)
+  );
 }
 
 function isStrShape(edit: Record<string, unknown>): boolean {
@@ -176,6 +142,37 @@ async function checkExpectedHash(
   );
 }
 
+function checkRangeChecksumOrError(
+  content: string,
+  startLine: number,
+  endLine: number,
+  expected: unknown,
+): ToolResult | null {
+  if (expected === undefined || expected === null || String(expected).trim() === "") {
+    return null;
+  }
+  const result = verifyRangeChecksum(content, startLine, endLine, String(expected));
+  if (result.ok) return null;
+  return err(
+    `${result.error}\n` +
+      `expected: ${String(expected).trim().toLowerCase().slice(0, 16)}\n` +
+      `actual:   ${result.actual}\n` +
+      (result.window ? `window:\n${result.window}` : ""),
+  );
+}
+
+function requireProofInStrict(
+  hasFileHash: boolean,
+  hasRangeChecksum: boolean,
+): ToolResult | null {
+  if (activeEditMode() !== "strict") return null;
+  if (hasFileHash || hasRangeChecksum) return null;
+  return err(
+    "STRICT: range/move edit requires expected_hash or expected_range_checksum " +
+      "(from cave__read line_numbers footer)",
+  );
+}
+
 async function writeEdited(
   filePath: string,
   sourceBytes: Uint8Array,
@@ -193,28 +190,54 @@ async function writeEdited(
   return null;
 }
 
+async function loadFile(
+  filePath: string,
+): Promise<{ content: string; sourceBytes: Buffer; bom: boolean } | ToolResult> {
+  try {
+    const sourceBytes = await readFile(filePath);
+    const decoded = decodeUtf8PreserveBom(sourceBytes);
+    return { content: decoded.text, sourceBytes, bom: decoded.bom };
+  } catch (error) {
+    return err(
+      error instanceof Error && error.message.includes("encoded data")
+        ? `File is not valid UTF-8: ${filePath}`
+        : `Cannot read file: ${filePath}`,
+    );
+  }
+}
+
+function isToolResult(v: unknown): v is ToolResult {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    "content" in v &&
+    Array.isArray((v as ToolResult).content)
+  );
+}
+
 export const editTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__edit",
   description:
-    "Edit a file by search/replace OR by line range. " +
-    "Str-replace: old_string → new_string (fuzzy match chain). " +
-    "Line-range (token-cheap): start_line + end_line + content (new body only; no old echo). " +
-    "Inclusive 1-based lines matching cave__read line_numbers. " +
-    "Insert before N: start_line=N, end_line=N-1. Append: start_line=lineCount+1, end_line=lineCount. " +
-    "Prefer line-range for medium+ hunks after cave__read(..., line_numbers=true); pass expected_hash from the read footer when available. " +
-    "Batch via edits[] (mixed str/range). Range edits applied high→low. Adapts CRLF/LF and invalidates read cache.",
+    "Edit a file by search/replace, line-range, or move. " +
+    "Str-replace: old_string → new_string (fuzzy). " +
+    "Line-range (token-cheap): start_line + end_line + content (new body only). " +
+    "delete: true with start/end deletes lines. insert_before with start/end moves block. " +
+    "Inclusive 1-based lines; tags/checksums from cave__read line_numbers=true. " +
+    "expected_hash (file) and expected_range_checksum (span) reject stale edits. " +
+    "STRICT mode (CAVE_TOOLS_MODE=strict) requires one of those proofs for range/move. " +
+    "Batch via edits[] (mixed; optional per-item file_path for multi-file). Ranges high→low.",
   inputSchema: {
     type: "object",
     properties: {
       file_path: {
         type: "string",
-        description: "Absolute path to the file to modify",
+        description: "Absolute path to the file to modify (default for batch items without file_path)",
       },
       old_string: {
         type: "string",
-        description: "Text to replace (fuzzy). Mutually exclusive with start_line.",
+        description: "Text to replace (fuzzy). Mutually exclusive with range/move.",
       },
       new_string: {
         type: "string",
@@ -226,74 +249,125 @@ export const editTool: Tool & {
       },
       start_line: {
         type: "number",
-        description: "1-based inclusive start line for range mode (mutually exclusive with old_string)",
+        description: "1-based inclusive start line for range/move/delete",
       },
       end_line: {
         type: "number",
-        description: "1-based inclusive end line. Use start_line-1 to insert before start_line.",
+        description: "1-based inclusive end line. Use start_line-1 with content to insert before start_line.",
       },
       content: {
         type: "string",
         description: "Replacement body for range mode (multi-line OK; empty deletes). No line-number prefixes.",
       },
+      delete: {
+        type: "boolean",
+        description: "If true, delete lines [start_line, end_line] (same as content:\"\")",
+      },
+      insert_before: {
+        type: "number",
+        description: "Move lines [start_line, end_line] to insert before this 1-based line (lineCount+1 = end)",
+      },
       expected_hash: {
         type: "string",
-        description: "Optional file sha256 (full or ≥8-char prefix from cave__read footer). Rejects if file changed.",
+        description: "Optional file sha256 (full or ≥8-char prefix from cave__read footer)",
+      },
+      expected_range_checksum: {
+        type: "string",
+        description: "Optional span checksum from cave__read footer (range_checksum). Verifies only the edited lines.",
       },
       edits: {
         type: "array",
         items: {
           type: "object",
           properties: {
+            file_path: { type: "string" },
             old_string: { type: "string" },
             new_string: { type: "string" },
             replace_all: { type: "boolean" },
             start_line: { type: "number" },
             end_line: { type: "number" },
             content: { type: "string" },
+            delete: { type: "boolean" },
+            insert_before: { type: "number" },
             expected_hash: { type: "string" },
+            expected_range_checksum: { type: "string" },
           },
         },
-        description: "Multiple edits (str-replace and/or range). Ranges applied high→low, then str-replace.",
+        description: "Multiple edits (str/range/move). Optional file_path per item for multi-file batch.",
       },
     },
-    required: ["file_path"],
+    required: [],
   },
   handler: async (args) => {
-    const filePath = String(args.file_path);
-
-    let sourceBytes: Buffer;
-    let content: string;
-    let bom = false;
-    try {
-      sourceBytes = await readFile(filePath);
-      const decoded = decodeUtf8PreserveBom(sourceBytes);
-      content = decoded.text;
-      bom = decoded.bom;
-    } catch (error) {
-      return err(
-        error instanceof Error && error.message.includes("encoded data")
-          ? `File is not valid UTF-8: ${filePath}`
-          : `Cannot read file: ${filePath}`,
-      );
-    }
-
     if (Array.isArray(args.edits)) {
-      return handleBatchEdits(filePath, content, sourceBytes, bom, args.edits as Record<string, unknown>[]);
+      return handleBatchEdits(args);
     }
 
-    const hasRange = args.start_line !== undefined && args.start_line !== null;
-    const hasStr =
-      args.old_string !== undefined &&
-      args.old_string !== null &&
-      String(args.old_string).length > 0;
+    const filePath = args.file_path !== undefined ? String(args.file_path) : "";
+    if (!filePath) return err("file_path is required");
 
-    if (hasRange && hasStr) {
-      return err("pass either old_string/new_string or start_line/end_line/content, not both");
+    const loaded = await loadFile(filePath);
+    if (isToolResult(loaded)) return loaded;
+    const { content, sourceBytes, bom } = loaded;
+
+    const hasMove = isMoveShape(args);
+    const hasRange =
+      args.start_line !== undefined &&
+      args.start_line !== null &&
+      !hasMove &&
+      (args.content !== undefined || args.delete === true);
+    const hasStrKey = args.old_string !== undefined && args.old_string !== null;
+    const hasStr = hasStrKey && String(args.old_string).length > 0;
+
+    if (hasStrKey && !hasStr && !hasRange && !hasMove) {
+      return err("old_string cannot be empty (or use start_line/end_line/content for range mode)");
+    }
+
+    const modes = [hasMove, hasRange, hasStr].filter(Boolean).length;
+    if (modes > 1) {
+      return err("pass either old_string/new_string or start_line/end_line/content (or delete/insert_before), not both");
+    }
+    if (modes === 0) {
+      return err("need old_string/new_string, or start_line/end_line with content|delete|insert_before");
     }
 
     const hashErr = await checkExpectedHash(filePath, args.expected_hash);
     if (hashErr) return hashErr;
+
+    if (hasMove || hasRange) {
+      const proofErr = requireProofInStrict(
+        args.expected_hash !== undefined && String(args.expected_hash).trim() !== "",
+        args.expected_range_checksum !== undefined &&
+          String(args.expected_range_checksum).trim() !== "",
+      );
+      if (proofErr) return proofErr;
+    }
+
+    if (hasMove) {
+      const startLine = Number(args.start_line);
+      const endLine = Number(args.end_line);
+      const insertBefore = Number(args.insert_before);
+      if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || !Number.isInteger(insertBefore)) {
+        return err("start_line, end_line, and insert_before must be integers");
+      }
+      const csErr = checkRangeChecksumOrError(
+        content,
+        startLine,
+        endLine,
+        args.expected_range_checksum,
+      );
+      if (csErr) return csErr;
+
+      const result = applyMoveLines(content, startLine, endLine, insertBefore);
+      if (!result.ok) return err(result.error);
+      recordRangeEchoSaved(result.movedChars);
+
+      const writeErr = await writeEdited(filePath, sourceBytes, bom, result.content);
+      if (writeErr) return writeErr;
+      return ok(
+        `Edited ${filePath} (move lines ${startLine}-${endLine} → before ${insertBefore})`,
+      );
+    }
 
     if (hasRange) {
       const startLine = Number(args.start_line);
@@ -301,21 +375,36 @@ export const editTool: Tool & {
       if (!Number.isInteger(startLine) || !Number.isInteger(endLine)) {
         return err("start_line and end_line must be integers for range mode");
       }
-      if (args.content === undefined || args.content === null) {
-        return err("content is required for range mode (use empty string to delete lines)");
+      const replacement = args.delete === true ? "" : String(args.content ?? "");
+      if (args.delete !== true && (args.content === undefined || args.content === null)) {
+        return err("content is required for range mode (or set delete:true)");
       }
-      const result = applyRangeEdit(content, startLine, endLine, String(args.content));
+
+      const csErr = checkRangeChecksumOrError(
+        content,
+        startLine,
+        endLine,
+        args.expected_range_checksum,
+      );
+      if (csErr) return csErr;
+
+      const result = applyRangeEdit(content, startLine, endLine, replacement);
       if (!result.ok) return err(result.error);
+      recordRangeEchoSaved(result.replacedChars);
 
       const writeErr = await writeEdited(filePath, sourceBytes, bom, result.content);
       if (writeErr) return writeErr;
 
-      const replacement = String(args.content);
       const kind =
-        endLine === startLine - 1 ? "insert" : replacement.length === 0 ? "delete" : "range";
+        endLine === startLine - 1
+          ? "insert"
+          : replacement.length === 0
+            ? "delete"
+            : "range";
       return ok(`Edited ${filePath} (${kind} lines ${startLine}-${endLine})`);
     }
 
+    // Str-replace
     const oldString = String(args.old_string ?? "");
     const newString = String(args.new_string ?? "");
     const replaceAll = args.replace_all === true;
@@ -324,7 +413,7 @@ export const editTool: Tool & {
       return err("old_string and new_string are identical");
     }
     if (oldString.length === 0) {
-      return err("old_string cannot be empty (or use start_line/end_line/content for range mode)");
+      return err("old_string cannot be empty");
     }
 
     const match = findReplacement(content, oldString, replaceAll);
@@ -363,54 +452,86 @@ export const editTool: Tool & {
   },
 };
 
-async function handleBatchEdits(
+async function applyEditsToContent(
   filePath: string,
   content: string,
-  sourceBytes: Uint8Array,
-  bom: boolean,
   edits: Record<string, unknown>[],
-): Promise<ToolResult> {
-  if (edits.length === 0) {
-    return err("edits array is empty");
-  }
-
-  for (let i = 0; i < edits.length; i++) {
-    const hashErr = await checkExpectedHash(filePath, edits[i].expected_hash);
-    if (hashErr) {
-      const msg = hashErr.content[0];
-      const text = msg.type === "text" ? msg.text.replace(/^Error: /, "") : "expected_hash check failed";
-      return err(`edits[${i}]: ${text}`);
-    }
-  }
-
-  const ranges: RangeEdit[] = [];
+): Promise<{ ok: true; content: string } | ToolResult> {
+  const ranges: (RangeEdit & { index: number })[] = [];
+  const moves: (MoveEdit & { index: number })[] = [];
   const strEdits: { index: number; edit: StrEdit }[] = [];
 
   for (let i = 0; i < edits.length; i++) {
     const raw = edits[i];
-    const range = isRangeShape(raw);
+    const move = isMoveShape(raw);
+    const range = isRangeShape(raw) || (raw.delete === true && raw.start_line !== undefined);
     const str = isStrShape(raw);
 
-    if (range && str) {
-      return err(`edits[${i}]: pass either old_string/new_string or start_line/end_line/content, not both`);
+    const kinds = [move, range && !move, str].filter(Boolean).length;
+    if (kinds > 1) {
+      return err(`edits[${i}]: pass only one of str-replace, range/delete, or move`);
     }
-    if (!range && !str) {
-      return err(`edits[${i}]: need old_string/new_string or start_line/end_line/content`);
+    if (kinds === 0) {
+      return err(
+        `edits[${i}]: need old_string/new_string, start_line+content|delete, or start_line+insert_before`,
+      );
     }
 
-    if (range) {
+    if (move) {
+      const startLine = Number(raw.start_line);
+      const endLine = Number(raw.end_line);
+      const insertBefore = Number(raw.insert_before);
+      if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || !Number.isInteger(insertBefore)) {
+        return err(`edits[${i}]: start_line, end_line, insert_before must be integers`);
+      }
+      const proofErr = requireProofInStrict(
+        raw.expected_hash !== undefined && String(raw.expected_hash).trim() !== "",
+        raw.expected_range_checksum !== undefined &&
+          String(raw.expected_range_checksum).trim() !== "",
+      );
+      if (proofErr) return err(`edits[${i}]: ${proofErr.content[0].type === "text" ? proofErr.content[0].text.replace(/^Error: /, "") : "strict proof required"}`);
+      moves.push({
+        index: i,
+        start_line: startLine,
+        end_line: endLine,
+        insert_before: insertBefore,
+        expected_range_checksum:
+          raw.expected_range_checksum !== undefined
+            ? String(raw.expected_range_checksum)
+            : undefined,
+      });
+      continue;
+    }
+
+    if (range || raw.delete === true) {
       const startLine = Number(raw.start_line);
       const endLine = Number(raw.end_line);
       if (!Number.isInteger(startLine) || !Number.isInteger(endLine)) {
         return err(`edits[${i}]: start_line and end_line must be integers`);
       }
-      if (raw.content === undefined || raw.content === null) {
-        return err(`edits[${i}]: content is required for range mode`);
+      if (raw.delete !== true && raw.content === undefined) {
+        return err(`edits[${i}]: content is required (or delete:true)`);
+      }
+      const proofErr = requireProofInStrict(
+        raw.expected_hash !== undefined && String(raw.expected_hash).trim() !== "",
+        raw.expected_range_checksum !== undefined &&
+          String(raw.expected_range_checksum).trim() !== "",
+      );
+      if (proofErr) {
+        const msg = proofErr.content[0];
+        return err(
+          `edits[${i}]: ${msg.type === "text" ? msg.text.replace(/^Error: /, "") : "strict proof required"}`,
+        );
       }
       ranges.push({
+        index: i,
         start_line: startLine,
         end_line: endLine,
-        content: String(raw.content),
+        content: raw.delete === true ? "" : String(raw.content),
+        expected_range_checksum:
+          raw.expected_range_checksum !== undefined
+            ? String(raw.expected_range_checksum)
+            : undefined,
       });
       continue;
     }
@@ -422,10 +543,10 @@ async function handleBatchEdits(
     strEdits.push({ index: i, edit });
   }
 
-  // Non-insert range intervals must not overlap (on original line numbers).
+  // Overlap check for non-insert ranges on original lines
   const intervals = ranges
     .filter((r) => r.end_line >= r.start_line)
-    .map((r) => ({ s: r.start_line, e: r.end_line }))
+    .map((r) => ({ s: r.start_line, e: r.end_line, i: r.index }))
     .sort((a, b) => a.s - b.s);
   for (let i = 1; i < intervals.length; i++) {
     if (intervals[i].s <= intervals[i - 1].e) {
@@ -435,16 +556,54 @@ async function handleBatchEdits(
 
   let updated = content;
 
-  // Apply ranges high→low so lower line numbers stay valid.
-  const rangesHighFirst = [...ranges].sort((a, b) => b.start_line - a.start_line);
-  for (const r of rangesHighFirst) {
-    const result = applyRangeEdit(updated, r.start_line, r.end_line, r.content);
-    if (!result.ok) return err(result.error);
+  // Moves first (on original coordinates), high start_line first
+  const movesSorted = [...moves].sort((a, b) => b.start_line - a.start_line);
+  for (const m of movesSorted) {
+    const csErr = checkRangeChecksumOrError(
+      updated,
+      m.start_line,
+      m.end_line,
+      m.expected_range_checksum,
+    );
+    if (csErr) {
+      const msg = csErr.content[0];
+      return err(
+        `edits[${m.index}]: ${msg.type === "text" ? msg.text.replace(/^Error: /, "") : "checksum failed"}`,
+      );
+    }
+    const result = applyMoveLines(updated, m.start_line, m.end_line, m.insert_before);
+    if (!result.ok) return err(`edits[${m.index}]: ${result.error}`);
+    recordRangeEchoSaved(result.movedChars);
     updated = result.content;
   }
 
-  if (strEdits.length > 0 && ranges.length === 0) {
-    // Pure str-replace batch — original reverse-position path (stable indices).
+  // If we applied moves, range line numbers on original may be stale when mixed.
+  // Require: no mix of move+range in same file batch (simpler, safe).
+  if (moves.length > 0 && ranges.length > 0) {
+    return err("cannot mix move and range edits in one batch for the same file; split calls");
+  }
+
+  const rangesHighFirst = [...ranges].sort((a, b) => b.start_line - a.start_line);
+  for (const r of rangesHighFirst) {
+    const csErr = checkRangeChecksumOrError(
+      updated,
+      r.start_line,
+      r.end_line,
+      r.expected_range_checksum,
+    );
+    if (csErr) {
+      const msg = csErr.content[0];
+      return err(
+        `edits[${r.index}]: ${msg.type === "text" ? msg.text.replace(/^Error: /, "") : "checksum failed"}`,
+      );
+    }
+    const result = applyRangeEdit(updated, r.start_line, r.end_line, r.content);
+    if (!result.ok) return err(`edits[${r.index}]: ${result.error}`);
+    recordRangeEchoSaved(result.replacedChars);
+    updated = result.content;
+  }
+
+  if (strEdits.length > 0 && ranges.length === 0 && moves.length === 0) {
     const matched: MatchedEdit[] = [];
     for (const { index, edit } of strEdits) {
       const match = findReplacement(content, edit.old_string, edit.replace_all ?? false);
@@ -479,15 +638,14 @@ async function handleBatchEdits(
         updated.substring(m.matchIndex + m.matchLength);
     }
   } else if (strEdits.length > 0) {
-    // After ranges, resolve str edits against the updated buffer (order as given).
     for (const { index, edit } of strEdits) {
       const match = findReplacement(updated, edit.old_string, edit.replace_all ?? false);
       if (match.error || match.search === undefined) {
         if (match.nonUnique) {
-          return err(`edits[${index}]: old_string is not unique after prior range edits.`);
+          return err(`edits[${index}]: old_string is not unique after prior edits.`);
         }
         return err(
-          `edits[${index}]: ${match.error ?? "old_string not found after prior range edits."}`,
+          `edits[${index}]: ${match.error ?? "old_string not found after prior edits."}`,
         );
       }
       const replacement = adaptLineEndings(match.search, edit.new_string);
@@ -502,10 +660,75 @@ async function handleBatchEdits(
     }
   }
 
-  const writeErr = await writeEdited(filePath, sourceBytes, bom, updated);
-  if (writeErr) return writeErr;
+  void filePath; // used by callers for messaging
+  return { ok: true, content: updated };
+}
 
-  return ok(`Edited ${filePath} (${edits.length} edit${edits.length === 1 ? "" : "s"})`);
+async function handleBatchEdits(args: Record<string, unknown>): Promise<ToolResult> {
+  const edits = args.edits as Record<string, unknown>[];
+  if (!Array.isArray(edits) || edits.length === 0) {
+    return err("edits array is empty");
+  }
+
+  const defaultPath = args.file_path !== undefined ? String(args.file_path) : "";
+
+  // Group by file_path
+  const byFile = new Map<string, { index: number; edit: Record<string, unknown> }[]>();
+  for (let i = 0; i < edits.length; i++) {
+    const raw = edits[i];
+    const fp =
+      raw.file_path !== undefined && raw.file_path !== null && String(raw.file_path).length > 0
+        ? String(raw.file_path)
+        : defaultPath;
+    if (!fp) {
+      return err(`edits[${i}]: file_path required (set top-level file_path or per-item file_path)`);
+    }
+    const list = byFile.get(fp) || [];
+    list.push({ index: i, edit: raw });
+    byFile.set(fp, list);
+  }
+
+  // Top-level expected_hash applies when single file
+  if (byFile.size === 1 && args.expected_hash !== undefined) {
+    const only = [...byFile.keys()][0];
+    const hashErr = await checkExpectedHash(only, args.expected_hash);
+    if (hashErr) return hashErr;
+  }
+
+  const summaries: string[] = [];
+
+  for (const [filePath, items] of byFile) {
+    // Per-item file hash checks
+    for (const { index, edit } of items) {
+      if (edit.expected_hash !== undefined) {
+        const hashErr = await checkExpectedHash(filePath, edit.expected_hash);
+        if (hashErr) {
+          const msg = hashErr.content[0];
+          return err(
+            `edits[${index}]: ${msg.type === "text" ? msg.text.replace(/^Error: /, "") : "hash failed"}`,
+          );
+        }
+      }
+    }
+
+    const loaded = await loadFile(filePath);
+    if (isToolResult(loaded)) return loaded;
+    const { content, sourceBytes, bom } = loaded;
+
+    const fileEdits = items.map((x) => x.edit);
+    const result = await applyEditsToContent(filePath, content, fileEdits);
+    if (!("ok" in result) || result.ok !== true) {
+      return result as ToolResult;
+    }
+
+    const writeErr = await writeEdited(filePath, sourceBytes, bom, result.content);
+    if (writeErr) return writeErr;
+    summaries.push(`${filePath} (${items.length})`);
+  }
+
+  return ok(
+    `Edited ${summaries.length} file${summaries.length === 1 ? "" : "s"}: ${summaries.join(", ")}`,
+  );
 }
 
 function ok(text: string): ToolResult {

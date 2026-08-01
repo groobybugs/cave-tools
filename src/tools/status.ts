@@ -6,6 +6,7 @@ import {
   getSavingsStats,
   getRtkStats,
   getBounceStats,
+  getRangeEditStats,
   reductionPercent,
   efficiencyMeter,
   isRtkAvailable,
@@ -28,6 +29,7 @@ export const statusTool: Tool & {
     const savings = getSavingsStats();
     const rtk = getRtkStats();
     const bounces = getBounceStats();
+    const rangeEdits = getRangeEditStats();
     const archives = await getArchiveStats();
     const budgets = getAllBudgets();
     const rtkAvailable = await isRtkAvailable();
@@ -68,6 +70,11 @@ export const statusTool: Tool & {
       "Dedup (avoided re-reads):",
       `  Cache hits:    ${stats.hits}`,
       `  Chars avoided: ${savings.dedupSavedChars} (budget-capped)`,
+      "",
+      "Range/move edits (no old_string echo):",
+      `  Edits:              ${rangeEdits.edits}`,
+      `  Echo chars saved:   ${rangeEdits.echoSavedChars}`,
+      `  Est. tokens saved:  ${rangeEdits.estimatedTokensSaved}`,
       "",
       "Bounces (trimmed read → full re-read):",
       `  Total bounces:      ${bounces.totalBounces}`,

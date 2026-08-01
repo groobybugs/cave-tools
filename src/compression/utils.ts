@@ -53,6 +53,9 @@ export function isSubagentContext(): boolean {
 let cacheHits = 0;
 let cacheMisses = 0;
 let dedupSavedChars = 0;
+/** Output chars avoided by line-range/move edits (no old_string echo). */
+let rangeEchoSavedChars = 0;
+let rangeEditCount = 0;
 let rtkRewrites = 0;
 let rtkAlreadyWrapped = 0;
 let rtkPassthrough = 0;
@@ -442,6 +445,25 @@ export function recordEdit(filePath: string): void {
   seqCounter++;
   recentlyEdited.set(filePath, seqCounter);
   void persistStats();
+}
+
+/** Count chars of old span not re-emitted by the model (range/move edits). */
+export function recordRangeEchoSaved(chars: number): void {
+  if (chars > 0) rangeEchoSavedChars += chars;
+  rangeEditCount++;
+  void persistStats();
+}
+
+export function getRangeEditStats(): {
+  edits: number;
+  echoSavedChars: number;
+  estimatedTokensSaved: number;
+} {
+  return {
+    edits: rangeEditCount,
+    echoSavedChars: rangeEchoSavedChars,
+    estimatedTokensSaved: estimateTokens(rangeEchoSavedChars),
+  };
 }
 
 export function shouldForceFull(filePath: string): boolean {

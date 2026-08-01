@@ -11,6 +11,7 @@ import {
   readStubFor,
   getFileHash,
 } from "../compression/utils.js";
+import { formatNumberedLine, rangeChecksum } from "./line-range.js";
 
 import { formatSignatures } from "../compression/signatures.js";
 import { aggressiveCompress } from "../compression/aggressive.js";
@@ -182,10 +183,7 @@ function selectLines(
   }
   const body = lineNumbers
     ? raw
-        .map(
-          (l, idx) =>
-            `${(start + idx + 1).toString().padStart(5, "0")}| ${l}`,
-        )
+        .map((l, idx) => formatNumberedLine(start + idx + 1, l, true))
         .join("\n")
     : raw.join("\n");
 
@@ -484,16 +482,20 @@ export const readTool: Tool & {
       if (lineNumbers) {
         // Numbered lines defeat cross-file codebook matching; skip it.
         outText = sel.body;
-        // Footer for line-range cave__edit: model copies file_hash → expected_hash.
+        // Footer for line-range cave__edit: file_hash + range_checksum + line tags above.
         const hash = await getFileHash(filePath);
         const totalLines = lines.length;
         const first = Math.max(1, offset);
         const last = sel.lastReadLine;
+        const windowCs =
+          last >= first ? rangeChecksum(lines, first, last) : "";
         outText +=
           `\n--- cave_edit_meta ---\n` +
           `path: ${filePath}\n` +
           `lines: ${first}-${last} of ${totalLines}\n` +
-          (hash ? `file_hash: ${hash.slice(0, 16)}\n` : "");
+          (hash ? `file_hash: ${hash.slice(0, 16)}\n` : "") +
+          (windowCs ? `range_checksum: ${first}-${last}:${windowCs}\n` : "") +
+          `// cave__edit: start_line/end_line/content + expected_hash and/or expected_range_checksum\n`;
       } else {
         addCodebookFile(filePath, content);
         const { text: codebookText, legend } = compressWithCodebook(sel.body);
