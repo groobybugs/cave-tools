@@ -8,7 +8,7 @@ import {
   applyBudget,
   recordRead,
   shouldForceFull,
-  READ_STUB,
+  readStubFor,
 } from "../compression/utils.js";
 
 import { formatSignatures } from "../compression/signatures.js";
@@ -252,6 +252,10 @@ export const readTool: Tool & {
     const mode = String(args.mode || "full");
     const lineNumbers = args.line_numbers === true;
     const force = args.force === true;
+    // Session id injected by index.ts from MCP _meta.sessionID (opencode patch).
+    // Falls back to "default" for clients that don't send _meta — preserving
+    // prior single-session dedup behavior.
+    const sessionId = String(args.__sessionId ?? "default");
 
     const ext = extname(filePath).toLowerCase();
     let fileStat;
@@ -289,10 +293,10 @@ export const readTool: Tool & {
 
     if (imageMime) {
       try {
-        if (!force && (await isFileUnchanged(filePath))) {
+        if (!force && (await isFileUnchanged(filePath, sessionId))) {
           return {
             content: [
-              { type: "text", text: "<image unchanged since last read>" },
+              { type: "text", text: readStubFor(filePath, sessionId) },
             ],
           };
         }
@@ -313,14 +317,14 @@ export const readTool: Tool & {
         // SVG: send as text (it's just XML), keeps the image route for raster only.
         if (ext === ".svg") {
           const svg = await readUtf8Strict(filePath);
-          await updateFileCache(filePath);
+          await updateFileCache(filePath, sessionId);
           return {
             content: [{ type: "text", text: svg }],
           };
         }
 
         const buf = await readFile(filePath);
-        await updateFileCache(filePath);
+        await updateFileCache(filePath, sessionId);
 
         return {
           content: [
@@ -346,10 +350,10 @@ export const readTool: Tool & {
 
     if (ext === ".pdf") {
       try {
-        if (!force && (await isFileUnchanged(filePath))) {
+        if (!force && (await isFileUnchanged(filePath, sessionId))) {
           return {
             content: [
-              { type: "text", text: "<pdf unchanged since last read>" },
+              { type: "text", text: readStubFor(filePath, sessionId) },
             ],
           };
         }
@@ -368,7 +372,7 @@ export const readTool: Tool & {
         }
 
         const buf = await readFile(filePath);
-        await updateFileCache(filePath);
+        await updateFileCache(filePath, sessionId);
         return {
           content: [
             {
@@ -411,7 +415,7 @@ export const readTool: Tool & {
           const sel = selectLines(lines, offset, limit, lineNumbers);
           if (!sel.body && offset !== 1) return { content: [{ type: "text", text: `Offset ${offset} is out of range` }], isError: true };
           const text = sel.body + truncationHint(sel);
-        await updateFileCache(filePath);
+        await updateFileCache(filePath, sessionId);
         recordRead(filePath, false, text.length);
         return {
           content: [{ type: "text", text }],
@@ -426,13 +430,14 @@ export const readTool: Tool & {
       }
     }
 
-    if (!force && (await isFileUnchanged(filePath))) {
-      recordRead(filePath, false, READ_STUB.length);
+    if (!force && (await isFileUnchanged(filePath, sessionId))) {
+      const stub = readStubFor(filePath, sessionId);
+      recordRead(filePath, false, stub.length);
       return {
         content: [
           {
             type: "text",
-            text: "<file unchanged since last read>",
+            text: stub,
           },
         ],
       };
@@ -442,7 +447,7 @@ export const readTool: Tool & {
       const content = await readUtf8Strict(filePath);
 
       if (mode === "aggressive") {
-        await updateFileCache(filePath);
+        await updateFileCache(filePath, sessionId);
         const compressedContent = aggressiveCompress(content, ext);
         const output =
           compressedContent.length < content.length ? compressedContent : content;
@@ -455,7 +460,7 @@ export const readTool: Tool & {
       }
 
       if (mode === "signatures") {
-        await updateFileCache(filePath);
+        await updateFileCache(filePath, sessionId);
         const sigs = formatSignatures(content, ext);
         const output = sigs || "(no signatures extracted for this file type)";
         const compressed = applyBudget(output, "read");
@@ -471,7 +476,7 @@ export const readTool: Tool & {
       if (!sel.body && offset !== 1) {
         return { content: [{ type: "text", text: `Offset ${offset} is out of range` }], isError: true };
       }
-      await updateFileCache(filePath);
+      await updateFileCache(filePath, sessionId);
 
       let outText: string;
       if (lineNumbers) {

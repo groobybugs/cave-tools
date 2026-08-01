@@ -12,6 +12,7 @@
     "dist/",
     "claude/",
     "rules/",
+    "src/plugins/",
     "scripts/*.mjs",
     "install.sh",
     "install.ps1",

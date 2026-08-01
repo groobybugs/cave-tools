@@ -67,10 +67,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   switch (name) {
-    case "cave__read":
-      return readTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
+    case "cave__read": {
+      // Read the caller's session id from MCP _meta (sent by opencode after the
+      // mcp/catalog.ts patch). Used to key the dedup cache per-session so
+      // subagents (which share this MCP process) get fresh content. Falls back
+      // to "default" for clients that don't send _meta.
+      const meta = (request.params as { _meta?: { sessionID?: unknown } })
+        ?._meta;
+      const sessionId = String(meta?.sessionID ?? "default");
+      return readTool.handler({
+        ...(args as Record<string, unknown>),
+        __sessionId: sessionId,
+      }) as Promise<CallToolResult>;
+    }
     case "cave__bash":
       return bashTool.handler(
         args as Record<string, unknown>,

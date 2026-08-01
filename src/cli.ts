@@ -7,7 +7,6 @@ import {
   getLifetimeStats,
   listSessionStats,
   reductionPercent,
-  efficiencyMeter,
   isRtkAvailable,
 } from "./compression/utils.js";
 import {
@@ -20,6 +19,11 @@ import {
 } from "fs";
 import { homedir } from "os";
 import { join, basename } from "path";
+import {
+  fetchRtkGainSummary,
+  renderStatusCli,
+  type ToolBreakdown,
+} from "./status-ui.js";
 
 interface SessionStats {
   pid: number;
@@ -90,6 +94,7 @@ interface StatusSummary {
   lastUpdate: number;
   hasData: boolean;
   budgets: ReturnType<typeof getAllBudgets>;
+  byTool: ToolBreakdown[];
 }
 
 async function buildStatusSummary(): Promise<StatusSummary> {
@@ -150,6 +155,24 @@ async function buildStatusSummary(): Promise<StatusSummary> {
   if (lifetime.updatedAt > 0) updateTimes.push(lifetime.updatedAt);
   const lastUpdate = updateTimes.length > 0 ? Math.max(...updateTimes) : 0;
 
+  // Aggregate by-tool from all sessions (live + ended) for the breakdown table.
+  const byToolMap = new Map<string, ToolBreakdown>();
+  for (const s of listSessionStats(true)) {
+    const tools = s.savings?.byTool ?? {};
+    for (const [name, t] of Object.entries(tools)) {
+      const cur = byToolMap.get(name) ?? {
+        name,
+        calls: 0,
+        rawChars: 0,
+        savedChars: 0,
+      };
+      cur.calls += t.calls ?? 0;
+      cur.rawChars += t.rawChars ?? 0;
+      cur.savedChars += t.savedChars ?? 0;
+      byToolMap.set(name, cur);
+    }
+  }
+
   return {
     rtkAvailable,
     reductionPct: compressionPct,
@@ -173,6 +196,7 @@ async function buildStatusSummary(): Promise<StatusSummary> {
     lastUpdate,
     hasData: visibleSessions.length > 0 || lifetime.bankedSessions > 0,
     budgets,
+    byTool: [...byToolMap.values()],
   };
 }
 
@@ -281,60 +305,39 @@ if (args[0] === "mcp" || args.length === 0) {
     process.exit(0);
   }
 
-  const lines = [
-    "=== Cave Tools Status ===",
-    "",
-    `RTK Available: ${summary.rtkAvailable ? "Yes" : "No"}`,
-    "",
-  ];
+  const rtkSkipped = process.env.CAVE_TOOLS_STATUS_RTK === "0";
+  const rtkGain = rtkSkipped ? null : await fetchRtkGainSummary();
+  const verbose = args.includes("--verbose") || args.includes("-v");
 
-  if (summary.hasData) {
-    const age = summary.lastUpdate > 0
-      ? Math.round((Date.now() - summary.lastUpdate) / 1000)
-      : 0;
-    const ageStr = age < 60 ? `${age}s ago` : `${Math.round(age / 60)}m ago`;
-    lines.push(
-      "Global Session Stats (cumulative):",
-      `  Sessions:      ${summary.visibleSessions + summary.endedSessions} (${summary.liveSessions} live, ${summary.endedSessions} ended)`,
-      `  Files tracked: ${summary.filesTracked}`,
-      `  Cache hits:    ${summary.cacheHits}`,
-      `  Cache misses:  ${summary.cacheMisses}`,
-      `  Hit rate:      ${summary.hitRatePct.toFixed(1)}%`,
-      `  Last update:   ${ageStr}`,
-      "",
-      "RTK Rewrites:",
-      `  Rewritten:       ${summary.rtkRewrites}`,
-      `  Already wrapped: ${summary.rtkAlreadyWrapped}`,
-      `  Passthrough:     ${summary.rtkPassthrough}`,
-      "",
-      "Output trimming:",
-      `  Calls:            ${summary.totalCalls}`,
-      `  Raw chars:        ${summary.rawChars}`,
-      `  Trimmed chars:    ${summary.compressedChars}`,
-      `  Saved chars:      ${summary.compressionSavedChars}`,
-      `  Reduction:        ${summary.reductionPct.toFixed(1)}%`,
-      `  Meter: ${efficiencyMeter(summary.reductionPct)} ${summary.reductionPct.toFixed(1)}%`,
-      "",
-      "Dedup (avoided re-reads):",
-      `  Cache hits:    ${summary.cacheHits}`,
-      `  Chars avoided: ${summary.dedupSavedChars} (budget-capped)`,
-      "",
-      `Total est. tokens saved: ${summary.tokensSaved}`,
-      "",
-    );
-  } else {
-    lines.push("Global Session Stats: (no session data yet - start MCP session first)", "");
-  }
-
-  lines.push(
-    "Budget Configuration:",
-    ...Object.entries(summary.budgets).map(
-      ([name, budget]) =>
-        `  ${name}: max=${budget.maxLines}, head=${budget.headLines}, tail=${budget.tailLines}`,
-    ),
+  console.log(
+    renderStatusCli({
+      rtkAvailable: summary.rtkAvailable,
+      reductionPct: summary.reductionPct,
+      hitRatePct: summary.hitRatePct,
+      cacheHits: summary.cacheHits,
+      cacheMisses: summary.cacheMisses,
+      filesTracked: summary.filesTracked,
+      rtkRewrites: summary.rtkRewrites,
+      rtkAlreadyWrapped: summary.rtkAlreadyWrapped,
+      rtkPassthrough: summary.rtkPassthrough,
+      totalCalls: summary.totalCalls,
+      rawChars: summary.rawChars,
+      compressedChars: summary.compressedChars,
+      compressionSavedChars: summary.compressionSavedChars,
+      dedupSavedChars: summary.dedupSavedChars,
+      savedChars: summary.savedChars,
+      tokensSaved: summary.tokensSaved,
+      liveSessions: summary.liveSessions,
+      endedSessions: summary.endedSessions,
+      lastUpdate: summary.lastUpdate,
+      hasData: summary.hasData,
+      budgets: summary.budgets,
+      byTool: summary.byTool,
+      rtkGain,
+      rtkGainSkipped: rtkSkipped,
+      verbose,
+    }),
   );
-
-  console.log(lines.join("\n"));
   process.exit(0);
   })();
 } else if (args[0] === "bench") {
@@ -349,6 +352,6 @@ if (args[0] === "mcp" || args.length === 0) {
   process.exit(0);
 } else {
   console.error(`Unknown command: ${args[0]}`);
-  console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline]]");
+  console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]]");
   process.exit(1);
 }

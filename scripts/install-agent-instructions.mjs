@@ -20,9 +20,9 @@ const VERBOSE = process.argv.includes('--verbose');
 const WITH_EXTRA_RULES = process.argv.includes('--with-extra-rules');
 const touchedPaths = new Map();
 
-// Long-form rules block. Still written to opencode AGENTS.md (no skill system
-// there), but on Claude side we now write the shorter pointer below since
-// SKILL.md is the source of truth.
+// Long-form rules block for agents without a skill/plugin reinforcement path.
+// Claude uses the shorter pointer below (SKILL.md + SessionStart are SoT).
+// OpenCode uses OPENCODE_CAVE_TOOLS_BLOCK (plugin + this AGENTS.md base).
 const CAVE_TOOLS_BLOCK = [
   MARKER_BEGIN,
   '# Cave Tools MCP',
@@ -42,6 +42,40 @@ const CAVE_TOOLS_BLOCK = [
   MARKER_END,
   '',
 ].join('\n');
+
+// OpenCode AGENTS.md block — always-on base. Dynamic mode + per-turn reinforce
+// + built-in blocking come from the native plugin (plugins/cave-tools/plugin.js).
+const OPENCODE_CAVE_TOOLS_BLOCK = [
+  MARKER_BEGIN,
+  '# Cave Tools MCP',
+  '',
+  'Native opencode plugin (`./plugins/cave-tools/plugin.js`) keeps cave-tools active every turn:',
+  '- `session.created` writes mode flag (`~/.config/opencode/.cave-tools-active`)',
+  '- `experimental.chat.system.transform` injects per-turn reinforcement (Claude UserPromptSubmit twin)',
+  '- `tool.execute.before` blocks built-in read/grep/glob/list in `enforce`/`strict` (points to `cave__*`)',
+  '- `experimental.session.compacting` keeps rules across compaction',
+  '- Switch: `/cave-tools off|hint|enforce|strict` or natural language ("use cave-tools" / "stop cave-tools")',
+  '',
+  'Prefer cave__* over built-ins (same results, fewer tokens):',
+  '',
+  '- Use `cave__read` instead of the built-in read tool for file reads. Optimized drop-in replacement (read dedup + line budgets).',
+  '- Use `cave__grep`, `cave__find`, and `cave__ls` instead of shell commands or built-in search tools when available.',
+  '- Use `cave__bash` instead of the built-in shell tool for commands. Optimized drop-in replacement: tries RTK rewriting when available, then structured JSON/XML extraction and line budgets.',
+  '- Do not double-wrap: never run `rtk <cmd>` inside `cave__bash`; pass the raw command.',
+  '- Use `cave__edit` / `cave__write` for single-file edits and `cave__apply_patch` for multi-file add/update/delete/move patches.',
+  '- Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived if large, and budget-compressed.',
+  '- Use `cave__webfetch` to fetch a specific URL and return markdown/text/html (or a base64 image block); output is redacted, archived if large, and budget-compressed.',
+  '- After editing a file outside Cave Tools, call `cave__invalidate` with changed path(s) to refresh the read dedup cache.',
+  '- Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.',
+  '- Use `cave__status` to inspect RTK availability, cache state, and savings.',
+  MARKER_END,
+  '',
+].join('\n');
+
+const OPENCODE_PLUGIN_REL = './plugins/cave-tools/plugin.js';
+const OPENCODE_PLUGIN_SRC = path.join(REPO_ROOT, 'src', 'plugins', 'opencode');
+const OPENCODE_CONFIG_SRC = path.join(REPO_ROOT, 'claude', 'hooks', 'cave-tools-config.js');
+const OPENCODE_SKILL_SRC = path.join(REPO_ROOT, 'claude', 'skills', 'cave-tools');
 
 // Short pointer block used in Claude installs where the /cave-tools skill +
 // SessionStart hook are the source of truth — avoids token-wasting duplication.
@@ -94,10 +128,30 @@ const ZCODE_CAVE_TOOLS_SKILL = [
 // caveman's src/rules/caveman-activate.md). The installer reads it at runtime
 // and wraps it with the marker fence. Edit the .md, not this constant.
 const DISCIPLINE_RULES_PATH = path.join(REPO_ROOT, 'rules', 'cave-discipline.md');
+// Kiro steering is file-per-concern with YAML frontmatter (inclusion: always).
+// Generic CAVE_TOOLS_BLOCK is Claude/opencode-shaped — wrong for Kiro tool names.
+const KIRO_CAVE_TOOLS_PATH = path.join(REPO_ROOT, 'rules', 'cave-tools-kiro.md');
+const KIRO_COMPRESSION_PATH = path.join(REPO_ROOT, 'rules', 'cave-tools-kiro-compression.md');
+const KIRO_EDIT_SAFETY_PATH = path.join(REPO_ROOT, 'rules', 'cave-tools-kiro-edit-safety.md');
+const KIRO_REDIRECT_HOOK_SRC = path.join(REPO_ROOT, 'scripts', 'kiro', 'cave-tools-redirect.sh');
 
 function readDisciplineBlock() {
   const body = fs.readFileSync(DISCIPLINE_RULES_PATH, 'utf8').trimEnd() + '\n';
   return `${DISCIPLINE_MARKER_BEGIN}\n${body}${DISCIPLINE_MARKER_END}\n`;
+}
+
+function readKiroSteeringFile(bodyPath, beginMarker, endMarker) {
+  const body = fs.readFileSync(bodyPath, 'utf8').trimEnd();
+  return [
+    '---',
+    'inclusion: always',
+    '---',
+    '',
+    beginMarker,
+    body,
+    endMarker,
+    '',
+  ].join('\n');
 }
 
 function log(message) {
@@ -499,11 +553,38 @@ function installCodex() {
 }
 
 function opencodeConfigDir() {
+  // opencode uses ~/.config/opencode on every platform (incl. Windows via
+  // os.homedir()), NOT %APPDATA% — same as caveman install.
   if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, 'opencode');
-  if (process.platform === 'win32') {
-    return path.join(process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming'), 'opencode');
-  }
   return path.join(HOME, '.config', 'opencode');
+}
+
+function copyDirRecursive(src, dest) {
+  ensureDir(dest);
+  if (DRY_RUN) return;
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, entry.name);
+    const d = path.join(dest, entry.name);
+    if (entry.isDirectory()) copyDirRecursive(s, d);
+    else if (entry.isFile()) fs.copyFileSync(s, d);
+  }
+}
+
+function copyFileIfNeeded(src, dest, label) {
+  if (!fs.existsSync(src)) {
+    log(`skip (missing source): ${src}`);
+    return;
+  }
+  if (DRY_RUN) {
+    trackPath(dest, 'write');
+    log(`dry-run: would install ${label || dest}`);
+    return;
+  }
+  ensureDir(path.dirname(dest));
+  backupOnce(dest);
+  fs.copyFileSync(src, dest);
+  trackPath(dest, 'write');
+  log(`installed: ${dest}`);
 }
 
 function zcodeConfigDir() {
@@ -555,38 +636,101 @@ function tomlArray(values) {
 }
 
 function installOpencodeMcp() {
+  // Native opencode install (mirrors caveman):
+  //   1. MCP server registration
+  //   2. Plugin (session flag + per-turn reinforce + tool.execute.before)
+  //   3. Skill + slash command
+  //   4. AGENTS.md always-on ruleset
+  //   5. Inject into agent defs (subagents may not inherit AGENTS.md)
   const configDir = opencodeConfigDir();
   const configPath = path.join(configDir, 'opencode.json');
-  backupGlobalRule(path.join(configDir, 'AGENTS.md'), 'opencode-AGENTS.md');
+  const pluginDir = path.join(configDir, 'plugins', 'cave-tools');
+  const commandsDir = path.join(configDir, 'command');
+  // opencode discovers commands from both `command/` and `commands/` across
+  // versions — write the common `command/` path (global config) and also
+  // `commands/` when present so either layout picks it up.
+  const commandsDirAlt = path.join(configDir, 'commands');
+  const skillsDir = path.join(configDir, 'skills', 'cave-tools');
+  const agentsMd = path.join(configDir, 'AGENTS.md');
 
+  backupGlobalRule(agentsMd, 'opencode-AGENTS.md');
+
+  // 1–2. MCP + plugin entry in opencode.json
   const config = readJson(configPath);
-
   if (!config.$schema) config.$schema = 'https://opencode.ai/config.json';
   if (!config.mcp || typeof config.mcp !== 'object' || Array.isArray(config.mcp)) {
     config.mcp = {};
   }
-
   config.mcp['cave-tools'] = {
     type: 'local',
     command: ['node', CAVE_TOOLS_CLI, 'mcp'],
     enabled: true,
   };
-
+  if (!Array.isArray(config.plugin)) config.plugin = [];
+  if (!config.plugin.includes(OPENCODE_PLUGIN_REL)) {
+    config.plugin.push(OPENCODE_PLUGIN_REL);
+  }
   writeJson(configPath, config);
-  log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${configPath} mcp.cave-tools`);
+  log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${configPath} mcp.cave-tools + plugin ${OPENCODE_PLUGIN_REL}`);
 
-  upsertFencedBlock(path.join(configDir, 'AGENTS.md'), CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
+  // 3. Plugin payload
+  ensureDir(pluginDir);
+  copyFileIfNeeded(
+    path.join(OPENCODE_PLUGIN_SRC, 'plugin.js'),
+    path.join(pluginDir, 'plugin.js'),
+    'opencode plugin.js',
+  );
+  copyFileIfNeeded(
+    path.join(OPENCODE_PLUGIN_SRC, 'package.json'),
+    path.join(pluginDir, 'package.json'),
+    'opencode plugin package.json',
+  );
+  // Renamed .cjs because plugin dir is "type": "module".
+  copyFileIfNeeded(
+    OPENCODE_CONFIG_SRC,
+    path.join(pluginDir, 'cave-tools-config.cjs'),
+    'opencode cave-tools-config.cjs',
+  );
 
-  // opencode has no SubagentStart hook and no PreToolUse redirect (both are
-  // Claude-only). A subagent's system prompt comes from its .opencode/agent/*.md
-  // def and isn't guaranteed to inherit AGENTS.md — so inject the full ruleset
-  // block into each agent def to reach opencode subagents too. Idempotent via
-  // the cave-tools markers.
+  // 4. Slash command
+  copyFileIfNeeded(
+    path.join(OPENCODE_PLUGIN_SRC, 'commands', 'cave-tools.md'),
+    path.join(commandsDir, 'cave-tools.md'),
+    'opencode command/cave-tools.md',
+  );
+  if (fs.existsSync(commandsDirAlt) || DRY_RUN) {
+    copyFileIfNeeded(
+      path.join(OPENCODE_PLUGIN_SRC, 'commands', 'cave-tools.md'),
+      path.join(commandsDirAlt, 'cave-tools.md'),
+      'opencode commands/cave-tools.md',
+    );
+  }
+
+  // 5. Skill (opencode auto-discovers ~/.config/opencode/skills/*/SKILL.md)
+  if (fs.existsSync(OPENCODE_SKILL_SRC)) {
+    if (DRY_RUN) {
+      trackPath(path.join(skillsDir, 'SKILL.md'), 'write');
+      log(`dry-run: would install skill ${skillsDir}/`);
+    } else {
+      copyDirRecursive(OPENCODE_SKILL_SRC, skillsDir);
+      trackPath(path.join(skillsDir, 'SKILL.md'), 'write');
+      log(`installed: ${skillsDir}/`);
+    }
+  } else {
+    log(`skip (missing source): ${OPENCODE_SKILL_SRC}`);
+  }
+
+  // 6. AGENTS.md always-on ruleset (plugin handles dynamic reinforce/block)
+  upsertFencedBlock(agentsMd, OPENCODE_CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
+
+  // Subagent defs may not inherit AGENTS.md — inject ruleset into each agent md.
   injectOpencodeAgentDefs([
     path.join(configDir, 'agent'),
+    path.join(configDir, 'agents'),
     path.join(process.cwd(), '.opencode', 'agent'),
+    path.join(process.cwd(), '.opencode', 'agents'),
   ]);
-  upsertDisciplineBlock(path.join(configDir, 'AGENTS.md'));
+  upsertDisciplineBlock(agentsMd);
 }
 
 function installZcodeMcp() {
@@ -693,7 +837,7 @@ function installGrok() {
   log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${hooksPath} hooks for Grok`);
 }
 
-function injectOpencodeAgentDefs(agentDirs) {
+function injectOpencodeAgentDefs(agentDirs, block = OPENCODE_CAVE_TOOLS_BLOCK) {
   for (const dir of agentDirs) {
     let entries;
     try {
@@ -703,7 +847,7 @@ function injectOpencodeAgentDefs(agentDirs) {
     }
     for (const entry of entries) {
       if (!entry.endsWith('.md')) continue;
-      upsertFencedBlock(path.join(dir, entry), CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
+      upsertFencedBlock(path.join(dir, entry), block, { skipIfExistingGuidance: true });
     }
   }
 }
@@ -898,9 +1042,38 @@ function installKiroRules() {
     log(`skip (not installed): Kiro rules → ${kiroDir}`);
     return;
   }
-  upsertFencedBlock(path.join(kiroDir, 'steering', 'cave-tools.md'), CAVE_TOOLS_BLOCK);
+  const steering = path.join(kiroDir, 'steering');
+  ensureDir(steering);
+
+  // Full-file writes with inclusion: always frontmatter. Kiro tool names in
+  // rules/cave-tools-kiro.md (fs_read/execute_bash → cave__*). Not the generic
+  // Claude block ("When caveman mode loads…").
+  if (!fs.existsSync(KIRO_CAVE_TOOLS_PATH)) {
+    log(`skip (missing): ${KIRO_CAVE_TOOLS_PATH}`);
+  } else {
+    writeText(
+      path.join(steering, 'cave-tools.md'),
+      readKiroSteeringFile(KIRO_CAVE_TOOLS_PATH, MARKER_BEGIN, MARKER_END),
+    );
+  }
+
+  if (fs.existsSync(KIRO_COMPRESSION_PATH)) {
+    writeText(path.join(steering, '07-compression-tools.md'), fs.readFileSync(KIRO_COMPRESSION_PATH, 'utf8'));
+  }
+  if (fs.existsSync(KIRO_EDIT_SAFETY_PATH)) {
+    writeText(path.join(steering, '08-edit-safety.md'), fs.readFileSync(KIRO_EDIT_SAFETY_PATH, 'utf8'));
+  }
+
+  const hookDest = path.join(kiroDir, 'hooks', 'cave-tools-redirect.sh');
+  copyFile(KIRO_REDIRECT_HOOK_SRC, hookDest, 0o755);
+
   // kiro convention: one steering file per concern. Discipline gets its own.
-  upsertDisciplineBlock(path.join(kiroDir, 'steering', 'cave-discipline.md'));
+  if (WITH_EXTRA_RULES && fs.existsSync(DISCIPLINE_RULES_PATH)) {
+    writeText(
+      path.join(steering, 'cave-discipline.md'),
+      readKiroSteeringFile(DISCIPLINE_RULES_PATH, DISCIPLINE_MARKER_BEGIN, DISCIPLINE_MARKER_END),
+    );
+  }
 }
 
 // Cursor rules live in ~/.cursor/rules/*.mdc with YAML frontmatter. The

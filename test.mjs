@@ -23,6 +23,11 @@ import {
   getAllBudgets,
   applyBudget,
 } from "./dist/compression/utils.js";
+import {
+  compressStructuredSemantic,
+  isStructuredCompressionEnabled,
+  setStructuredCompression,
+} from "./dist/compression/structured.js";
 import { classifyCommand } from "./dist/compression/classify.js";
 import {
   archiveIfLarge,
@@ -124,6 +129,96 @@ async function test() {
 
   assert.equal(extractStructuredData("not json"), "not json", "non-JSON passthrough");
   console.log("JSON compaction tests passed");
+  console.log();
+
+  // Semantic structured compression tests
+  console.log("2b2. Testing semantic structured compression:");
+  assert.ok(isStructuredCompressionEnabled(), "semantic compression defaults to enabled");
+
+  // Build a JSON blob big enough to clear the 50-line gate, with nested
+  // arrays, a long string, and many top-level keys.
+  const bigValue = "x".repeat(250);
+  const manyItems = Array.from({ length: 10 }, (_, i) => ({ idx: i, value: bigValue }));
+  const nestedObj = {
+    metadata: { name: "demo", version: 1 },
+    spec: { replicas: 3, image: "demo:1.0" },
+    status: { ready: true, conditions: ["ok", "ok", "ok"] },
+    items: manyItems,
+    extra1: "filler1",
+    extra2: "filler2",
+    extra3: "filler3",
+    extra4: "filler4",
+    extra5: "filler5",
+  };
+  const bigJson = JSON.stringify(nestedObj, null, 2);
+  // Force >50 lines by repeating the structure in an outer array.
+  const wrappedJson = JSON.stringify(
+    Array.from({ length: 60 }, (_, i) => ({ ...nestedObj, idx: i })),
+    null,
+    2,
+  );
+
+  assert.ok(wrappedJson.split("\n").length > 50, "fixture must clear 50-line gate");
+
+  // No command hint → generic path keeps first 8 top-level keys and
+  // exercises string truncation inside the nested array. With a kubectl
+  // hint the `items` array would be filtered out before strings could be
+  // truncated, so we deliberately use a non-matching command here.
+  const compressed = compressStructuredSemantic(wrappedJson, "my-command");
+  assert.ok(compressed !== null, "semantic compression returns a result for big JSON");
+  assert.ok(compressed.includes("[JSON compressed:"), "JSON annotation footer present");
+  assert.ok(compressed.split("\n").length < wrappedJson.split("\n").length, "compressed JSON is shorter");
+  assert.ok(compressed.includes("..."), "long arrays elided into '...' summaries");
+  assert.ok(compressed.includes("chars)"), "long strings truncated with char count");
+
+  // Hint-driven path: kubectl keeps only metadata/spec/status at the top
+  // level and records the retained keys in the footer annotation.
+  const kubectlCompressed = compressStructuredSemantic(
+    wrappedJson,
+    "kubectl get pods",
+  );
+  assert.ok(kubectlCompressed !== null, "hint path returns a result");
+  assert.ok(
+    kubectlCompressed.includes("Keys retained: metadata, spec, status"),
+    "kubectl hint keys advertised in footer",
+  );
+
+  // Non-JSON input → null (no crash, no fallback inside this function).
+  const nonStructured = "not even close to JSON or XML\n".repeat(60);
+  assert.equal(compressStructuredSemantic(nonStructured, "ls"), null, "text input falls through");
+
+  // Small JSON that doesn't clear the 50-line gate → null.
+  const smallJson = JSON.stringify({ a: 1, b: 2, c: [1, 2, 3] }, null, 2);
+  assert.equal(compressStructuredSemantic(smallJson, "echo"), null, "small JSON skipped");
+
+  // XML with namespace boilerplate → namespaces stripped. Need >50 lines so the
+  // input clears the gate; many sibling <item> elements exercise the
+  // repetition-collapse branch and push the compression ratio well below 0.6.
+  const xmlLines = [`<?xml version="1.0" encoding="UTF-8"?>`];
+  xmlLines.push(
+    `<root xmlns="http://example.com/ns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">`,
+  );
+  for (let i = 0; i < 60; i++) {
+    xmlLines.push(`  <item>n${i}</item>`);
+  }
+  xmlLines.push(`</root>`);
+  const longXmlPadded = xmlLines.join("\n");
+  const compressedXml = compressStructuredSemantic(longXmlPadded);
+  assert.ok(compressedXml !== null, "XML compression returns a result");
+  assert.ok(!compressedXml.includes("xmlns"), "namespaces stripped from XML");
+  assert.ok(compressedXml.includes("[XML compressed:"), "XML annotation footer present");
+  console.log("Semantic structured compression tests passed");
+
+  // Toggle off → null even for inputs that would otherwise compress.
+  setStructuredCompression(false);
+  assert.equal(isStructuredCompressionEnabled(), false, "toggle flips state");
+  assert.equal(compressStructuredSemantic(wrappedJson, "kubectl get pods"), null, "toggle off bypasses");
+  setStructuredCompression(true);
+  assert.ok(isStructuredCompressionEnabled(), "toggle restores state");
+  // Suppress unused-binding warning for bigValue/bigJson — built as a compact
+  // fixture reference even though the wrappedJson variant is what we assert on.
+  void bigValue;
+  void bigJson;
   console.log();
 
   // Bounce tracking tests
@@ -606,7 +701,7 @@ async function test() {
 
     const read2 = await readTool.handler({ file_path: forceFile });
     assert.equal(read2.isError, undefined);
-    assert.match(read2.content[0].text, /unchanged since last read/);
+    assert.match(read2.content[0].text, /unchanged since read #\d+/);
 
     const read3 = await readTool.handler({ file_path: forceFile, force: true });
     assert.equal(read3.isError, undefined);
@@ -615,6 +710,42 @@ async function test() {
     rmSync(readForceDir, { recursive: true, force: true });
   }
   console.log("cave__read force parameter tests passed");
+  console.log();
+
+  console.log("6c2. Testing cave__read per-session dedup (multi-session isolation):");
+  const readSessionDir = mkdtempSync(join(tmpdir(), "cave-read-session-"));
+  try {
+    const sharedFile = join(readSessionDir, "shared.txt");
+    writeFileSync(sharedFile, "shared content\n", "utf-8");
+
+    // Session A first read → delivers content.
+    const aRead1 = await readTool.handler({ file_path: sharedFile, __sessionId: "sessionA" });
+    assert.equal(aRead1.isError, undefined);
+    assert.ok(aRead1.content[0].text.includes("shared content"), "session A first read delivers content");
+
+    // Session A re-read (same session, unchanged) → stub (dedup within session).
+    const aRead2 = await readTool.handler({ file_path: sharedFile, __sessionId: "sessionA" });
+    assert.equal(aRead2.isError, undefined);
+    assert.match(aRead2.content[0].text, /unchanged since read #\d+/, "session A re-read dedups");
+
+    // Session B first read (different session, same file) → MUST deliver fresh
+    // content, NOT a stub. This is the multi-session fix: subagents sharing the
+    // MCP process no longer inherit the parent's "unchanged" stub.
+    const bRead1 = await readTool.handler({ file_path: sharedFile, __sessionId: "sessionB" });
+    assert.equal(bRead1.isError, undefined);
+    assert.ok(bRead1.content[0].text.includes("shared content"), "session B gets fresh content, not parent's stub");
+
+    // Session B re-read → stub (its own dedup now active).
+    const bRead2 = await readTool.handler({ file_path: sharedFile, __sessionId: "sessionB" });
+    assert.match(bRead2.content[0].text, /unchanged since read #\d+/, "session B re-read dedups");
+
+    // No __sessionId (legacy client) → falls back to default session, still dedups.
+    const legacyRead1 = await readTool.handler({ file_path: sharedFile });
+    assert.ok(legacyRead1.content[0].text.includes("shared content"), "legacy client gets content on first read");
+  } finally {
+    rmSync(readSessionDir, { recursive: true, force: true });
+  }
+  console.log("cave__read per-session dedup tests passed");
   console.log();
 
   console.log("6d. Testing cave__read recently-edited bypass:");
@@ -1494,6 +1625,138 @@ async function test() {
     }
   }
   console.log("cave__webfetch tests passed");
+  console.log();
+
+  // Test CLI status UI renderer
+  console.log("12. Testing status-ui renderer:");
+  {
+    const {
+      formatCompact,
+      renderStatusCli,
+      coloredMeter,
+    } = await import("./dist/status-ui.js");
+
+    assert.equal(formatCompact(87525037), "87.5M");
+    assert.equal(formatCompact(1200), "1.2k");
+    assert.equal(formatCompact(42), "42");
+    assert.equal(formatCompact(15000), "15k");
+
+    const plain = renderStatusCli({
+      rtkAvailable: true,
+      reductionPct: 48.2,
+      hitRatePct: 82.1,
+      cacheHits: 410,
+      cacheMisses: 90,
+      filesTracked: 12,
+      rtkRewrites: 12,
+      rtkAlreadyWrapped: 3,
+      rtkPassthrough: 40,
+      totalCalls: 128,
+      rawChars: 4_800_000,
+      compressedChars: 2_400_000,
+      compressionSavedChars: 2_400_000,
+      dedupSavedChars: 900_000,
+      savedChars: 3_300_000,
+      tokensSaved: 825_000,
+      liveSessions: 2,
+      endedSessions: 5,
+      lastUpdate: Date.now() - 12_000,
+      hasData: true,
+      budgets: {
+        bash: { maxLines: 200, headLines: 80, tailLines: 40 },
+        read: { maxLines: 200, headLines: 80, tailLines: 40 },
+      },
+      byTool: [
+        { name: "bash", calls: 40, rawChars: 1_000_000, savedChars: 620_000 },
+        { name: "read", calls: 55, rawChars: 800_000, savedChars: 300_000 },
+      ],
+      rtkGain: {
+        totalCommands: 10362,
+        totalInput: 99_500_000,
+        totalOutput: 12_000_000,
+        totalSaved: 87_500_000,
+        avgSavingsPct: 87.9,
+        totalTimeMs: 30_000_000,
+        avgTimeMs: 2900,
+      },
+      rtkGainSkipped: false,
+      verbose: false,
+    });
+
+    // Force plain-mode assertions via env is hard mid-test; check substance.
+    assert.match(plain, /cave-tools/);
+    assert.match(plain, /by tool/);
+    assert.match(plain, /rtk gain/);
+    assert.match(plain, /bash/);
+    assert.match(plain, /health/);
+    assert.match(plain, /budgets/);
+    assert.match(plain, /tokens|825k|825\.0k|825000/i);
+    assert.match(plain, /87\.9%/); // rtk gain pct
+
+    const empty = renderStatusCli({
+      rtkAvailable: false,
+      reductionPct: 0,
+      hitRatePct: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+      filesTracked: 0,
+      rtkRewrites: 0,
+      rtkAlreadyWrapped: 0,
+      rtkPassthrough: 0,
+      totalCalls: 0,
+      rawChars: 0,
+      compressedChars: 0,
+      compressionSavedChars: 0,
+      dedupSavedChars: 0,
+      savedChars: 0,
+      tokensSaved: 0,
+      liveSessions: 0,
+      endedSessions: 0,
+      lastUpdate: 0,
+      hasData: false,
+      budgets: { bash: { maxLines: 200, headLines: 80, tailLines: 40 } },
+      byTool: [],
+      rtkGain: null,
+      rtkGainSkipped: false,
+      verbose: false,
+    });
+    assert.match(empty, /No session data yet/);
+    assert.match(empty, /offline|rtk/i);
+
+    const meter = coloredMeter(50, 10, false);
+    assert.equal(meter.length, 10);
+
+    const verbose = renderStatusCli({
+      rtkAvailable: true,
+      reductionPct: 10,
+      hitRatePct: 50,
+      cacheHits: 1,
+      cacheMisses: 1,
+      filesTracked: 1,
+      rtkRewrites: 0,
+      rtkAlreadyWrapped: 0,
+      rtkPassthrough: 0,
+      totalCalls: 1,
+      rawChars: 1000,
+      compressedChars: 900,
+      compressionSavedChars: 100,
+      dedupSavedChars: 0,
+      savedChars: 100,
+      tokensSaved: 25,
+      liveSessions: 1,
+      endedSessions: 0,
+      lastUpdate: Date.now(),
+      hasData: true,
+      budgets: { bash: { maxLines: 10, headLines: 4, tailLines: 4 } },
+      byTool: [],
+      rtkGain: null,
+      rtkGainSkipped: true,
+      verbose: true,
+    });
+    assert.match(verbose, /detail|raw chars/i);
+    assert.match(verbose, /CAVE_TOOLS_STATUS_RTK=0|skipped/i);
+  }
+  console.log("status-ui tests passed");
   console.log();
 
   console.log("All tests passed!");

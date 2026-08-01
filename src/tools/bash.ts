@@ -5,6 +5,7 @@ import {
   extractStructuredData,
   rewriteCommandWithRtk,
 } from "../compression/utils.js";
+import { compressStructuredSemantic } from "../compression/structured.js";
 import { redactSecrets } from "../compression/redact.js";
 import { classifyCommand } from "../compression/classify.js";
 import { archiveIfLarge } from "../compression/archive.js";
@@ -161,8 +162,11 @@ export const bashTool: Tool & {
         };
       }
 
-      // Try structured extraction first
-      processed = extractStructuredData(processed, rewrittenCommand);
+      // Try semantic structured compression first; fall back to the
+      // whitespace-only extractor when input is non-structured or the
+      // semantic pass returned null (compression didn't help / toggle off).
+      const semantic = compressStructuredSemantic(processed, rewrittenCommand);
+      processed = semantic ?? extractStructuredData(processed, rewrittenCommand);
 
       // Apply budget compression
       processed = applyBudget(processed, "bash");

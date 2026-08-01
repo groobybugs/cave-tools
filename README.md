@@ -100,12 +100,13 @@ Some clients use a different wrapper key:
 | Antigravity shared | `~/.gemini/config/mcp_config.json`                    | `mcpServers`                                   |
 | Antigravity backup | `~/.gemini/antigravity-backup/mcp_config.json`        | `mcpServers`                                   |
 | Kiro CLI    | `~/.kiro/settings/mcp.json`                                   | `mcpServers`                                   |
+| Kimi Code CLI | `~/.kimi-code/mcp.json` (user), `.kimi-code/mcp.json` (project) | `mcpServers`                                 |
 | Cursor      | `~/.cursor/mcp.json`                                          | `mcpServers`                                   |
-| opencode    | `~/.config/opencode/opencode.json`                            | `mcp` with `type: "local"` and `command` array |
+| opencode    | `~/.config/opencode/opencode.json` + `plugins/cave-tools/`    | `mcp` + native plugin (per-turn reinforce + tool block) |
 | Grok Build CLI | `~/.grok/config.toml`, `~/.grok/hooks/cave-tools.json`     | TOML `[mcp_servers.cave-tools]` + native hooks |
 | ZCode       | `~/.agents/mcp.json` import source, plus `~/.zcode/AGENTS.md` | `mcpServers`                                   |
 
-opencode example:
+opencode example (installer writes MCP + plugin entry):
 
 ```json
 {
@@ -115,7 +116,8 @@ opencode example:
       "command": ["cave-tools", "mcp"],
       "enabled": true
     }
-  }
+  },
+  "plugin": ["./plugins/cave-tools/plugin.js"]
 }
 ```
 
@@ -233,6 +235,37 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
 
 3. Restart Claude Code. Built-in `Read`, `Grep`, `Glob`, and (in `strict` mode) `Edit`/`Write` now exit with a helpful error pointing the agent at the `cave__*` equivalent. The harness retries with the suggested tool automatically.
 
+### Kimi Code CLI (`~/.kimi-code/mcp.json` + `~/.kimi-code/config.toml`)
+
+Kimi Code CLI supports `[[hooks]]` in `config.toml` with the same blocking contract as Claude Code (exit status `2` + stderr reason), and its hook stdin payload uses the same `tool_name` / `tool_input` fields — so the Claude redirect script works unmodified. There is no installer target yet; wire it manually:
+
+1. Add the MCP server to `~/.kimi-code/mcp.json` (user level, or `.kimi-code/mcp.json` in a project):
+
+   ```json
+   {
+     "mcpServers": {
+       "cave-tools": {
+         "command": "cave-tools",
+         "args": ["mcp"]
+       }
+     }
+   }
+   ```
+
+2. Register the redirect hook in `~/.kimi-code/config.toml`:
+
+   ```toml
+   [[hooks]]
+   event = "PreToolUse"
+   matcher = "Read|Grep|Glob|Edit|Write|ReadFile|WriteFile|read_file|write_file|search_replace|MultiEdit|list_dir|ListDir"
+   command = "/home/you/.claude/hooks/cave-tools-redirect.sh"
+   timeout = 3
+   ```
+
+   The mode flag is the same file as Claude Code (`$CLAUDE_CONFIG_DIR/.cave-tools-active`, default `~/.claude/.cave-tools-active`; missing = `enforce`).
+
+3. Kimi Code CLI auto-loads generic user skills from `~/.agents/skills/` (shared across tools), kimi-specific skills from `~/.kimi-code/skills/`, and global instructions from `~/.kimi-code/AGENTS.md`. Drop the Cave Tools usage block into that `AGENTS.md` for always-on guidance.
+
 ### Grok Build CLI (`~/.grok/config.toml` + `~/.grok/hooks/`)
 
 Grok supports native MCP, skills, project rules, and blocking `PreToolUse` hooks. Install the Grok target from this checkout:
@@ -259,14 +292,36 @@ grok mcp doctor cave-tools
 grok inspect
 ```
 
-### opencode (`~/.config/opencode/opencode.json`)
+### opencode (`~/.config/opencode/`)
 
-opencode does not have hooks. Two options:
+opencode has no Claude-style `hooks.json`, but it **does** have a native plugin system ([docs](https://opencode.ai/docs/plugins/)). cave-tools installs the same shape as caveman:
 
-- **Rules only (simplest):** register the MCP server and point opencode at a global rules file via `instructions` (or `~/.config/opencode/AGENTS.md`, loaded automatically) with no `permission` block. Rules are advisory — the model follows them, nothing hard-blocks the built-ins. Enough for most setups.
-- **Hard enforcement:** add a `permission` block that denies the built-ins.
+| Piece | Path | Role |
+|-------|------|------|
+| MCP server | `opencode.json` → `mcp.cave-tools` | Tools (`cave__read`, …) |
+| Native plugin | `plugins/cave-tools/plugin.js` | Mode flag, per-turn reinforce, built-in redirect |
+| Always-on rules | `AGENTS.md` (fenced block) | Base ruleset every session |
+| Skill | `skills/cave-tools/SKILL.md` | Discoverable skill text |
+| Slash command | `command/cave-tools.md` (and `commands/` if present) | `/cave-tools off\|hint\|enforce\|strict` |
+| Mode flag | `.cave-tools-active` | Written by plugin on `session.created` |
 
-Combine the MCP registration with whichever you choose:
+Plugin hooks (opencode ≥ 1.15):
+
+- `event` / `session.created` → write mode flag (default `enforce`, overridable via `CAVE_TOOLS_MODE` or `~/.config/cave-tools/config.json`)
+- `chat.message` → parse `/cave-tools …` and natural-language on/off
+- `experimental.chat.system.transform` → per-turn reinforcement (Claude `UserPromptSubmit` twin)
+- `experimental.session.compacting` → keep rules across compaction
+- `tool.execute.before` → block built-in `read`/`grep`/`glob`/`list` in `enforce`/`strict` (throw with `cave__*` redirect); `strict` also requires prior `cave__read` before `edit`/`write`/`apply_patch`. `bash` stays an escape hatch.
+
+Install:
+
+```bash
+pnpm run install:agents -- --agent opencode
+# or from a published install:
+# cave-tools install  # if your install path runs install:agents
+```
+
+What the installer writes into `~/.config/opencode/opencode.json`:
 
 ```json
 {
@@ -274,33 +329,32 @@ Combine the MCP registration with whichever you choose:
   "mcp": {
     "cave-tools": {
       "type": "local",
-      "command": ["cave-tools", "mcp"],
+      "command": ["node", "/path/to/cave-tools/dist/cli.js", "mcp"],
       "enabled": true
     }
   },
-  "permission": {
-    "read": "deny",
-    "grep": "deny",
-    "glob": "deny",
-    "bash": "ask"
-  },
-  "instructions": ["~/.config/opencode/AGENTS.md"]
+  "plugin": ["./plugins/cave-tools/plugin.js"]
 }
 ```
 
-Then drop the same instruction block from "Usage Guidance For Agents" into `~/.config/opencode/AGENTS.md` so the model knows what to use instead. `bash` is set to `ask` rather than `deny` so the agent can still escape-hatch when `cave__bash` cannot handle a case (background processes, interactive stdin); flip to `"deny"` if you want hard enforcement.
-
-Since `cave__read` handles images itself, read exceptions are usually unnecessary. To force certain formats through the built-in `Read`, opencode evaluates patterns last-match-wins, so you can carve out exclusions:
+Optional extra hard-deny via opencode `permission` (plugin already blocks in enforce/strict; this is belt-and-suspenders):
 
 ```json
 "permission": {
-  "read": {
-    "*": "deny",
-    "*.png": "allow",
-    "*.jpg": "allow"
-  }
+  "read": "deny",
+  "grep": "deny",
+  "glob": "deny",
+  "bash": "ask"
 }
 ```
+
+Uninstall strips MCP + plugin entry, plugin dir, skill, command, AGENTS fence, and the mode flag:
+
+```bash
+pnpm run remove:agents -- --agent opencode
+```
+
+Restart opencode after install so the plugin loads. Verify: `plugin` array contains `./plugins/cave-tools/plugin.js`, `~/.config/opencode/plugins/cave-tools/plugin.js` exists, and a new session writes `~/.config/opencode/.cave-tools-active`.
 
 ### Antigravity 2.0 / Gemini CLI
 

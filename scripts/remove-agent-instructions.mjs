@@ -207,27 +207,60 @@ function removeGrokTomlMcp() {
   log(`updated: ${configPath} removed [mcp_servers.cave-tools]`);
 }
 
+const OPENCODE_PLUGIN_REL = './plugins/cave-tools/plugin.js';
+
 function removeOpencodeMcp() {
-  const configDir = process.env.XDG_CONFIG_HOME
-    ? path.join(process.env.XDG_CONFIG_HOME, 'opencode')
-    : process.platform === 'win32'
-      ? path.join(process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming'), 'opencode')
-      : path.join(HOME, '.config', 'opencode');
+  const configDir = opencodeConfigDir();
   const configPath = path.join(configDir, 'opencode.json');
   const config = readJsonForRemoval(configPath);
   if (!config) {
     log(`skip (missing): OpenCode → ${configPath}`);
-  } else if (!config.mcp || typeof config.mcp !== 'object' || Array.isArray(config.mcp)) {
-    log('unchanged: OpenCode has no mcp key');
-  } else if (!Object.prototype.hasOwnProperty.call(config.mcp, 'cave-tools')) {
-    log('unchanged: OpenCode has no cave-tools server');
   } else {
-    delete config.mcp['cave-tools'];
-    writeJson(configPath, config);
-    log(`${DRY_RUN ? 'dry-run: would update' : 'updated'}: ${configPath} removed mcp.cave-tools`);
+    let changed = false;
+    if (config.mcp && typeof config.mcp === 'object' && !Array.isArray(config.mcp)
+        && Object.prototype.hasOwnProperty.call(config.mcp, 'cave-tools')) {
+      delete config.mcp['cave-tools'];
+      changed = true;
+    }
+    if (Array.isArray(config.plugin)) {
+      const next = config.plugin.filter((entry) => {
+        if (typeof entry !== 'string') return true;
+        return entry !== OPENCODE_PLUGIN_REL
+          && !entry.endsWith('/plugins/cave-tools/plugin.js')
+          && !entry.includes('plugins/cave-tools');
+      });
+      if (next.length !== config.plugin.length) {
+        config.plugin = next;
+        changed = true;
+      }
+    }
+    if (changed) {
+      writeJson(configPath, config);
+      log(`${DRY_RUN ? 'dry-run: would update' : 'updated'}: ${configPath} removed mcp.cave-tools + plugin`);
+    } else {
+      log('unchanged: OpenCode has no cave-tools mcp/plugin entries');
+    }
   }
 
   removeBlock(path.join(configDir, 'AGENTS.md'));
+  removeDirIfExists(path.join(configDir, 'plugins', 'cave-tools'));
+  removeDirIfExists(path.join(configDir, 'skills', 'cave-tools'));
+  removeFileIfExists(path.join(configDir, 'command', 'cave-tools.md'));
+  removeFileIfExists(path.join(configDir, 'commands', 'cave-tools.md'));
+  removeFileIfExists(path.join(configDir, '.cave-tools-active'));
+
+  // Strip cave-tools fence from agent defs we may have injected.
+  for (const dir of [
+    path.join(configDir, 'agent'),
+    path.join(configDir, 'agents'),
+  ]) {
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch (_) { continue; }
+    for (const entry of entries) {
+      if (!entry.endsWith('.md')) continue;
+      removeBlock(path.join(dir, entry));
+    }
+  }
 }
 
 function claudeConfigDir() {
@@ -243,10 +276,8 @@ function claudeMcpJsonPath() {
 }
 
 function opencodeConfigDir() {
+  // opencode uses ~/.config/opencode on every platform (not %APPDATA%).
   if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, 'opencode');
-  if (process.platform === 'win32') {
-    return path.join(process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming'), 'opencode');
-  }
   return path.join(HOME, '.config', 'opencode');
 }
 
@@ -521,14 +552,13 @@ function removeKnownFiles() {
   }
 }
 
-function removeKiroGeneratedRule() {
-  const filePath = path.join(HOME, '.kiro', 'steering', 'cave-tools.md');
+function removeKiroManagedFile(filePath, requiredMarker) {
   if (!fs.existsSync(filePath)) {
     log(`skip (missing): ${filePath}`);
     return;
   }
   const current = fs.readFileSync(filePath, 'utf8');
-  if (!current.includes(MARKER_BEGIN) || !current.includes(MARKER_END)) {
+  if (requiredMarker && !current.includes(requiredMarker)) {
     log(`unchanged: ${filePath}`);
     return;
   }
@@ -540,6 +570,14 @@ function removeKiroGeneratedRule() {
   fs.unlinkSync(filePath);
   trackPath(filePath, 'remove');
   log(`removed: ${filePath}`);
+}
+
+function removeKiroGeneratedRule() {
+  const steering = path.join(HOME, '.kiro', 'steering');
+  removeKiroManagedFile(path.join(steering, 'cave-tools.md'), MARKER_BEGIN);
+  // Compression + edit-safety maps are full managed files from cave-tools install.
+  removeKiroManagedFile(path.join(steering, '07-compression-tools.md'), 'Cave Tools MCP');
+  removeKiroManagedFile(path.join(steering, '08-edit-safety.md'), 'cave__invalidate');
 }
 
 function removeDirIfExists(dirPath) {

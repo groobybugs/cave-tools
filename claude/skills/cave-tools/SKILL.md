@@ -11,7 +11,7 @@ Prefer cave-tools over built-in Read/Grep/Glob/Bash and use Cave Tools for compa
 
 ## Persistence
 
-ACTIVE EVERY RESPONSE. No drift after many turns. Rules survive compaction via UserPromptSubmit reinforcement. Off only: `/cave-tools off` or "stop cave-tools".
+ACTIVE EVERY RESPONSE. No drift after many turns. Rules survive compaction via UserPromptSubmit reinforcement (Claude Code) / `experimental.chat.system.transform` + `experimental.session.compacting` (opencode native plugin). Off only: `/cave-tools off` or "stop cave-tools".
 
 Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 

@@ -1,0 +1,8 @@
+{
+  "name": "cave-tools-opencode-plugin",
+  "version": "0.1.0",
+  "description": "cave-tools plugin for opencode — mode tracking, per-turn reinforcement, built-in tool redirect",
+  "type": "module",
+  "main": "plugin.js",
+  "private": true
+}

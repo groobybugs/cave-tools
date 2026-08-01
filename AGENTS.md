@@ -21,6 +21,7 @@ same results for fewer tokens. Prefer these over built-ins.
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
 - Pass raw file paths / patterns / commands — do not wrap tools in extra scripts.
 - Fall back to built-in Bash only for background processes, stream monitors, or hook-sensitive stdin.
+- OpenCode: native plugin at `src/plugins/opencode/` (installed to `~/.config/opencode/plugins/cave-tools/`) provides per-turn reinforce + built-in redirect. Prefer that over rules-only installs.
 
 ## Edit Safety
 - In Plan Mode / read-only phase, never call write-capable tools: `Update`, `Edit`, `apply_patch`, `cave__edit`, `cave__write`, or shell commands that modify files.
