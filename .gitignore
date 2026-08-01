@@ -6,3 +6,6 @@ dist/
 *.tsbuildinfo
 coverage/
 .idea/
+
+# Local agent config snapshots (pre-install backups)
+scripts/install-snapshots/
