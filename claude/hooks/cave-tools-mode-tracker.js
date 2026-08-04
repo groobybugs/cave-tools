@@ -104,13 +104,14 @@ process.stdin.on('end', () => {
 function buildReminder(mode) {
   const base = 'CAVE-TOOLS MODE ACTIVE (' + mode + '). ' +
     'Prefer cave__read / cave__bash / cave__grep / cave__find / cave__ls over built-ins. ' +
-    'Call cave__invalidate to refresh cache after external edits; cave__write to create/overwrite files. ' +
-    'Never run `rtk <cmd>` inside cave__bash (already prepended).';
+    'Call cave__invalidate after external edits; never run `rtk <cmd>` inside cave__bash. ' +
+    'Medium+ edits: cave__read line_numbers=true → cave__edit start_line/end_line/content ' +
+    '(+ expected_hash or expected_range_checksum); delete:true / insert_before for move.';
   if (mode === 'strict') {
-    return base + ' STRICT: built-in Edit/Write also requires a prior cave__read of the target.';
+    return base + ' STRICT: built-in Edit/Write need prior cave__read; range/move need hash or range_checksum.';
   }
   if (mode === 'enforce') {
-    return base + ' ENFORCE: built-in Read/Grep/Glob are blocked by PreToolUse.';
+    return base + ' ENFORCE: built-in Read/Grep/Glob blocked by PreToolUse.';
   }
   return base;
 }

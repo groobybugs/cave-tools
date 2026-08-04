@@ -217,11 +217,13 @@ function buildRuleset(mode) {
     '## Rules\n\n' +
     '- `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).\n' +
     '- `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.\n' +
-     '- `cave__bash` instead of Bash — RTK rewriting + structured extraction + line budgets.\n' +
-     '- Never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).\n' +
-     '- `cave__write` to create/overwrite a single file; `cave__edit` for string replacement (fuzzy whitespace-tolerant matching); `cave__apply_patch` for multi-file add/update/delete patches.\n' +
-     '- `cave__websearch` for current web information; results are redacted, archived if large, and budget-compressed.\n' +
-    '- After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next cave__read returns fresh content.\n' +
+    '- `cave__bash` instead of Bash — RTK rewriting + structured extraction + line budgets.\n' +
+    '- Never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).\n' +
+    '- `cave__write` to create/overwrite; `cave__edit` for str-replace **or** line-range ' +
+    '(`start_line`/`end_line`/`content` after `line_numbers=true`; optional `expected_hash` / ' +
+    '`expected_range_checksum`; `delete` / `insert_before`); `cave__apply_patch` for multi-file.\n' +
+    '- `cave__websearch` / `cave__webfetch` for web; results redacted/archived/budget-compressed.\n' +
+    '- After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s).\n' +
     '- Use `cave__compress` for large pasted or tool-produced text.\n' +
     '- Use `cave__status` to inspect savings, hit rate, budgets.\n\n' +
     '## Edit Safety\n\n' +

@@ -70,9 +70,11 @@ function readRegistryPath() {
 function reinforcementLine(mode) {
   const base = 'CAVE-TOOLS MODE ACTIVE (' + mode + '). ' +
     'Prefer cave__read / cave__bash / cave__grep / cave__find / cave__ls over built-ins. ' +
-    'Call cave__invalidate after external edits; never run `rtk <cmd>` inside cave__bash.';
+    'Call cave__invalidate after external edits; never run `rtk <cmd>` inside cave__bash. ' +
+    'Medium+ edits: cave__read line_numbers=true → cave__edit start_line/end_line/content ' +
+    '(+ expected_hash or expected_range_checksum); delete:true / insert_before for move.';
   if (mode === 'strict') {
-    return base + ' STRICT: built-in edit/write also requires a prior cave__read of the target.';
+    return base + ' STRICT: built-in edit/write need prior cave__read; range/move need hash or range_checksum.';
   }
   if (mode === 'enforce') {
     return base + ' ENFORCE: built-in read/grep/glob/list blocked — use cave__* equivalents.';

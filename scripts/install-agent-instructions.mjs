@@ -1132,9 +1132,28 @@ function copyFile(src, dest, mode = 0o644) {
   log(`copied: ${dest}`);
 }
 
+// Stable identity for a hook handler so `node path` and `/usr/bin/node path`
+// (or args-form vs inline command) collapse to one entry. Cave-tools scripts
+// key on basename; statusline emit keys on a fixed token; everything else uses
+// the full command+args string.
+function hookHandlerIdentity(handler) {
+  if (!handler || typeof handler !== 'object') return '';
+  const cmd = String(handler.command || '');
+  const argsJoined = Array.isArray(handler.args) ? handler.args.map(String).join(' ') : '';
+  const full = `${cmd} ${argsJoined}`.trim();
+  const script = full.match(/cave-tools-[\w.-]+\.(?:js|sh|ps1)/i);
+  if (script) return `cave-tools:${script[0].toLowerCase()}`;
+  if (/cave-tools(?:\s+|").*status/.test(full) && /emit-statusline/.test(full)) {
+    return 'cave-tools:status-emit-statusline';
+  }
+  if (full.includes('statusline-wrapper.sh')) return 'cave-tools:statusline-wrapper';
+  return full;
+}
+
 // Ensure a hook handler exists in settings.hooks[event][...].hooks[].
-// Match by `command` substring so equivalent entries (with different timeouts
-// or statusMessages) aren't duplicated on repeated installs.
+// Match by hookHandlerIdentity so node-path variants of the same script are
+// not duplicated on repeated installs (or after older installers used a
+// different process.execPath / bare `node`).
 function upsertHookHandler(settings, event, matcher, handler) {
   if (!settings.hooks || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks)) {
     settings.hooks = {};
@@ -1142,16 +1161,24 @@ function upsertHookHandler(settings, event, matcher, handler) {
   if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
 
   const matchKey = matcher || null;
-  const handlerKey = (handler.command || '') + ' ' + ((handler.args || []).join(' '));
+  const handlerKey = hookHandlerIdentity(handler);
+
+  // Prefer updating an existing same-identity handler anywhere under this event
+  // (even if matcher grouping differs), then skip insert.
+  for (const group of settings.hooks[event]) {
+    if (!Array.isArray(group.hooks)) continue;
+    for (let i = 0; i < group.hooks.length; i++) {
+      if (hookHandlerIdentity(group.hooks[i]) !== handlerKey) continue;
+      // Refresh command/timeout to the preferred form from this install.
+      group.hooks[i] = { ...group.hooks[i], ...handler };
+      return false;
+    }
+  }
 
   for (const group of settings.hooks[event]) {
     const groupMatcher = group.matcher || null;
     if (groupMatcher !== matchKey) continue;
     if (!Array.isArray(group.hooks)) group.hooks = [];
-    for (const h of group.hooks) {
-      const existingKey = (h.command || '') + ' ' + ((h.args || []).join(' '));
-      if (existingKey === handlerKey) return false; // already present
-    }
     group.hooks.push(handler);
     return true;
   }
@@ -1160,6 +1187,37 @@ function upsertHookHandler(settings, event, matcher, handler) {
   if (matchKey) group.matcher = matchKey;
   settings.hooks[event].push(group);
   return true;
+}
+
+// Drop duplicate cave-tools handlers left by older installs (same script,
+// different node binary path). Keeps the first occurrence; non-cave-tools
+// hooks are untouched.
+function dedupeCaveToolsHooks(settings) {
+  if (!settings.hooks || typeof settings.hooks !== 'object') return 0;
+  let removed = 0;
+  for (const event of Object.keys(settings.hooks)) {
+    const groups = settings.hooks[event];
+    if (!Array.isArray(groups)) continue;
+    const seen = new Set();
+    for (const group of groups) {
+      if (!Array.isArray(group.hooks)) continue;
+      const next = [];
+      for (const h of group.hooks) {
+        const id = hookHandlerIdentity(h);
+        if (id.startsWith('cave-tools:')) {
+          if (seen.has(id)) {
+            removed++;
+            continue;
+          }
+          seen.add(id);
+        }
+        next.push(h);
+      }
+      group.hooks = next;
+    }
+    settings.hooks[event] = groups.filter((g) => Array.isArray(g.hooks) && g.hooks.length > 0);
+  }
+  return removed;
 }
 
 function installCaveToolsClaudeHooks() {
@@ -1270,6 +1328,11 @@ function installCaveToolsClaudeHooks() {
     timeout: 3,
     async: true,
   });
+
+  const deduped = dedupeCaveToolsHooks(settings);
+  if (deduped > 0) {
+    log(`deduped: removed ${deduped} duplicate cave-tools hook handler(s) from settings.json`);
+  }
 
   // 3. Statusline — swap caveman-statusline.sh to wrapper if caveman is set;
   //    install wrapper if no statusline; leave alone otherwise.
