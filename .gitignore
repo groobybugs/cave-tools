@@ -9,3 +9,10 @@ coverage/
 
 # Local agent config snapshots (pre-install backups)
 scripts/install-snapshots/
+
+# Personal / machine-local agent state (keep on disk, never publish)
+scripts/global-rules-backup/
+.opencode/plans/
+.claude/settings.local.json
+.codebase-memory/
+.rtk/
