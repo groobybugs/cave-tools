@@ -264,7 +264,8 @@ fewer tokens. Prefer these over built-ins.
 ## Tools
 - \`cave__read\` instead of Read — optimized drop-in replacement (dedup cache + line budgets).
 - \`cave__grep\`, \`cave__find\`, \`cave__ls\` instead of shell/Glob/Grep.
-- \`cave__bash\` instead of Bash for every command — optimized drop-in replacement (RTK + structured extraction + line budgets).
+- \`cave__bash\` instead of Bash for every command — optimized drop-in replacement (RTK + structured extraction + line budgets). Max timeout 10min.
+- \`cave__bash_start\` for commands expected to exceed ~2-3min — runs detached, returns a jobId immediately; poll with \`cave__bash_status\` (\`wait\` up to 60s), stop with \`cave__bash_stop\`. \`cave-tools jobs\` lists/kills jobs from a terminal.
 - \`cave__compress\` to optimize large pasted or tool-produced text down to fewer tokens.
 - \`cave__status\` to inspect savings, cache hit rate, reduction % + budgets.
 - \`cave__write\` to create/overwrite a single file; \`cave__edit\` for fuzzy string replacement.
@@ -273,7 +274,8 @@ fewer tokens. Prefer these over built-ins.
 ## Rules
 - Do not double-wrap: never run \`rtk <cmd>\` inside \`cave__bash\` (it already prepends rtk).
 - Pass raw file paths / patterns / commands — do not wrap tools in extra scripts.
-- Fall back to built-in Bash only for background processes, stream monitors, or hook-sensitive stdin.
+- Never \`sleep\`-poll inside \`cave__bash\` to wait for long tasks: use \`cave__bash_start\` + \`cave__bash_status { wait: 60 }\` instead.
+- Fall back to built-in Bash only for stream monitors or hook-sensitive stdin.
 
 ## Savings
 Run \`cave-tools status\` (CLI) or \`cave__status\` (MCP) for reduction % and an
@@ -350,8 +352,71 @@ if (args[0] === "mcp" || args.length === 0) {
   console.log(`  CLAUDE.md  ${claude === "created" ? "created" : "already exists (left untouched)"}`);
   console.log(`  AGENTS.md  ${agents === "created" ? "created" : "already exists (left untouched)"}`);
   process.exit(0);
+} else if (args[0] === "jobs") {
+  (async () => {
+  const { listJobs } = await import("./storage/db.js");
+  const { getJobInfo, stopJob, tailFileBytes } = await import("./runtime/jobs.js");
+
+  const sub = args[1];
+  if (sub === "kill") {
+    const jobId = args[2];
+    if (!jobId) {
+      console.error("Usage: cave-tools jobs kill <jobId> [signal]");
+      process.exit(1);
+    }
+    const signal = (args[3] ?? "SIGTERM") as NodeJS.Signals;
+    const job = stopJob(jobId, signal);
+    if (!job) {
+      console.error(`Unknown job: ${jobId}`);
+      process.exit(1);
+    }
+    console.log(
+      job.state === "killed"
+        ? `${job.jobId} killed (sent ${signal} to process group ${job.pid}).`
+        : `${job.jobId} already finished (state: ${job.state}).`,
+    );
+    process.exit(0);
+  }
+
+  if (sub === "log") {
+    const jobId = args[2];
+    if (!jobId) {
+      console.error("Usage: cave-tools jobs log <jobId> [lines]");
+      process.exit(1);
+    }
+    const job = getJobInfo(jobId);
+    if (!job) {
+      console.error(`Unknown job: ${jobId}`);
+      process.exit(1);
+    }
+    const wanted = Math.max(1, Number(args[3]) || 100);
+    const tail = await tailFileBytes(job.logPath, 256 * 1024);
+    const lines = tail.split("\n");
+    process.stdout.write(lines.length > wanted ? lines.slice(-wanted).join("\n") : tail);
+    process.exit(0);
+  }
+
+  const jobs = listJobs().map((job) => getJobInfo(job.jobId) ?? job);
+  if (jobs.length === 0) {
+    console.log("No background jobs recorded.");
+    process.exit(0);
+  }
+  for (const job of jobs) {
+    const secs = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 1000);
+    const cmd = job.command.replace(/\s+/g, " ").trim();
+    const short = cmd.length > 80 ? `${cmd.slice(0, 77)}...` : cmd;
+    const state =
+      job.state === "exited"
+        ? `exited(${job.exitCode ?? "?"})`
+        : job.state;
+    console.log(
+      `${job.jobId}  ${state.padEnd(10)} ${String(secs + "s").padEnd(7)} pid=${job.pid}  ${short}`,
+    );
+    console.log(`  log: ${job.logPath}`);
+  }
+  process.exit(0);
+  })();
 } else {
-  console.error(`Unknown command: ${args[0]}`);
-  console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]]");
+  console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]|jobs [kill <id> [signal]|log <id> [lines]]]");
   process.exit(1);
 }

@@ -94,6 +94,80 @@ function tailUtf8Safe(raw: string, maxLines: number, maxBytes: number): string {
   return buf.subarray(start, end).toString("utf-8");
 }
 
+export function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function killProcessGroup(pid: number, signal: NodeJS.Signals): boolean {
+  try {
+    if (process.platform !== "win32") process.kill(-pid, signal);
+    else process.kill(pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface StartBackgroundOptions {
+  cwd?: string;
+  shell?: string;
+  /** Open fd the child's stdout and stderr are both redirected to. */
+  logFd: number;
+}
+
+export type CloseListener = (code: number | null, signal: NodeJS.Signals | null) => void;
+
+export interface BackgroundHandle {
+  pid: number;
+  /** Registers a close listener; replays immediately if the process already exited. */
+  onClose: (cb: CloseListener) => void;
+}
+
+/**
+ * Spawns a detached process group whose output goes to logFd, then unrefs it so
+ * the server can exit without waiting. Listeners attached after exit replay the
+ * final result instead of hanging forever.
+ */
+export function startBackgroundCommand(
+  command: string,
+  options: StartBackgroundOptions,
+): BackgroundHandle {
+  const detached = process.platform !== "win32";
+  const proc = spawn(command, [], {
+    shell: options.shell ?? defaultShell(),
+    cwd: options.cwd,
+    env: process.env,
+    stdio: ["ignore", options.logFd, options.logFd],
+    detached,
+    windowsHide: process.platform === "win32",
+  });
+  proc.unref();
+
+  const listeners: CloseListener[] = [];
+  let result: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+  const fire = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (result) return;
+    result = { code, signal };
+    for (const cb of listeners.splice(0)) cb(code, signal);
+  };
+  proc.on("close", fire);
+  proc.on("error", () => fire(null, null));
+
+  return {
+    pid: proc.pid as number,
+    onClose: (cb) => {
+      const settled = result;
+      if (settled) queueMicrotask(() => cb(settled.code, settled.signal));
+      else listeners.push(cb);
+    },
+  };
+}
+
 export function runCommand(command: string, options: RunCommandOptions): Promise<RunCommandResult> {
   return new Promise((resolve, reject) => {
     const detached = process.platform !== "win32";

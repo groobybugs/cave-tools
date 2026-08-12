@@ -8,6 +8,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { readTool } from "./tools/read.js";
 import { bashTool } from "./tools/bash.js";
+import { bashStartTool } from "./tools/bash-start.js";
+import { bashStatusTool } from "./tools/bash-status.js";
+import { bashStopTool } from "./tools/bash-stop.js";
 import { writeTool } from "./tools/write.js";
 import { invalidateTool } from "./tools/invalidate.js";
 import { compressTool } from "./tools/compress.js";
@@ -21,6 +24,7 @@ import { applyPatchTool } from "./tools/apply-patch.js";
 import { websearchTool } from "./tools/websearch.js";
 import { webfetchTool } from "./tools/webfetch.js";
 import { pruneDeadSessions } from "./compression/utils.js";
+import { pruneJobs } from "./runtime/jobs.js";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -45,6 +49,9 @@ const server = new Server(
 const tools: Tool[] = [
   readTool,
   bashTool,
+  bashStartTool,
+  bashStatusTool,
+  bashStopTool,
   grepTool,
   findTool,
   lsTool,
@@ -66,6 +73,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
+  // Caller session id from MCP _meta (see cave__read case). Shared by the
+  // background-job tools so job listing is scoped per-session.
+  const requestSessionId = String(
+    (request.params as { _meta?: { sessionID?: unknown } })._meta?.sessionID ?? "default",
+  );
+
   switch (name) {
     case "cave__read": {
       // Read the caller's session id from MCP _meta (sent by opencode after the
@@ -84,6 +97,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return bashTool.handler(
         args as Record<string, unknown>,
       ) as Promise<CallToolResult>;
+    case "cave__bash_start":
+      return bashStartTool.handler({
+        ...(args as Record<string, unknown>),
+        __sessionId: requestSessionId,
+      }) as Promise<CallToolResult>;
+    case "cave__bash_status":
+      return bashStatusTool.handler({
+        ...(args as Record<string, unknown>),
+        __sessionId: requestSessionId,
+      }) as Promise<CallToolResult>;
+    case "cave__bash_stop":
+      return bashStopTool.handler({
+        ...(args as Record<string, unknown>),
+        __sessionId: requestSessionId,
+      }) as Promise<CallToolResult>;
     case "cave__write":
       return writeTool.handler(
         args as Record<string, unknown>,
@@ -139,6 +167,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 export async function startServer(): Promise<void> {
   await pruneDeadSessions();
+  pruneJobs();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Cave Tools MCP server running on stdio");

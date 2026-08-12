@@ -164,6 +164,10 @@ export function archiveDir(): string {
   return join(caveToolsDataDir(), "archives");
 }
 
+export function jobsDir(): string {
+  return join(caveToolsDataDir(), "jobs");
+}
+
 export function readRegistryFile(): string {
   return join(
     process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
@@ -288,6 +292,22 @@ function openDb(): Database.Database {
 
     CREATE INDEX IF NOT EXISTS idx_sessions_ended_at ON sessions(ended_at);
     CREATE INDEX IF NOT EXISTS idx_archive_created_at ON archive_meta(created_at);
+
+    CREATE TABLE IF NOT EXISTS jobs (
+      job_id TEXT PRIMARY KEY,
+      pid INTEGER NOT NULL,
+      session_id TEXT NOT NULL DEFAULT 'default',
+      command TEXT NOT NULL,
+      workdir TEXT,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      exit_code INTEGER,
+      signal TEXT,
+      state TEXT NOT NULL DEFAULT 'running',
+      log_path TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_jobs_started_at ON jobs(started_at);
   `);
   migrateLegacyData(db);
   return db;
@@ -683,4 +703,126 @@ export function archiveStats(): { count: number; totalChars: number } {
 
 export function deleteArchive(id: string): void {
   openDb().prepare("DELETE FROM archive_meta WHERE id = ?").run(id);
+}
+
+// ── Background jobs ────────────────────────────────────────────────────────
+
+export type JobState = "running" | "exited" | "killed" | "lost";
+
+export interface JobRecord {
+  jobId: string;
+  pid: number;
+  sessionId: string;
+  command: string;
+  workdir: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  exitCode: number | null;
+  signal: string | null;
+  state: JobState;
+  logPath: string;
+}
+
+interface JobRow {
+  job_id: string;
+  pid: number;
+  session_id: string;
+  command: string;
+  workdir: string | null;
+  started_at: number;
+  ended_at: number | null;
+  exit_code: number | null;
+  signal: string | null;
+  state: string;
+  log_path: string;
+}
+
+function jobFromRow(row: JobRow): JobRecord {
+  return {
+    jobId: row.job_id,
+    pid: row.pid,
+    sessionId: row.session_id,
+    command: row.command,
+    workdir: row.workdir,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    exitCode: row.exit_code,
+    signal: row.signal,
+    state: row.state as JobState,
+    logPath: row.log_path,
+  };
+}
+
+export function insertJob(job: JobRecord): void {
+  openDb()
+    .prepare(
+      `INSERT INTO jobs (job_id, pid, session_id, command, workdir, started_at, ended_at, exit_code, signal, state, log_path)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      job.jobId,
+      job.pid,
+      job.sessionId,
+      job.command,
+      job.workdir,
+      job.startedAt,
+      job.endedAt,
+      job.exitCode,
+      job.signal,
+      job.state,
+      job.logPath,
+    );
+}
+
+export function updateJobState(
+  jobId: string,
+  update: { state: JobState; endedAt?: number | null; exitCode?: number | null; signal?: string | null },
+): void {
+  openDb()
+    .prepare(
+      `UPDATE jobs SET state = ?, ended_at = ?, exit_code = ?, signal = ? WHERE job_id = ?`,
+    )
+    .run(
+      update.state,
+      update.endedAt ?? null,
+      update.exitCode ?? null,
+      update.signal ?? null,
+      jobId,
+    );
+}
+
+export function getJob(jobId: string): JobRecord | null {
+  const row = openDb().prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId) as
+    | JobRow
+    | undefined;
+  return row ? jobFromRow(row) : null;
+}
+
+export function listJobs(sessionId?: string): JobRecord[] {
+  const rows = (
+    sessionId === undefined
+      ? openDb().prepare("SELECT * FROM jobs ORDER BY started_at DESC").all()
+      : openDb().prepare("SELECT * FROM jobs WHERE session_id = ? ORDER BY started_at DESC").all(sessionId)
+  ) as JobRow[];
+  return rows.map(jobFromRow);
+}
+
+export function listRunningJobs(): JobRecord[] {
+  const rows = openDb()
+    .prepare("SELECT * FROM jobs WHERE state = 'running' ORDER BY started_at DESC")
+    .all() as JobRow[];
+  return rows.map(jobFromRow);
+}
+
+export function deleteJob(jobId: string): void {
+  openDb().prepare("DELETE FROM jobs WHERE job_id = ?").run(jobId);
+}
+
+export function listJobsEndedBefore(cutoffMs: number): JobRecord[] {
+  const rows = openDb()
+    .prepare(
+      "SELECT * FROM jobs WHERE state != 'running' AND started_at < ? ORDER BY started_at DESC",
+    )
+    .all(cutoffMs) as JobRow[];
+  return rows.map(jobFromRow);
 }

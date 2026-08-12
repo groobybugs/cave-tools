@@ -19,7 +19,9 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 
 - Use `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets). Since 0.2.0 also returns image files (png/jpg/jpeg/gif/webp/bmp/svg up to 5 MB) as MCP image blocks.
 - Use `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
-- Use `cave__bash` instead of Bash — optimized drop-in replacement. Tries `rtk rewrite <cmd>` when RTK available, then applies structured JSON/XML extraction + line budgets.
+- Use `cave__bash` instead of Bash — optimized drop-in replacement. Tries `rtk rewrite <cmd>` when RTK available, then applies structured JSON/XML extraction + line budgets. Max timeout 10min.
+- Use `cave__bash_start` for anything expected to exceed ~2-3min (builds, test suites, installs): runs detached, returns a jobId immediately, output goes to a log file on disk. Poll with `cave__bash_status` (`wait` up to 60s — returns the moment the job exits); stop with `cave__bash_stop`. Jobs survive server restarts; `cave-tools jobs` lists/kills them from a terminal.
+- Never `sleep`-poll inside `cave__bash` to wait for a long task — that burns the 10min cap and whole turns. Start it in the background instead.
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
 - Use `cave__write` to create/overwrite a single file; `cave__edit` for str-replace **or** line-range edits; `cave__apply_patch` for multi-file add/update/delete/move patches.
 - **Line-range (token-cheap):** `cave__read` with `line_numbers=true` (lines tagged `N:tag|`, footer has `file_hash` + `range_checksum`). Then `cave__edit` with `start_line`/`end_line`/`content` (new body only). Pass `expected_hash` and/or `expected_range_checksum`. `delete:true` removes lines; `insert_before` moves a block; batch `edits[]` may set per-item `file_path`. Insert before N: `end_line=start_line-1`. STRICT (`CAVE_TOOLS_MODE=strict`) requires a hash/checksum proof for range/move. Tiny one-liners may still use `old_string`/`new_string`.
@@ -29,7 +31,7 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 - Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - Use `cave__status` to check RTK availability, cache state, savings %, budgets.
 - Pass raw file paths / patterns / commands. Do not wrap cave-tools calls in extra Python/shell scripts.
-- Fall back to built-in Bash only for background processes, stream monitors, or hook-sensitive stdin.
+- Fall back to built-in Bash only for stream monitors or hook-sensitive stdin.
 
 ## Intensity
 

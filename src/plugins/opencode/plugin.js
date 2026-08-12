@@ -71,6 +71,7 @@ function reinforcementLine(mode) {
   const base = 'CAVE-TOOLS MODE ACTIVE (' + mode + '). ' +
     'Prefer cave__read / cave__bash / cave__grep / cave__find / cave__ls over built-ins. ' +
     'Call cave__invalidate after external edits; never run `rtk <cmd>` inside cave__bash. ' +
+    'Commands >2-3min: cave__bash_start + poll cave__bash_status wait=60; never sleep-poll. ' +
     'Medium+ edits: cave__read line_numbers=true → cave__edit start_line/end_line/content ' +
     '(+ expected_hash or expected_range_checksum); delete:true / insert_before for move.';
   if (mode === 'strict') {

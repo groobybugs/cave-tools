@@ -128,7 +128,10 @@ All tool names use the MCP names exported by the server.
 | Tool              | Purpose                                                                                   | Caveman Code parity                                                 |
 | ----------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `cave__read`      | Optimized drop-in replacement for Read (dedup + line budgets). Reads images (`.png/.jpg/.jpeg/.gif/.webp/.bmp/.svg`) as MCP image content (base64, up to 5 MB). | Based on `read`, plus standalone dedup cache + image support.       |
-| `cave__bash`      | Optimized drop-in replacement for the shell tool (RTK rewrite + structured extraction + line budgets). Supports opt-in soft failures via `allowFailure`. | Based on `bash` output behavior, not permission/TUI handling.  |
+| `cave__bash`      | Optimized drop-in replacement for the shell tool (RTK rewrite + structured extraction + line budgets). Supports opt-in soft failures via `allowFailure`. Max timeout 10min. | Based on `bash` output behavior, not permission/TUI handling.  |
+| `cave__bash_start` | Start a long command detached; returns a jobId immediately, output goes to a log file on disk. Jobs survive server restarts. | Cave Tools-specific background jobs. |
+| `cave__bash_status` | Poll a background job: state, exit code, duration, log tail. `wait` (up to 60s) returns the moment the job exits. No jobId lists the session's jobs. | Cave Tools-specific background jobs. |
+| `cave__bash_stop` | Stop a background job's process group (SIGTERM, SIGKILL after 3s). | Cave Tools-specific background jobs. |
 | `cave__grep`      | Search file contents with `rg --json`, match limits, context lines, long-line truncation. | Based on `grep`.                                                    |
 | `cave__find`      | Find files by glob with ripgrep-backed search, Node fallback, relative paths, result limit. | Based on `glob` / search.                                           |
 | `cave__ls`        | List directory entries, directories first, sorted, directories suffixed with `/`, paginated. | Based on directory read/list behavior.                              |
@@ -151,7 +154,8 @@ Use this instruction block in agent rules:
 
 - Use `cave__read` instead of the built-in read tool for file reads. Optimized drop-in replacement (read dedup + line budgets).
 - Use `cave__grep`, `cave__find`, and `cave__ls` instead of shell commands for file exploration when available. Optimized drop-in replacements that respect ignore rules and trim output to a line budget.
-- Use `cave__bash` instead of the built-in shell tool for commands. Optimized drop-in replacement: tries RTK command rewriting when `rtk` is available, then structured JSON/XML extraction and output budgets.
+- Use `cave__bash` instead of the built-in shell tool for commands. Optimized drop-in replacement: tries RTK command rewriting when `rtk` is available, then structured JSON/XML extraction and output budgets. Max timeout 10min.
+- Use `cave__bash_start` for commands expected to exceed ~2-3min (builds, test suites, installs): runs detached, returns a jobId immediately. Poll with `cave__bash_status` (`wait` up to 60s — returns the moment the job exits); stop with `cave__bash_stop`. Never `sleep`-poll inside `cave__bash`.
 - Use `cave__edit` / `cave__write` for single-file changes and `cave__apply_patch` for multi-file add/update/delete/move patches. For medium+ hunks prefer line-range: `cave__read` with `line_numbers=true`, then `cave__edit` with `start_line`/`end_line`/`content` (+ `expected_hash` from the footer).
 - Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived if large, and budget-compressed.
 - Use `cave__webfetch` to fetch a specific URL and return it as markdown/text/html (or a base64 image block); output is redacted, archived if large, and budget-compressed.

@@ -1,4 +1,9 @@
 import { bashTool } from "./dist/tools/bash.js";
+import { bashStartTool } from "./dist/tools/bash-start.js";
+import { bashStatusTool } from "./dist/tools/bash-status.js";
+import { bashStopTool } from "./dist/tools/bash-stop.js";
+import { getJobInfo } from "./dist/runtime/jobs.js";
+import { insertJob, deleteJob } from "./dist/storage/db.js";
 import { compressTool } from "./dist/tools/compress.js";
 import { editTool } from "./dist/tools/edit.js";
 import { applyPatchTool } from "./dist/tools/apply-patch.js";
@@ -40,7 +45,7 @@ import {
   getCodebookSize,
 } from "./dist/compression/codebook.js";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -2001,6 +2006,127 @@ async function test() {
   }
   console.log("status-ui tests passed");
   console.log();
+
+  // Background jobs (cave__bash_start/status/stop)
+  {
+    console.log("Testing background jobs:");
+    const session = "test-jobs";
+    const createdLogs = [];
+    const createdIds = [];
+
+    // 1. Fast command completes; status reports exit code and log content.
+    const start1 = await bashStartTool.handler({
+      command: "echo hello-bg",
+      description: "fast echo job",
+      __sessionId: session,
+    });
+    assert.match(start1.content[0].text, /jobId: (\S+)/);
+    const job1 = start1.content[0].text.match(/jobId: (\S+)/)[1];
+    createdIds.push(job1);
+    createdLogs.push(start1.content[0].text.match(/logPath: (\S+)/)[1]);
+
+    const status1 = await bashStatusTool.handler({ jobId: job1, wait: 30, __sessionId: session });
+    assert.match(status1.content[0].text, /exited \(code 0\)/);
+    assert.match(status1.content[0].text, /hello-bg/);
+    assert.equal(status1.isError, undefined);
+
+    // 2. wait returns as soon as the command finishes, not after full timeout.
+    const start2 = await bashStartTool.handler({
+      command: "sleep 2; echo done-wait",
+      description: "two second sleep job",
+      __sessionId: session,
+    });
+    const job2 = start2.content[0].text.match(/jobId: (\S+)/)[1];
+    createdIds.push(job2);
+    createdLogs.push(start2.content[0].text.match(/logPath: (\S+)/)[1]);
+    const t0 = Date.now();
+    const status2 = await bashStatusTool.handler({ jobId: job2, wait: 60, __sessionId: session });
+    assert.ok(Date.now() - t0 < 30000, "wait must return right after job exit");
+    assert.match(status2.content[0].text, /exited \(code 0\)/);
+    assert.match(status2.content[0].text, /done-wait/);
+
+    // 3. Long command: running state, then stop -> killed.
+    const start3 = await bashStartTool.handler({
+      command: "sleep 300",
+      description: "long sleep job",
+      __sessionId: session,
+    });
+    const job3 = start3.content[0].text.match(/jobId: (\S+)/)[1];
+    createdIds.push(job3);
+    createdLogs.push(start3.content[0].text.match(/logPath: (\S+)/)[1]);
+    const status3 = await bashStatusTool.handler({ jobId: job3, __sessionId: session });
+    assert.match(status3.content[0].text, /running/);
+    const stop3 = await bashStopTool.handler({ jobId: job3 });
+    assert.match(stop3.content[0].text, /killed/);
+    const status3b = await bashStatusTool.handler({ jobId: job3, __sessionId: session });
+    assert.match(status3b.content[0].text, /killed/);
+
+    // 4. Unknown job errors.
+    const statusUnknown = await bashStatusTool.handler({ jobId: "j-nope", __sessionId: session });
+    assert.equal(statusUnknown.isError, true);
+    const stopUnknown = await bashStopTool.handler({ jobId: "j-nope" });
+    assert.equal(stopUnknown.isError, true);
+
+    // 5. No-jobId status lists only the calling session's jobs.
+    const list = await bashStatusTool.handler({ __sessionId: session });
+    assert.match(list.content[0].text, new RegExp(job1));
+    const listOther = await bashStatusTool.handler({ __sessionId: "other-session" });
+    assert.match(listOther.content[0].text, /No background jobs/);
+
+    // 6. Restart recovery: row marked running with a dead pid.
+    //    With exit marker -> recovered exit code; without marker -> lost.
+    const deadPid = 4194303;
+    const mkJob = (id, withMarker) => {
+      const logPath = join(mkdtempSync(join(tmpdir(), "cave-job-")), `${id}.log`);
+      writeFileSync(logPath, `fake log\n${withMarker ? "[cave-job exit=3]\n" : ""}`);
+      insertJob({
+        jobId: id,
+        pid: deadPid,
+        sessionId: session,
+        command: "fake",
+        workdir: null,
+        startedAt: Date.now() - 1000,
+        endedAt: null,
+        exitCode: null,
+        signal: null,
+        state: "running",
+        logPath,
+      });
+      createdIds.push(id);
+      createdLogs.push(logPath);
+      return id;
+    };
+    const recId = mkJob("j-test-recover", true);
+    const recovered = getJobInfo(recId);
+    assert.equal(recovered.state, "exited");
+    assert.equal(recovered.exitCode, 3);
+    const lostId = mkJob("j-test-lost", false);
+    const lost = getJobInfo(lostId);
+    assert.equal(lost.state, "lost");
+
+    // 7. Non-zero exit surfaces isError on status.
+    const start7 = await bashStartTool.handler({
+      command: "exit 7",
+      description: "failing job",
+      __sessionId: session,
+    });
+    const job7 = start7.content[0].text.match(/jobId: (\S+)/)[1];
+    createdIds.push(job7);
+    createdLogs.push(start7.content[0].text.match(/logPath: (\S+)/)[1]);
+    const status7 = await bashStatusTool.handler({ jobId: job7, wait: 30, __sessionId: session });
+    assert.match(status7.content[0].text, /exited \(code 7\)/);
+    assert.equal(status7.isError, true);
+
+    // Cleanup: remove test rows and logs.
+    for (const id of createdIds) {
+      try { deleteJob(id); } catch { /* best effort */ }
+    }
+    for (const log of createdLogs) {
+      try { unlinkSync(log); } catch { /* best effort */ }
+    }
+    console.log("background jobs tests passed");
+    console.log();
+  }
 
   console.log("All tests passed!");
 }
