@@ -82,10 +82,7 @@ async function fetchBounded(
     if (parsed !== undefined && Number.isSafeInteger(parsed) && parsed > MAX_RESPONSE_BYTES) {
       throw new Error("Response too large (exceeds 5MB limit)");
     }
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength > MAX_RESPONSE_BYTES) {
-      throw new Error("Response too large (exceeds 5MB limit)");
-    }
+    const buffer = await readBoundedBody(response);
     return {
       buffer,
       contentType: response.headers.get("content-type") || "",
@@ -101,8 +98,52 @@ async function fetchBounded(
   }
 }
 
+async function readBoundedBody(response: Response): Promise<ArrayBuffer> {
+  if (!response.body) {
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > MAX_RESPONSE_BYTES) {
+      throw new Error("Response too large (exceeds 5MB limit)");
+    }
+    return buffer;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    size += value.byteLength;
+    if (size > MAX_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new Error("Response too large (exceeds 5MB limit)");
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out.buffer;
+}
+
 function isImageMime(mime: string): boolean {
   return mime.startsWith("image/") && mime !== "image/svg+xml" && mime !== "image/vnd.fastbidsheet";
+}
+
+function isTextualMime(mime: string): boolean {
+  return (
+    !mime ||
+    mime.startsWith("text/") ||
+    mime === "application/json" ||
+    mime.endsWith("+json") ||
+    mime === "application/xml" ||
+    mime.endsWith("+xml") ||
+    mime === "application/javascript" ||
+    mime === "application/x-javascript"
+  );
 }
 
 // ── Self-contained HTML converters (no external deps) ──────────────────────
@@ -355,7 +396,7 @@ export const webfetchTool: Tool & {
       } catch (error) {
         // Retry with honest UA only on Cloudflare bot challenge.
         if (error instanceof CloudflareChallengeError) {
-          result = await fetchBounded(url, { ...headers, "User-Agent": "opencode" }, input.timeout);
+          result = await fetchBounded(url, { ...headers, "User-Agent": "cave-tools" }, input.timeout);
         } else {
           throw error;
         }
@@ -371,6 +412,9 @@ export const webfetchTool: Tool & {
             { type: "image", data: base64, mimeType: mime },
           ],
         };
+      }
+      if (!isTextualMime(mime)) {
+        throw new Error(`Unsupported fetched file content type: ${mime}`);
       }
 
       const content = new TextDecoder().decode(result.buffer);

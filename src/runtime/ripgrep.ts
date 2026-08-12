@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import path from "path";
 import { readFile, readdir } from "fs/promises";
 import { toPosixPath } from "./path.js";
+import { resolveFd, resolveRg } from "./bins.js";
 
 const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_LINE_LENGTH = 2000;
@@ -32,9 +33,9 @@ function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${source}$`);
 }
 
-function spawnRg(args: string[], cwd: string): Promise<{ stdout: string; stderr: string; code: number | null; error?: Error }> {
+function spawnBin(command: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string; code: number | null; error?: Error }> {
   return new Promise((resolve) => {
-    const child = spawn("rg", args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf-8")));
@@ -42,6 +43,14 @@ function spawnRg(args: string[], cwd: string): Promise<{ stdout: string; stderr:
     child.on("error", (error) => resolve({ stdout: "", stderr: "", code: null, error }));
     child.on("close", (code) => resolve({ stdout, stderr, code }));
   });
+}
+
+function parsePathLines(stdout: string, limit: number): string[] {
+  return stdout
+    .split("\n")
+    .map((line) => line.trim().replace(/^(?:\.[\\/])+/u, "").replace(/^[\\/]+/u, "").replaceAll("\\", "/"))
+    .filter(Boolean)
+    .slice(0, limit);
 }
 
 async function findWithNode(cwd: string, pattern: string, limit: number): Promise<string[]> {
@@ -71,6 +80,29 @@ async function findWithNode(cwd: string, pattern: string, limit: number): Promis
 }
 
 export async function rgFiles(cwd: string, pattern: string, limit: number, hidden = true): Promise<string[]> {
+  const fd = await resolveFd();
+  if (fd) {
+    const fdResult = await spawnBin(
+      fd,
+      [
+        "--glob",
+        pattern,
+        ...(hidden ? ["--hidden"] : []),
+        "--exclude",
+        ".git",
+        "--max-results",
+        String(limit),
+        ".",
+      ],
+      cwd,
+    );
+    if (!fdResult.error && (fdResult.code === 0 || fdResult.code === 1)) {
+      return parsePathLines(fdResult.stdout, limit);
+    }
+  }
+
+  const rg = await resolveRg();
+  if (!rg) return findWithNode(cwd, pattern, limit);
   const args = [
     "--no-config",
     "--files",
@@ -79,14 +111,10 @@ export async function rgFiles(cwd: string, pattern: string, limit: number, hidde
     "--glob=!**/.git/**",
     ".",
   ];
-  const result = await spawnRg(args, cwd);
+  const result = await spawnBin(rg, args, cwd);
   if (result.error) return findWithNode(cwd, pattern, limit);
   if (result.code !== 0 && result.code !== 1) throw new Error(result.stderr.trim() || `ripgrep exited with code ${result.code}`);
-  return result.stdout
-    .split("\n")
-    .map((line) => line.trim().replace(/^(?:\.[\\/])+/u, "").replace(/^[\\/]+/u, "").replaceAll("\\", "/"))
-    .filter(Boolean)
-    .slice(0, limit);
+  return parsePathLines(result.stdout, limit);
 }
 
 export async function rgGrep(input: {
@@ -111,7 +139,9 @@ export async function rgGrep(input: {
     input.pattern,
     input.file ?? ".",
   ];
-  const result = await spawnRg(args, input.cwd);
+  const rg = await resolveRg();
+  if (!rg) throw new Error("ripgrep not available (not on PATH and download failed)");
+  const result = await spawnBin(rg, args, input.cwd);
   if (result.error) throw new Error(`Failed to run ripgrep: ${result.error.message}`);
   if (result.code === 2 && isInvalidPattern(result.stderr)) throw new Error(result.stderr.trim());
   if (result.code !== 0 && result.code !== 1 && result.code !== 2) {

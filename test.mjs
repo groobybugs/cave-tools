@@ -447,6 +447,19 @@ async function test() {
   console.log("cave__find tests passed");
   console.log();
 
+  console.log("4b. Testing search bins:");
+  {
+    const { whichUserRg, whichUserFd, binDir, ensureBins } = await import("./dist/runtime/bins.js");
+    assert.ok(whichUserRg(), "rg must resolve from PATH");
+    assert.ok(whichUserFd(), "fd or fdfind must resolve from PATH");
+    const bins = await ensureBins();
+    assert.ok(bins.rg, "ensureBins must return rg");
+    assert.ok(bins.rg === whichUserRg(), "PATH rg wins over download cache");
+    assert.ok(typeof binDir() === "string" && binDir().length > 0);
+  }
+  console.log("search bins tests passed");
+  console.log();
+
   console.log("5. Testing cave__ls:");
   const lsDir = mkdtempSync(join(tmpdir(), "cave-ls-"));
   try {
@@ -1793,6 +1806,9 @@ async function test() {
       } else if (url === "/img") {
         res.setHeader("content-type", "image/png");
         res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      } else if (url === "/bin") {
+        res.setHeader("content-type", "application/octet-stream");
+        res.end(Buffer.from([0x00, 0x01, 0x02, 0x03]));
       } else if (url === "/big") {
         res.setHeader("content-type", "text/plain");
         res.end("x".repeat(6 * 1024 * 1024));
@@ -1865,6 +1881,10 @@ async function test() {
       assert.doesNotMatch(metaText.content[0].text, /utf-8|x\.css/);
 
       // Non-2xx status is an error, not success content.
+      const binRes = await webfetchTool.handler({ url: `${base}/bin`, timeout: 10 });
+      assert.equal(binRes.isError, true);
+      assert.match(binRes.content[0].text, /Unsupported fetched file content type/);
+
       const notFound = await webfetchTool.handler({ url: `${base}/nonexistent`, timeout: 10 });
       assert.equal(notFound.isError, true);
       assert.match(notFound.content[0].text, /Request failed with status 404/);

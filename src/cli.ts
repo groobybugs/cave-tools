@@ -416,7 +416,16 @@ if (args[0] === "mcp" || args.length === 0) {
   }
   process.exit(0);
   })();
+} else if (args[0] === "bins") {
+  (async () => {
+    const { ensureBins, binDir } = await import("./runtime/bins.js");
+    const result = await ensureBins({ log: (message) => console.log(message) });
+    console.log(`binDir: ${binDir()}`);
+    console.log(`rg: ${result.rg ?? "(missing)"}`);
+    console.log(`fd: ${result.fd ?? "(missing)"}`);
+    process.exit(result.rg ? 0 : 1);
+  })();
 } else {
-  console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]|jobs [kill <id> [signal]|log <id> [lines]]]");
+  console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]|jobs [kill <id> [signal]|log <id> [lines]]|bins]");
   process.exit(1);
 }

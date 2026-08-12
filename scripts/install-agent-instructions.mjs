@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline/promises';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HOME = os.homedir();
-const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CAVE_TOOLS_CLI = path.join(REPO_ROOT, 'dist', 'cli.js');
 const GLOBAL_RULES_BACKUP_DIR = path.join(REPO_ROOT, 'scripts', 'global-rules-backup');
 const CLAUDE_BUNDLE_DIR = path.join(REPO_ROOT, 'claude');
@@ -1070,6 +1071,17 @@ async function selectTargets(targets) {
   return targets.filter((target) => keys.includes(target.key));
 }
 
+async function ensureSearchBins() {
+  const binsJs = path.join(REPO_ROOT, 'dist', 'runtime', 'bins.js');
+  if (!fs.existsSync(binsJs)) {
+    log('skip bins: dist/runtime/bins.js missing — run pnpm build');
+    return;
+  }
+  section('Search CLIs');
+  const { ensureBins } = await import(pathToFileURL(binsJs).href);
+  await ensureBins({ log });
+}
+
 function installSelectedTargets(targets) {
   const keys = new Set(targets.map((target) => target.key));
   if (keys.has('claude')) {
@@ -1445,6 +1457,7 @@ try {
   }
   printSelectedTargets(selected);
   installSelectedTargets(selected);
+  await ensureSearchBins();
   printTouchedPaths();
   log(`${DRY_RUN ? 'dry-run done' : 'done'}: cave-tools MCP, hooks, skill, and instruction blocks installed`);
 } catch (error) {

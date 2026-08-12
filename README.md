@@ -133,7 +133,7 @@ All tool names use the MCP names exported by the server.
 | `cave__bash_status` | Poll a background job: state, exit code, duration, log tail. `wait` (up to 60s) returns the moment the job exits. No jobId lists the session's jobs. | Cave Tools-specific background jobs. |
 | `cave__bash_stop` | Stop a background job's process group (SIGTERM, SIGKILL after 3s). | Cave Tools-specific background jobs. |
 | `cave__grep`      | Search file contents with `rg --json`, match limits, context lines, long-line truncation. | Based on `grep`.                                                    |
-| `cave__find`      | Find files by glob with ripgrep-backed search, Node fallback, relative paths, result limit. | Based on `glob` / search.                                           |
+| `cave__find`      | Find files by glob (`fd` if present, else `rg --files`, else Node). Relative paths, result limit. | Based on `glob` / search.                                           |
 | `cave__ls`        | List directory entries, directories first, sorted, directories suffixed with `/`, paginated. | Based on directory read/list behavior.                              |
 | `cave__edit`      | Str-replace (fuzzy), line-range (`start_line`/`end_line`/`content`), `delete`, or `insert_before` move. Optional `expected_hash` / `expected_range_checksum`. Multi-file `edits[]`. Auto-invalidates dedup cache. | Cave Tools-specific edit tool.                                      |
 | `cave__write`     | Write a single file (create/overwrite, or `truncate` to empty). Auto-invalidates dedup cache. | Cave Tools-specific write tool.                                     |
@@ -451,9 +451,9 @@ Invalidate cache after edits:
 
 - Node.js 20+
 - `pnpm` for development
-- `rg` for `cave__grep`
-- Optional: `fd` for faster `cave__find` results with full `.gitignore` behavior
+- Search CLIs resolve in order: user `PATH` (`rg`, `fd` / Debian `fdfind`) → downloaded cache (`~/.local/share/cave-tools/bin`) → Node walker for `cave__find`. `cave__grep` needs `rg`.
 - Optional: `rtk` for command rewriting in `cave__bash`
+- `cave-tools bins` (or `pnpm run install:agents`) downloads pinned `rg` 15.1.0 and `fd` 10.3.0 when PATH misses them
 
 ## Relationship To Caveman Code
 
