@@ -364,10 +364,7 @@ function installClaudeMcp() {
     settings.mcpServers = {};
   }
 
-  settings.mcpServers['cave-tools'] = {
-    command: 'node',
-    args: [CAVE_TOOLS_CLI, 'mcp'],
-  };
+  settings.mcpServers['cave-tools'] = resolveCaveToolsMcpCommand();
 
   writeJson(settingsPath, settings);
   log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${settingsPath} mcpServers.cave-tools`);
@@ -430,9 +427,10 @@ function installCodex() {
   if (/\[\s*mcp_servers\.cave-tools\s*\]/.test(currentConfig)) {
     log(`unchanged: ${configPath} [mcp_servers.cave-tools] already present`);
   } else {
+    const codexMcp = resolveCaveToolsMcpCommand();
     const mcpBody = [
-      'command = "node"',
-      `args = ["${CAVE_TOOLS_CLI}", "mcp"]`,
+      `command = ${tomlString(codexMcp.command)}`,
+      `args = ${tomlArray(codexMcp.args)}`,
     ];
     const nextConfig = upsertTomlSection(currentConfig, 'mcp_servers.cave-tools', mcpBody);
     backupOnce(configPath);
@@ -621,10 +619,96 @@ function findExecutable(name) {
   return null;
 }
 
+// Launcher shims. Agents inherit whatever PATH their launcher had, so a bare
+// `node` can resolve to an ancient toolchain node (an SDK bundle, a system
+// package) that starts the MCP server but never answers `initialize`. Pinning
+// `process.execPath` instead hardcodes whichever node ran the installer, which
+// dies the moment that version is pruned. Write two POSIX shims and point every
+// registration at those, so node resolution happens at spawn time.
+const LAUNCHER_DIR = path.join(HOME, '.local', 'bin');
+const CAVE_NODE_LAUNCHER = path.join(LAUNCHER_DIR, 'cave-node');
+const CAVE_TOOLS_LAUNCHER = path.join(LAUNCHER_DIR, 'cave-tools');
+const LAUNCHER_MARKER = '# cave-tools launcher shim';
+
+const CAVE_NODE_SHIM = `#!/bin/sh
+${LAUNCHER_MARKER} — resolve a node >=20 regardless of PATH order or nvm churn.
+NVM_DIR="\${NVM_DIR:-$HOME/.nvm}"
+DEFAULT=$(cat "$NVM_DIR/alias/default" 2>/dev/null)
+case "$DEFAULT" in
+  v*) ;;
+  ?*) DEFAULT="v$DEFAULT" ;;
+esac
+
+for cand in \\
+  "$NVM_DIR/versions/node/$DEFAULT/bin/node" \\
+  $(ls -d "$NVM_DIR"/versions/node/v* 2>/dev/null | sort -V -r) \\
+  /usr/bin/node \\
+  /usr/local/bin/node
+do
+  [ -d "$cand" ] && cand="$cand/bin/node"
+  [ -x "$cand" ] || continue
+  major=$("$cand" -p 'process.versions.node.split(".")[0]' 2>/dev/null) || continue
+  [ "$major" -ge 20 ] 2>/dev/null || continue
+  exec "$cand" "$@"
+done
+
+echo "cave-node: no node >=20 found" >&2
+exit 1
+`;
+
+const CAVE_TOOLS_SHIM = `#!/bin/sh
+${LAUNCHER_MARKER} — single entry point for every agent and hook.
+exec "${CAVE_NODE_LAUNCHER}" "${CAVE_TOOLS_CLI}" "$@"
+`;
+
+let launchersReady = null;
+
+function ensureLaunchers() {
+  if (launchersReady !== null) return launchersReady;
+  if (process.platform === 'win32') {
+    launchersReady = false;
+    return false;
+  }
+  ensureDir(LAUNCHER_DIR);
+  for (const [target, body] of [[CAVE_NODE_LAUNCHER, CAVE_NODE_SHIM], [CAVE_TOOLS_LAUNCHER, CAVE_TOOLS_SHIM]]) {
+    const current = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : null;
+    if (current === body) continue;
+    if (current !== null && !current.includes(LAUNCHER_MARKER)) {
+      log(`skipped: ${target} exists and was not written by cave-tools — leaving it alone`);
+      continue;
+    }
+    const action = current === null ? 'create' : 'update';
+    if (DRY_RUN) {
+      trackPath(target, action);
+      log(`dry-run: would ${action} launcher ${target}`);
+      continue;
+    }
+    fs.writeFileSync(target, body, { mode: 0o755 });
+    fs.chmodSync(target, 0o755);
+    trackPath(target, action);
+    log(`${action === 'create' ? 'created' : 'updated'}: ${target}`);
+  }
+  launchersReady = true;
+  return true;
+}
+
+// Interpreter for hook scripts (`<node> <script.js>`).
+function nodeLauncher() {
+  return ensureLaunchers() ? CAVE_NODE_LAUNCHER : process.execPath;
+}
+
+// Binary for `cave-tools <subcommand>` hook commands.
+function caveToolsBin() {
+  if (ensureLaunchers()) return CAVE_TOOLS_LAUNCHER;
+  return findExecutable('cave-tools') || 'cave-tools';
+}
+
 function resolveCaveToolsMcpCommand() {
-  if (findExecutable('cave-tools')) return { command: 'cave-tools', args: ['mcp'] };
+  if (ensureLaunchers()) return { command: CAVE_TOOLS_LAUNCHER, args: ['mcp'] };
+  const onPath = findExecutable('cave-tools');
+  if (onPath) return { command: onPath, args: ['mcp'] };
   if (fs.existsSync(CAVE_TOOLS_CLI)) return { command: process.execPath, args: [CAVE_TOOLS_CLI, 'mcp'] };
-  throw new Error('cannot configure Grok MCP: neither `cave-tools` is on PATH nor dist/cli.js exists. Run `pnpm run build` or install cave-tools first.');
+  throw new Error('cannot configure MCP: no launcher, `cave-tools` is not on PATH, and dist/cli.js does not exist. Run `pnpm run build` or install cave-tools first.');
 }
 
 function tomlString(value) {
@@ -661,9 +745,10 @@ function installOpencodeMcp() {
   if (!config.mcp || typeof config.mcp !== 'object' || Array.isArray(config.mcp)) {
     config.mcp = {};
   }
+  const opencodeMcp = resolveCaveToolsMcpCommand();
   config.mcp['cave-tools'] = {
     type: 'local',
-    command: ['node', CAVE_TOOLS_CLI, 'mcp'],
+    command: [opencodeMcp.command, ...opencodeMcp.args],
     enabled: true,
   };
   if (!Array.isArray(config.plugin)) config.plugin = [];
@@ -744,10 +829,7 @@ function installZcodeMcp() {
     mcpConfig.mcpServers = {};
   }
 
-  mcpConfig.mcpServers['cave-tools'] = {
-    command: 'node',
-    args: [CAVE_TOOLS_CLI, 'mcp'],
-  };
+  mcpConfig.mcpServers['cave-tools'] = resolveCaveToolsMcpCommand();
 
   writeJson(genericMcpPath, mcpConfig);
   log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${genericMcpPath} mcpServers.cave-tools (ZCode import source)`);
@@ -819,7 +901,7 @@ function installGrok() {
       SessionStart: [{
         hooks: [{
           type: 'command',
-          command: `${tomlString(process.execPath)} ${tomlString(activatePath)}`,
+          command: `${tomlString(nodeLauncher())} ${tomlString(activatePath)}`,
           timeout: 5,
         }],
       }],
@@ -869,10 +951,7 @@ function installMcpServersTarget(label, configPath, detectPath) {
     config.mcpServers = {};
   }
 
-  config.mcpServers['cave-tools'] = {
-    command: 'node',
-    args: [CAVE_TOOLS_CLI, 'mcp'],
-  };
+  config.mcpServers['cave-tools'] = resolveCaveToolsMcpCommand();
 
   writeJson(configPath, config);
   log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${configPath} mcpServers.cave-tools (${label})`);
@@ -1252,7 +1331,7 @@ function installCaveToolsClaudeHooks() {
   //    is idempotent: re-running the installer won't duplicate entries.
   const settings = readJson(settingsPath);
 
-  const nodeBin = process.execPath;
+  const nodeBin = nodeLauncher();
   const activatePath = path.join(hooksDir, 'cave-tools-activate.js');
   const subagentPath = path.join(hooksDir, 'cave-tools-subagent.js');
   const trackerPath = path.join(hooksDir, 'cave-tools-mode-tracker.js');
@@ -1273,7 +1352,7 @@ function installCaveToolsClaudeHooks() {
   });
   upsertHookHandler(settings, 'SessionStart', null, {
     type: 'command',
-    command: 'cave-tools status --emit-statusline',
+    command: `${caveToolsBin()} status --emit-statusline`,
     timeout: 3,
     async: true,
   });
@@ -1324,7 +1403,7 @@ function installCaveToolsClaudeHooks() {
 
   upsertHookHandler(settings, 'PostToolUse', 'mcp__cave-tools__.*', {
     type: 'command',
-    command: 'cave-tools status --emit-statusline',
+    command: `${caveToolsBin()} status --emit-statusline`,
     timeout: 3,
     async: true,
   });

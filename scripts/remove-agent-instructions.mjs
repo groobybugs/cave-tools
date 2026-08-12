@@ -316,6 +316,18 @@ function removeFileIfExists(filePath) {
   log(`removed: ${filePath}`);
 }
 
+function removeLauncherShims() {
+  const marker = '# cave-tools launcher shim';
+  for (const name of ['cave-tools', 'cave-node']) {
+    const target = path.join(HOME, '.local', 'bin', name);
+    if (fs.existsSync(target) && !fs.readFileSync(target, 'utf8').includes(marker)) {
+      log(`kept: ${target} (not written by cave-tools)`);
+      continue;
+    }
+    removeFileIfExists(target);
+  }
+}
+
 function removeGrokGeneratedSkill() {
   const skillPath = path.join(grokConfigDir(), 'skills', 'cave-tools', 'SKILL.md');
   if (!fs.existsSync(skillPath)) {
@@ -797,6 +809,9 @@ try {
   }
   printSelectedTargets(selected);
   removeSelectedTargets(selected);
+  // The launcher shims are shared by every agent — only drop them once nothing
+  // is left that could spawn them.
+  if (selected.length === targets.length) removeLauncherShims();
   printTouchedPaths();
   log(`${DRY_RUN ? 'dry-run done' : 'done'}: cave-tools MCP, hooks, skill, and instruction blocks removed`);
 } catch (error) {
