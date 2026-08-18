@@ -545,12 +545,18 @@ function removeKnownFiles() {
     path.join(claudeDir, 'hooks', 'cave-tools-config.js'),
     path.join(claudeDir, 'hooks', 'cave-tools-activate.js'),
     path.join(claudeDir, 'hooks', 'cave-tools-mode-tracker.js'),
+    path.join(claudeDir, 'hooks', 'cave-tools-subagent.js'),
+    path.join(claudeDir, 'hooks', 'cave-tools-recover.js'),
     path.join(claudeDir, 'hooks', 'cave-tools-statusline.sh'),
     path.join(claudeDir, 'hooks', 'cave-tools-statusline.ps1'),
     path.join(claudeDir, 'hooks', 'statusline-wrapper.sh'),
     path.join(claudeDir, 'hooks', 'cave-tools-redirect.sh'),
     path.join(claudeDir, 'commands', 'cave-tools.md'),
     path.join(claudeDir, 'skills', 'cave-tools', 'SKILL.md'),
+    path.join(claudeDir, '.cave-tools-active'),
+    // Marker telling the skill-frontmatter redirect that settings.json already
+    // wires the same handler — must go, or a leftover install stays inert.
+    path.join(claudeDir, '.cave-tools-wired'),
   ]) {
     if (!fs.existsSync(filePath)) continue;
     if (DRY_RUN) {

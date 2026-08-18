@@ -108,10 +108,10 @@ function buildReminder(mode) {
     'Medium+ edits: cave__read line_numbers=true → cave__edit start_line/end_line/content ' +
     '(+ expected_hash or expected_range_checksum); delete:true / insert_before for move.';
   if (mode === 'strict') {
-    return base + ' STRICT: built-in Edit/Write need prior cave__read; range/move need hash or range_checksum.';
+    return base + ' STRICT: built-in Read/Grep/Glob/WebFetch/WebSearch blocked; Bash blocked too (background jobs and stream monitors still allowed); Edit/Write need prior cave__read; range/move need hash or range_checksum.';
   }
   if (mode === 'enforce') {
-    return base + ' ENFORCE: built-in Read/Grep/Glob blocked by PreToolUse.';
+    return base + ' ENFORCE: built-in Read/Grep/Glob/WebFetch/WebSearch blocked by PreToolUse.';
   }
   return base;
 }

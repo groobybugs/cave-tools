@@ -1,20 +1,18 @@
 {
-  "description": "cave-tools auto-init: SessionStart skill injection, SubagentStart injection, per-turn reinforcement, PreToolUse redirect, statusline refresh.",
+  "description": "cave-tools auto-init: SessionStart skill injection, SubagentStart injection, per-turn reinforcement, PreToolUse redirect, MCP failure/denial recovery, statusline refresh.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-activate.js"],
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-activate.js\"",
             "timeout": 5,
             "statusMessage": "Loading cave-tools rules..."
           },
           {
             "type": "command",
-            "command": "cave-tools",
-            "args": ["status", "--emit-statusline"],
+            "command": "cave-tools status --emit-statusline",
             "timeout": 3,
             "async": true
           }
@@ -26,8 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-subagent.js"],
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-subagent.js\"",
             "timeout": 5
           }
         ]
@@ -38,8 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-mode-tracker.js"],
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-mode-tracker.js\"",
             "timeout": 5
           }
         ]
@@ -47,12 +43,11 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Read|Grep|Glob|Edit|Write",
+        "matcher": "Read|Grep|Glob|Edit|Write|WebFetch|WebSearch|Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "bash",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-redirect.sh"],
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-redirect.sh\"",
             "timeout": 3
           }
         ]
@@ -64,10 +59,33 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cave-tools",
-            "args": ["status", "--emit-statusline"],
+            "command": "cave-tools status --emit-statusline",
             "timeout": 3,
             "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "mcp__cave-tools__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-recover.js\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "mcp__cave-tools__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-recover.js\"",
+            "timeout": 5
           }
         ]
       }

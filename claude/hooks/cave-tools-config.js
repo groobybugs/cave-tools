@@ -222,7 +222,7 @@ function buildRuleset(mode) {
     '- `cave__write` to create/overwrite; `cave__edit` for str-replace **or** line-range ' +
     '(`start_line`/`end_line`/`content` after `line_numbers=true`; optional `expected_hash` / ' +
     '`expected_range_checksum`; `delete` / `insert_before`); `cave__apply_patch` for multi-file.\n' +
-    '- `cave__websearch` / `cave__webfetch` for web; results redacted/archived/budget-compressed.\n' +
+    '- `cave__websearch` / `cave__webfetch` instead of WebSearch / WebFetch; results redacted/archived/budget-compressed.\n' +
     '- After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s).\n' +
     '- Use `cave__compress` for large pasted or tool-produced text.\n' +
     '- Use `cave__status` to inspect savings, hit rate, budgets.\n\n' +

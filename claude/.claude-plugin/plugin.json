@@ -1,6 +1,6 @@
 {
   "name": "cave-tools",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Token-saving file/shell tool layer for Claude Code. Auto-injects rules every session, reinforces them per turn, and shows live savings in the statusline.",
   "author": {
     "name": "groobybugs",
@@ -15,5 +15,6 @@
     "token-savings",
     "cave-tools",
     "compression"
-  ]
+  ],
+  "hooks": "./hooks/hooks.json"
 }

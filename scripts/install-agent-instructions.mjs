@@ -888,6 +888,7 @@ function installGrok() {
   upsertFencedBlock(agentsMd, CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
   upsertDisciplineBlock(agentsMd);
   copyFile(path.join(CLAUDE_BUNDLE_DIR, 'skills/cave-tools/SKILL.md'), path.join(skillsDir, 'SKILL.md'), 0o644);
+  rewriteSkillHookPath(path.join(skillsDir, 'SKILL.md'), hooksDir);
 
   // Copy only hooks that are safe in Grok's model: activate writes the shared
   // mode flag as a side effect, redirect enforces built-in tool replacement.
@@ -909,7 +910,7 @@ function installGrok() {
         }],
       }],
       PreToolUse: [{
-        matcher: 'Read|Grep|Glob|Edit|Write|read_file|grep|list_dir|search_replace',
+        matcher: 'Read|Grep|Glob|Edit|Write|WebFetch|WebSearch|Bash|read_file|grep|list_dir|search_replace|web_fetch|web_search|run_terminal_cmd',
         hooks: [{
           type: 'command',
           command: `bash ${tomlString(redirectPath)}`,
@@ -1313,6 +1314,30 @@ function dedupeCaveToolsHooks(settings) {
   return removed;
 }
 
+// The shipped SKILL.md registers its fallback PreToolUse hook via
+// ${CLAUDE_PLUGIN_ROOT}, which only resolves for plugin installs. Point it at
+// the hook directory this install populated instead.
+function rewriteSkillHookPath(skillPath, hooksDir) {
+  if (DRY_RUN || !fs.existsSync(skillPath)) return;
+  const original = fs.readFileSync(skillPath, 'utf8');
+  const rewritten = original.split('${CLAUDE_PLUGIN_ROOT}/hooks/').join(`${hooksDir}/`);
+  if (rewritten === original) return;
+  fs.writeFileSync(skillPath, rewritten);
+  log(`patched: ${skillPath} skill hook path → ${hooksDir}`);
+}
+
+// Built-ins cave-tools replaces. Letters plus `|` only, so Claude Code keeps
+// this on the exact-match path rather than evaluating it as a regex.
+const REDIRECT_MATCHER = 'Read|Grep|Glob|Edit|Write|WebFetch|WebSearch|Bash';
+
+// User-level Claude install: copy hook scripts into ~/.claude and upsert
+// settings.json. Marketplace/plugin installs skip this path — they load
+// claude/hooks/hooks.json via claude/.claude-plugin/plugin.json
+// (`"hooks": "./hooks/hooks.json"`), whose event map MUST stay wrapped in a
+// top-level `hooks` key or the plugin registers nothing. Keep both in sync.
+// Claude Code does support an `args` array (exec form), but this path uses a
+// single `command` string so every Node hook runs through the `cave-node`
+// launcher shim, which resolves a node >= 20 rather than whatever is on PATH.
 function installCaveToolsClaudeHooks() {
   const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
   const hooksDir = path.join(claudeDir, 'hooks');
@@ -1330,6 +1355,7 @@ function installCaveToolsClaudeHooks() {
     ['hooks/cave-tools-activate.js', path.join(hooksDir, 'cave-tools-activate.js'), 0o755],
     ['hooks/cave-tools-subagent.js', path.join(hooksDir, 'cave-tools-subagent.js'), 0o755],
     ['hooks/cave-tools-mode-tracker.js', path.join(hooksDir, 'cave-tools-mode-tracker.js'), 0o755],
+    ['hooks/cave-tools-recover.js', path.join(hooksDir, 'cave-tools-recover.js'), 0o755],
     ['hooks/cave-tools-statusline.sh', path.join(hooksDir, 'cave-tools-statusline.sh'), 0o755],
     ['hooks/cave-tools-statusline.ps1', path.join(hooksDir, 'cave-tools-statusline.ps1'), 0o644],
     ['hooks/statusline-wrapper.sh', path.join(hooksDir, 'statusline-wrapper.sh'), 0o755],
@@ -1341,6 +1367,8 @@ function installCaveToolsClaudeHooks() {
     copyFile(path.join(CLAUDE_BUNDLE_DIR, rel), dest, mode);
   }
 
+  rewriteSkillHookPath(path.join(skillsDir, 'SKILL.md'), hooksDir);
+
   // 2. Patch settings.json — add lifecycle hooks. Each upsertHookHandler call
   //    is idempotent: re-running the installer won't duplicate entries.
   const settings = readJson(settingsPath);
@@ -1350,6 +1378,7 @@ function installCaveToolsClaudeHooks() {
   const subagentPath = path.join(hooksDir, 'cave-tools-subagent.js');
   const trackerPath = path.join(hooksDir, 'cave-tools-mode-tracker.js');
   const redirectPath = path.join(hooksDir, 'cave-tools-redirect.sh');
+  const recoverPath = path.join(hooksDir, 'cave-tools-recover.js');
 
   upsertHookHandler(settings, 'SessionStart', null, {
     type: 'command',
@@ -1379,9 +1408,9 @@ function installCaveToolsClaudeHooks() {
   // Replace any pre-existing Read|Grep|Glob redirect group with the new
   // mode-aware path. Match by matcher string AND by command containing
   // 'cave-tools-redirect.sh' so we don't trample unrelated PreToolUse hooks.
-  // While we're here, widen the matcher to include Edit|Write so the strict
-  // tier can also intercept those — the script is mode-aware and exits 0 in
-  // lower modes, so widening is safe.
+  // While we're here, widen the matcher to REDIRECT_MATCHER so the strict tier
+  // also intercepts Edit|Write|Bash and every mode intercepts the web tools —
+  // the script is mode-aware and exits 0 in lower modes, so widening is safe.
   let widenedExisting = false;
   if (Array.isArray(settings.hooks?.PreToolUse)) {
     for (const group of settings.hooks.PreToolUse) {
@@ -1395,9 +1424,9 @@ function installCaveToolsClaudeHooks() {
           h.command = redirectPath;
         }
       }
-      if (group.matcher !== 'Read|Grep|Glob|Edit|Write') {
-        group.matcher = 'Read|Grep|Glob|Edit|Write';
-        log(`patched: PreToolUse matcher widened → Read|Grep|Glob|Edit|Write`);
+      if (group.matcher !== REDIRECT_MATCHER) {
+        group.matcher = REDIRECT_MATCHER;
+        log(`patched: PreToolUse matcher widened → ${REDIRECT_MATCHER}`);
       } else {
         log(`unchanged: PreToolUse redirect already wired`);
       }
@@ -1408,7 +1437,7 @@ function installCaveToolsClaudeHooks() {
   // Install the redirect group only if no existing one was widened — prevents
   // duplicate handlers that would double-fire on every Read/Grep/Glob call.
   if (!widenedExisting) {
-    upsertHookHandler(settings, 'PreToolUse', 'Read|Grep|Glob|Edit|Write', {
+    upsertHookHandler(settings, 'PreToolUse', REDIRECT_MATCHER, {
       type: 'command',
       command: redirectPath,
       timeout: 3,
@@ -1421,6 +1450,17 @@ function installCaveToolsClaudeHooks() {
     timeout: 3,
     async: true,
   });
+
+  // Keep a failed or classifier-denied cave-tools call from pushing the model
+  // back onto the built-ins: PostToolUseFailure injects the cave-tools retry,
+  // PermissionDenied returns retry:true.
+  for (const event of ['PostToolUseFailure', 'PermissionDenied']) {
+    upsertHookHandler(settings, event, 'mcp__cave-tools__.*', {
+      type: 'command',
+      command: `"${nodeBin}" "${recoverPath}"`,
+      timeout: 5,
+    });
+  }
 
   const deduped = dedupeCaveToolsHooks(settings);
   if (deduped > 0) {
@@ -1446,6 +1486,19 @@ function installCaveToolsClaudeHooks() {
 
   writeJson(settingsPath, settings);
   log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${settingsPath} hooks + statusLine for cave-tools`);
+
+  // The skill frontmatter registers the same redirect with --from-skill as a
+  // fallback for hosts with no settings.json wiring. Claude Code runs a skill's
+  // copy of a handler separately from the settings copy, so this marker is what
+  // stops it double-firing here.
+  const wiredMarker = path.join(claudeDir, '.cave-tools-wired');
+  if (DRY_RUN) {
+    trackPath(wiredMarker, 'write');
+    log(`dry-run: would write ${wiredMarker}`);
+  } else {
+    fs.writeFileSync(wiredMarker, 'settings\n');
+    trackPath(wiredMarker, 'write');
+  }
 }
 
 try {

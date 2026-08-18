@@ -181,27 +181,42 @@ Instruction blocks are advisory — agents may still reach for the built-in `Rea
 
 Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting with status `2` and emitting a message to stderr. The installer wires a single mode-aware redirect group; this section documents the equivalent manual setup.
 
-1. Register the hooks in `~/.claude/settings.json`:
+1. Register the hooks in `~/.claude/settings.json` (`pnpm run install:agents` does this). Plugin installs load the same events from `claude/hooks/hooks.json` via `claude/.claude-plugin/plugin.json` (`"hooks": "./hooks/hooks.json"`); that file's event map must stay wrapped in a top-level `hooks` key, or the plugin registers nothing. Claude Code does support an `args` array (exec form, recommended for `${CLAUDE_PLUGIN_ROOT}` paths), but the installer emits a single `command` string so every Node hook runs through the `cave-node` launcher shim, which resolves a node >= 20 instead of whatever is first on `PATH`.
 
    ```json
    {
      "hooks": {
+       "SessionStart": [
+         {
+           "hooks": [
+             { "type": "command", "command": "node \"/home/you/.claude/hooks/cave-tools-activate.js\"", "timeout": 5 },
+             { "type": "command", "command": "cave-tools status --emit-statusline", "timeout": 3, "async": true }
+           ]
+         }
+       ],
+       "SubagentStart": [
+         {
+           "hooks": [
+             { "type": "command", "command": "node \"/home/you/.claude/hooks/cave-tools-subagent.js\"", "timeout": 5 }
+           ]
+         }
+       ],
+       "UserPromptSubmit": [
+         {
+           "hooks": [
+             { "type": "command", "command": "node \"/home/you/.claude/hooks/cave-tools-mode-tracker.js\"", "timeout": 5 }
+           ]
+         }
+       ],
        "PreToolUse": [
          {
-           "matcher": "Read|Grep|Glob|Edit|Write",
+           "matcher": "Read|Grep|Glob|Edit|Write|WebFetch|WebSearch|Bash",
            "hooks": [
              {
                "type": "command",
                "command": "/home/you/.claude/hooks/cave-tools-redirect.sh",
                "timeout": 3
              }
-           ]
-         }
-       ],
-       "SessionStart": [
-         {
-           "hooks": [
-             { "type": "command", "command": "cave-tools status --emit-statusline", "timeout": 3, "async": true }
            ]
          }
        ],
@@ -212,19 +227,48 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
              { "type": "command", "command": "cave-tools status --emit-statusline", "timeout": 3, "async": true }
            ]
          }
+       ],
+       "PostToolUseFailure": [
+         {
+           "matcher": "mcp__cave-tools__.*",
+           "hooks": [
+             { "type": "command", "command": "node \"/home/you/.claude/hooks/cave-tools-recover.js\"", "timeout": 5 }
+           ]
+         }
+       ],
+       "PermissionDenied": [
+         {
+           "matcher": "mcp__cave-tools__.*",
+           "hooks": [
+             { "type": "command", "command": "node \"/home/you/.claude/hooks/cave-tools-recover.js\"", "timeout": 5 }
+           ]
+         }
        ]
      }
    }
    ```
 
-   The single `PreToolUse` matcher `Read|Grep|Glob|Edit|Write` covers all built-ins Cave Tools replaces. (`cave__bash` already calls `rtk` internally, so there is no separate Bash matcher.)
+   The single `PreToolUse` matcher `Read|Grep|Glob|Edit|Write|WebFetch|WebSearch|Bash` covers every built-in Cave Tools replaces. It is letters plus `|` only, which keeps Claude Code on its exact-match path rather than evaluating it as a regex. `Bash` is only blocked in `strict` mode — at `enforce` the built-in stays usable because `rtk hook claude` already rewrites it — and even in `strict` these still pass through:
 
-2. Copy the mode-aware redirect script into place and make it executable:
+   - `run_in_background: true` (use `cave__bash_start` for long jobs instead)
+   - stream monitors: `tail -f`, `watch `, `journalctl -f`, `--watch`
+   - `CAVE_TOOLS_ALLOW_BASH=1` in the environment
+
+   SessionStart / SubagentStart / UserPromptSubmit emit `hookSpecificOutput.additionalContext` JSON so Claude injects the ruleset. `PostToolUseFailure` and `PermissionDenied` run `cave-tools-recover.js`, which explains the cave-tools retry after a failed `cave__*` call and returns `retry: true` after a classifier denial — otherwise the model tends to fall back to the built-ins it was just blocked from.
+
+   The `/cave-tools` skill also declares the same `PreToolUse` group in its frontmatter with `--from-skill`, so enforcement still applies on hosts where nothing wired `settings.json` (cloud sessions, fresh machines). That copy exits 0 as soon as `~/.claude/.cave-tools-wired` exists, so it never double-fires next to the settings copy.
+
+2. Copy the hook scripts into place and make them executable:
 
    ```bash
    cp claude/hooks/cave-tools-redirect.sh ~/.claude/hooks/cave-tools-redirect.sh
-   chmod +x ~/.claude/hooks/cave-tools-redirect.sh
+   cp claude/hooks/cave-tools-recover.js ~/.claude/hooks/cave-tools-recover.js
+   chmod +x ~/.claude/hooks/cave-tools-redirect.sh ~/.claude/hooks/cave-tools-recover.js
+   touch ~/.claude/.cave-tools-wired
    ```
+
+   The `.cave-tools-wired` marker is what keeps the skill-frontmatter copy of the redirect from
+   double-firing; `pnpm run install:agents` writes it for you.
 
    The script reads `$CLAUDE_CONFIG_DIR/.cave-tools-active` (defaulting to `~/.claude/.cave-tools-active`) to pick a mode:
 
@@ -232,12 +276,12 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
    | ---------- | ---------------------------------------------------------------------------------------- |
    | `off`      | exits 0, no blocking (skill dormant)                                                    |
    | `hint`     | exits 0, no blocking (rules injected only; model self-corrects)                         |
-   | `enforce`  | blocks `Read`/`Grep`/`Glob` and points the agent at the `cave__*` equivalent (default)   |
-   | `strict`   | above + blocks `Edit`/`Write` on a path that was not previously read via `cave__read`    |
+   | `enforce`  | blocks `Read`/`Grep`/`Glob`/`WebFetch`/`WebSearch` and points the agent at the `cave__*` equivalent (default) |
+   | `strict`   | above + blocks `Bash` (except background jobs and stream monitors) + `Edit`/`Write` on a path that was not previously read via `cave__read` |
 
    When the flag file is missing the script defaults to `enforce`, preserving the original blocker behavior. `Read` calls for image/PDF/SVG extensions pass through because `cave__read` returns those as MCP `image`/`resource` blocks and some clients handle the built-in path more directly.
 
-3. Restart Claude Code. Built-in `Read`, `Grep`, `Glob`, and (in `strict` mode) `Edit`/`Write` now exit with a helpful error pointing the agent at the `cave__*` equivalent. The harness retries with the suggested tool automatically.
+3. Restart Claude Code. Built-in `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, and (in `strict` mode) `Bash` plus `Edit`/`Write` now exit with a helpful error pointing the agent at the `cave__*` equivalent. The harness retries with the suggested tool automatically.
 
 ### Kimi Code CLI (`~/.kimi-code/mcp.json` + `~/.kimi-code/config.toml`)
 
@@ -261,7 +305,7 @@ Kimi Code CLI supports `[[hooks]]` in `config.toml` with the same blocking contr
    ```toml
    [[hooks]]
    event = "PreToolUse"
-   matcher = "Read|Grep|Glob|Edit|Write|ReadFile|WriteFile|read_file|write_file|search_replace|MultiEdit|list_dir|ListDir"
+   matcher = "Read|Grep|Glob|Edit|Write|WebFetch|WebSearch|Bash|ReadFile|WriteFile|read_file|write_file|search_replace|MultiEdit|list_dir|ListDir|web_fetch|web_search|run_terminal_cmd"
    command = "/home/you/.claude/hooks/cave-tools-redirect.sh"
    timeout = 3
    ```
@@ -286,7 +330,7 @@ The installer writes:
 - `~/.grok/skills/cave-tools/SKILL.md`
 - `~/.grok/hooks/cave-tools.json` plus the small hook scripts it references
 
-Grok ignores `SessionStart` stdout, so always-on guidance lives in `AGENTS.md` and the skill. The Grok hook only uses `SessionStart` for the side effect of writing the cave-tools mode flag, then uses `PreToolUse` to deny built-in `read_file`, `grep`, and `list_dir` with a JSON `deny` reason that points the model to the matching `cave__*` tool. In `strict` mode it also blocks built-in edit/write aliases until the target has been read via `cave__read`.
+Grok ignores `SessionStart` stdout, so always-on guidance lives in `AGENTS.md` and the skill. The Grok hook only uses `SessionStart` for the side effect of writing the cave-tools mode flag, then uses `PreToolUse` to deny built-in `read_file`, `grep`, `list_dir`, `web_fetch`, and `web_search` with a JSON `deny` reason that points the model to the matching `cave__*` tool. In `strict` mode it also blocks `run_terminal_cmd` (background jobs and stream monitors excepted) and the built-in edit/write aliases until the target has been read via `cave__read`.
 
 Verify after install:
 

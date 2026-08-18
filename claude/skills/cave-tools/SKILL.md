@@ -5,6 +5,17 @@ description: >
   cave__ls / cave__write / cave__edit / cave__apply_patch / cave__websearch / cave__webfetch / cave__compress / cave__status). Auto-activates every session.
   Use when the user says "use cave-tools", invokes /cave-tools, asks to save tokens,
   or whenever file/shell operations are needed.
+hooks:
+  # Fallback enforcement: registering the redirect from skill frontmatter keeps
+  # PreToolUse blocking alive for the rest of the session even where neither
+  # settings.json nor the plugin wired it (cloud sessions, fresh machines).
+  # --from-skill makes it exit 0 when the normal wiring is already present.
+  PreToolUse:
+    - matcher: Read|Grep|Glob|Edit|Write|WebFetch|WebSearch|Bash
+      hooks:
+        - type: command
+          command: bash "${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-redirect.sh" --from-skill
+          timeout: 3
 ---
 
 Prefer cave-tools over built-in Read/Grep/Glob/Bash and use Cave Tools for compact web search when available. They are optimized drop-in replacements that return the same results for fewer tokens (RTK rewriting + structured JSON/XML extraction + per-tool line budgets + read dedup cache).
@@ -39,8 +50,8 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 |-------|--------------|
 | **off** | Skill dormant. No SessionStart injection, no per-turn reinforcement, no PreToolUse blocking |
 | **hint** | Rules injected at SessionStart + reinforced every turn. No blocking — Claude self-corrects |
-| **enforce** | Above + PreToolUse blocks Read/Grep/Glob with error pointing to cave-tools equivalent. Default |
-| **strict** | Above + blocks built-in Edit/Write when target was not first read via cave__read. Tightest |
+| **enforce** | Above + PreToolUse blocks Read/Grep/Glob/WebFetch/WebSearch with error pointing to cave-tools equivalent. Default |
+| **strict** | Above + blocks built-in Bash (background jobs and stream monitors still pass) and blocks Edit/Write when target was not first read via cave__read. Tightest |
 
 ## Edit Safety
 

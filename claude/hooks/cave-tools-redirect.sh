@@ -1,30 +1,49 @@
 #!/usr/bin/env bash
 # cave-tools — PreToolUse redirect hook.
-# Blocks built-in Read/Grep/Glob when cave-tools mode is `enforce` or `strict`,
-# pointing the model at the cave-tools equivalent.
+# Blocks built-in Read/Grep/Glob/WebFetch/WebSearch when cave-tools mode is
+# `enforce` or `strict`, pointing the model at the cave-tools equivalent.
 #
 # Works for Claude Code and Grok Build CLI (dual harness):
 #   - Claude stdin:  tool_name / tool_input.file_path
 #   - Grok stdin:    toolName  / toolInput.file_path (or filePath / path / targetFile)
 #   - Tool aliases:  read_file≡Read, grep≡Grep, list_dir|Glob≡Glob,
-#                    search_replace≡Edit|Write
+#                    search_replace≡Edit|Write, web_fetch≡WebFetch,
+#                    web_search≡WebSearch, run_terminal_cmd≡Bash
 #   - Deny: JSON decision on stdout for Grok; stderr + exit 2 for Claude
 #
 # Honors the flag file at $CLAUDE_CONFIG_DIR/.cave-tools-active:
 #   off    → exits 0, no blocking (skill dormant)
 #   hint   → exits 0, no blocking (rules injected only; model self-corrects)
-#   enforce → blocks Read/Grep/Glob (the original behavior)
-#   strict → above + blocks Edit/Write when no prior cave__read of the target
+#   enforce → blocks Read/Grep/Glob/WebFetch/WebSearch
+#   strict → above + blocks Edit/Write when no prior cave__read of the target,
+#            + blocks Bash (stream monitors and background jobs still allowed)
 #
 # Wire via PreToolUse matcher including both Claude and Grok names, e.g.:
-#   Read|Grep|Glob|Edit|Write|read_file|grep|list_dir|search_replace
+#   Read|Grep|Glob|Edit|Write|WebFetch|WebSearch|Bash
+#
+# Pass --from-skill for the copy registered from skill frontmatter: it exits 0
+# when $CLAUDE_CONFIG_DIR/.cave-tools-wired exists, so it never double-fires
+# alongside the settings.json / plugin copy of the same handler.
 
 set -u
+
+FROM_SKILL=0
+for arg in "$@"; do
+  case "$arg" in
+    --from-skill) FROM_SKILL=1 ;;
+  esac
+done
+
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+if [ "$FROM_SKILL" = "1" ] && [ -f "$CLAUDE_DIR/.cave-tools-wired" ]; then
+  exit 0
+fi
 
 INPUT=$(cat)
 
 # Refuse symlinks on the flag, cap read, validate against whitelist.
-FLAG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.cave-tools-active"
+FLAG="$CLAUDE_DIR/.cave-tools-active"
 MODE=""
 if [ -f "$FLAG" ] && [ ! -L "$FLAG" ]; then
   RAW=$(head -c 32 "$FLAG" 2>/dev/null | tr -d '\n\r' | tr '[:upper:]' '[:lower:]')
@@ -77,6 +96,9 @@ case "$TOOL" in
   grep|Grep) TOOL=Grep ;;
   list_dir|ListDir|Glob|glob) TOOL=Glob ;;
   search_replace|MultiEdit|Edit|Write|write_file|WriteFile) TOOL=Edit ;;
+  web_fetch|webfetch|WebFetch|fetch_url) TOOL=WebFetch ;;
+  web_search|websearch|WebSearch) TOOL=WebSearch ;;
+  bash|Bash|shell|run_terminal_cmd) TOOL=Bash ;;
 esac
 
 deny() {
@@ -105,6 +127,32 @@ case "$TOOL" in
   Glob)
     deny "Use cave__find or cave__ls instead of Glob/list_dir — optimized drop-in (ripgrep-backed search)."
     ;;
+  WebFetch)
+    deny "Use cave__webfetch instead of WebFetch — same page as markdown/text/html, redacted, archived if large, budget-compressed."
+    ;;
+  WebSearch)
+    deny "Use cave__websearch instead of WebSearch — same results, redacted, archived if large, budget-compressed."
+    ;;
+  Bash)
+    # strict tier only — cave__bash already prepends rtk, so at enforce the
+    # separate `rtk hook claude` PreToolUse handler covers built-in Bash.
+    [ "$MODE" != "strict" ] && exit 0
+    # Explicit opt-out for the session/command.
+    [ "${CAVE_TOOLS_ALLOW_BASH:-0}" = "1" ] && exit 0
+    # Background jobs and stream monitors must keep the built-in: cave__bash
+    # captures output to completion and would burn the turn.
+    BG=$(printf '%s' "$INPUT" | jq -r '
+      .tool_input.run_in_background // .toolInput.run_in_background // false
+    ' 2>/dev/null)
+    [ "$BG" = "true" ] && exit 0
+    CMD=$(printf '%s' "$INPUT" | jq -r '
+      .tool_input.command // .toolInput.command // empty
+    ' 2>/dev/null)
+    case "$CMD" in
+      *"tail -f"*|*"watch "*|*"journalctl -f"*|*--watch*) exit 0 ;;
+    esac
+    deny "STRICT: use cave__bash instead of Bash — RTK rewriting + structured extraction + line budgets. For long jobs use cave__bash_start. Stream monitors (tail -f, watch, --watch, run_in_background) are still allowed here."
+    ;;
   Edit)
     # strict tier only — block if the file path was not previously read via
     # cave__read. The read registry is a flat text file maintained by the
@@ -112,7 +160,7 @@ case "$TOOL" in
     # across sessions. Fast exact match via grep -qxF.
     [ "$MODE" != "strict" ] && exit 0
     [ -z "$FPATH" ] && exit 0
-    REGISTRY="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cave-tools/read-registry.txt"
+    REGISTRY="$CLAUDE_DIR/cave-tools/read-registry.txt"
     [ -L "$REGISTRY" ] && exit 0
     if [ -f "$REGISTRY" ] && grep -qxF "$FPATH" "$REGISTRY" 2>/dev/null; then
       exit 0  # File was previously read via cave__read — safe to edit
