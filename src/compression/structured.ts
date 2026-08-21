@@ -109,9 +109,20 @@ function compressValue(
     const kept = value
       .slice(0, MAX_ARRAY_ELEMENTS)
       .map((item) => compressValue(item, relevantKeys, depth + 1));
+    // Error-bearing items beyond the cap carry the answer; never drop them
+    // under a bare count stub. Bounded so pathological payloads stay capped.
+    const ERROR_KEEP_CAP = 5;
+    let errorKeeps = 0;
+    for (const item of value.slice(MAX_ARRAY_ELEMENTS)) {
+      if (errorKeeps >= ERROR_KEEP_CAP) break;
+      if (!ERROR_VALUE_RE.test(JSON.stringify(item) ?? "")) continue;
+      kept.push(compressValue(item, relevantKeys, depth + 1));
+      errorKeeps++;
+    }
+    const dropped = value.length - MAX_ARRAY_ELEMENTS - errorKeeps;
     return [
       ...kept,
-      `... ${value.length - MAX_ARRAY_ELEMENTS} more items (${value.length} total)`,
+      `... ${dropped} more items (${value.length} total)${errorKeeps > 0 ? `, kept ${errorKeeps} error-bearing` : ""}`,
     ];
   }
 
@@ -211,55 +222,324 @@ function compressJson(text: string, commandHint?: string): string | null {
 
 // ----- XML compression ------------------------------------------------------
 
-// Compress XML text by stripping namespace declarations and collapsing
-// repeated sibling elements (e.g. long <item> lists).
-function compressXml(text: string): string | null {
-  const lines = text.split("\n");
-  const originalCount = lines.length;
+// Shared error vocabulary: an element or array item carrying an error state is
+// never elided, however deep in a repetitive run it sits.
+const ERROR_VALUE_RE =
+  /\b(error|errors|exception|failed|failure|critical|fatal|crash|panic|abort|timeout|denied|rejected)\b/i;
+const ERROR_KEY_RE =
+  /^(error|errors|message|msg|stack|stacktrace|stack_trace|trace|traceback|exception|reason|detail|details|warning|warnings)$/i;
 
-  const result: string[] = [];
-  let repetitionCount = 0;
-  let lastTagName = "";
-  let skipping = false;
+const XML_ATTR_RE = /\s([A-Za-z_][\w.:-]*)="([^"]*)"/g;
+const XML_MARKER_RE = /^\s*<!-- \d+ <[^>]+> elements elided/;
+const XML_XMLNS_RE = /\s+xmlns(?::\w+)?="[^"]*"/g;
 
-  for (const line of lines) {
-    const cleaned = line.replace(/\s+xmlns(?::\w+)?="[^"]*"/g, "");
+interface XmlElem {
+  name: string;
+  indent: string;
+  lo: number; // inclusive start line
+  hi: number; // inclusive end line
+}
 
-    const tagMatch = cleaned.match(/^\s*<(\w+)[\s>]/);
-    if (tagMatch) {
-      const tagName = tagMatch[1]!;
-      if (tagName === lastTagName) {
-        repetitionCount++;
-        if (repetitionCount > 3) {
-          if (!skipping) {
-            result.push(`    ... (repeated <${tagName}> elements)`);
-            skipping = true;
-          }
-          continue;
+// Index of the '>' closing the tag token that starts at index 0 of `s` (which
+// must begin with '<'), honouring quoted attribute values. -1 when unterminated.
+function findTagEnd(s: string): number {
+  let inQuote = false;
+  for (let i = 1; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '"') inQuote = !inQuote;
+    else if (ch === '>' && !inQuote) return i;
+  }
+  return -1;
+}
+
+// Net opened-minus-closed tag count on one line, skipping comments, PIs,
+// doctypes, CDATA and self-closing tags. null = an unterminated construct —
+// the caller fails the whole transform closed rather than guess across lines.
+function tagDepthDelta(line: string): number | null {
+  let s = line;
+  let delta = 0;
+  for (;;) {
+    const c = s.indexOf("<");
+    if (c < 0) return delta;
+    s = s.slice(c);
+    if (s.startsWith("<!--")) {
+      const e = s.indexOf("-->");
+      if (e < 0) return null;
+      s = s.slice(e + 3);
+      continue;
+    }
+    if (s.startsWith("<![CDATA[")) {
+      const e = s.indexOf("]]>");
+      if (e < 0) return null;
+      s = s.slice(e + 3);
+      continue;
+    }
+    if (s.startsWith("<?")) {
+      const e = s.indexOf("?>");
+      if (e < 0) return null;
+      s = s.slice(e + 2);
+      continue;
+    }
+    if (s.startsWith("<!")) {
+      const e = s.indexOf(">");
+      if (e < 0) return null;
+      s = s.slice(e + 1);
+      continue;
+    }
+    const tokEnd = findTagEnd(s);
+    if (tokEnd < 0) return null; // tag split across lines: refuse to guess
+    const tok = s.slice(0, tokEnd + 1);
+    if (tok.startsWith("</")) delta--;
+    else if (!tok.endsWith("/>")) delta++;
+    s = s.slice(tokEnd + 1);
+  }
+}
+
+// Classify the line at index i. Returns null for non-element lines (blank,
+// text, comments, PIs, doctypes, our own marker, close-only lines). Accepts
+// every well-formed opening tag — tag-only lines, self-closing tags,
+// single-line elements with content (`<item>n1</item>`), and multi-line
+// starts — resolving the extent by balanced-tag counting. Throws
+// UnparseableXml on an element whose extent cannot be fully accounted for.
+class UnparseableXml extends Error {}
+
+function scanElem(lines: string[], i: number, hi: number): XmlElem | null {
+  const line = lines[i]!;
+  const indent = line.match(/^[ \t]*/)![0];
+  const rest = line.slice(indent.length);
+  if (
+    rest.length === 0 ||
+    rest[0] !== "<" ||
+    rest.startsWith("</") ||
+    rest.startsWith("<!--") ||
+    rest.startsWith("<?") ||
+    rest.startsWith("<!") ||
+    XML_MARKER_RE.test(line)
+  ) {
+    return null;
+  }
+  const nameMatch = rest.match(/^<([A-Za-z_][\w.:-]*)/);
+  if (!nameMatch) return null; // `&lt;`, `<5`, other prose: never touched
+
+  const openerEnd = findTagEnd(rest);
+  if (openerEnd < 0) throw new UnparseableXml(); // tag split across lines
+  const selfClosing = rest[openerEnd - 1] === "/";
+  const name = nameMatch[1]!;
+  let depth = 0;
+  if (!selfClosing) {
+    depth = 1;
+    const d = tagDepthDelta(rest.slice(openerEnd + 1));
+    if (d === null) throw new UnparseableXml();
+    depth += d;
+  }
+  if (depth <= 0) {
+    return { name, indent, lo: i, hi: i }; // self-closing or inline-complete
+  }
+  for (let j = i + 1; j <= hi; j++) {
+    const d = tagDepthDelta(lines[j]!);
+    if (d === null) throw new UnparseableXml();
+    depth += d;
+    if (depth === 0) {
+      return { name, indent, lo: i, hi: j };
+    }
+  }
+  throw new UnparseableXml(); // unclosed element → fail closed
+}
+
+// The opening-tag token of the element starting at lines[lo] (used for
+// attribute extraction on any line shape — tag-only, self-closing, or
+// inline-complete).
+function openingTagToken(line: string): string | null {
+  const indentEnd = line.length - line.replace(/^[ \t]+/, "").length;
+  const rest = line.slice(indentEnd);
+  if (!rest.startsWith("<") || rest.startsWith("</")) return null;
+  const end = findTagEnd(rest);
+  if (end < 0) return null;
+  return rest.slice(0, end + 1);
+}
+
+// Attribute statistics over the dropped elements' opening tags: `all name=val`
+// for invariants, `name: K distinct, min..max` for varying ones.
+function summarizeXmlAttrs(elems: XmlElem[], lines: string[]): string {
+  const byAttr = new Map<string, Map<string, number>>();
+  for (const e of elems) {
+    const tok = openingTagToken(lines[e.lo]!);
+    if (!tok) continue;
+    XML_ATTR_RE.lastIndex = 0;
+    let am: RegExpExecArray | null;
+    while ((am = XML_ATTR_RE.exec(tok)) !== null) {
+      const [, name, value] = am;
+      let values = byAttr.get(name!);
+      if (!values) {
+        values = new Map();
+        byAttr.set(name!, values);
+      }
+      values.set(value!, (values.get(value!) ?? 0) + 1);
+    }
+  }
+  const parts: string[] = [];
+  for (const [name, values] of byAttr) {
+    if (parts.length >= 2) break;
+    const distinct = [...values.keys()];
+    if (distinct.length === 1) {
+      parts.push(`all ${name}=${distinct[0]}`);
+    } else {
+      distinct.sort();
+      parts.push(
+        `${name}: ${distinct.length} distinct, ${distinct[0]}..${distinct[distinct.length - 1]}`,
+      );
+    }
+  }
+  return parts.join("; ").slice(0, 140);
+}
+
+const XML_RUN_MIN = 4;
+const XML_KEEP_HEAD = 2;
+const XML_KEEP_TAIL = 1;
+const XML_MAX_DEPTH = 6;
+
+// Collapse sibling runs in lines[lo..hi] into marker comments, writing results
+// into `out`. Returns how many bytes were elided.
+function xmlCompressRange(
+  lines: string[],
+  out: (string | null)[],
+  lo: number,
+  hi: number,
+  depth: number,
+): number {
+  if (lo > hi || depth > XML_MAX_DEPTH) return 0;
+
+  const elems: XmlElem[] = [];
+  let i = lo;
+  while (i <= hi) {
+    const e = scanElem(lines, i, hi); // throws UnparseableXml on doubt
+    if (e === null) {
+      i++;
+      continue;
+    }
+    elems.push(e);
+    i = e.hi + 1;
+  }
+
+  let elidedBytes = 0;
+  let g = 0;
+  while (g < elems.length) {
+    let h = g;
+    while (
+      g + 1 < elems.length &&
+      isXmlSibling(lines, elems[g]!, elems[g + 1]!)
+    ) {
+      g++;
+    }
+    const run = elems.slice(h, g + 1);
+    g++;
+
+    if (run.length < XML_RUN_MIN) {
+      for (const e of run) {
+        if (e.hi > e.lo) {
+          elidedBytes += xmlCompressRange(lines, out, e.lo + 1, e.hi - 1, depth + 1);
         }
-      } else {
-        if (skipping) {
-          result.push(`    [${repetitionCount} total <${lastTagName}> elements]`);
-          skipping = false;
-        }
-        lastTagName = tagName;
-        repetitionCount = 1;
+      }
+      continue;
+    }
+
+    const n = run.length;
+    const keep = new Array<boolean>(n).fill(false);
+    for (let k = 0; k < n; k++) {
+      keep[k] = k < XML_KEEP_HEAD || k >= n - XML_KEEP_TAIL;
+    }
+    for (let k = 0; k < n; k++) {
+      if (keep[k]) continue;
+      const span = lines.slice(run[k]!.lo, run[k]!.hi + 1).join("\n");
+      if (ERROR_VALUE_RE.test(span) || xmlHasErrorAttr(lines, run[k]!.lo)) {
+        keep[k] = true;
       }
     }
 
-    result.push(cleaned);
+    for (let k = 0; k < n; k++) {
+      if (!keep[k]) continue;
+      if (run[k]!.hi > run[k]!.lo) {
+        elidedBytes += xmlCompressRange(
+          lines,
+          out,
+          run[k]!.lo + 1,
+          run[k]!.hi - 1,
+          depth + 1,
+        );
+      }
+    }
+    for (let k = 0; k < n; ) {
+      if (keep[k]) {
+        k++;
+        continue;
+      }
+      let j = k;
+      while (j < n && !keep[j]) j++;
+      const dropped = run.slice(k, j);
+      const first = dropped[0]!;
+      const last = dropped[dropped.length - 1]!;
+      const elided =
+        lines.slice(first.lo, last.hi + 1).reduce((s, l) => s + l.length + 1, 0);
+      const summary = summarizeXmlAttrs(dropped, lines);
+      let marker = `${first.indent}<!-- ${dropped.length} <${first.name}> elements elided`;
+      if (summary) marker += `: ${summary}`;
+      marker += " -->";
+      if (marker.length < elided) {
+        for (let p = first.lo; p <= last.hi; p++) out[p] = null;
+        out[first.lo] = marker;
+        elidedBytes += elided;
+      }
+      k = j;
+    }
+  }
+  return elidedBytes;
+}
+
+function isXmlSibling(lines: string[], a: XmlElem, b: XmlElem): boolean {
+  if (a.name !== b.name || a.indent !== b.indent) return false;
+  for (let k = a.hi + 1; k < b.lo; k++) {
+    if (lines[k]!.trim().length > 0) return false;
+  }
+  return true;
+}
+
+function xmlHasErrorAttr(lines: string[], start: number): boolean {
+  const tok = openingTagToken(lines[start]!);
+  if (!tok) return false;
+  XML_ATTR_RE.lastIndex = 0;
+  let am: RegExpExecArray | null;
+  while ((am = XML_ATTR_RE.exec(tok)) !== null) {
+    if (ERROR_KEY_RE.test(am[1]!)) return true;
+  }
+  return false;
+}
+
+// Compress XML by stripping namespace declarations and collapsing runs of
+// repeated sibling elements (e.g. long <item> lists) into marker comments that
+// carry an attribute summary of exactly the elements they replace. Kept
+// content passes through byte-for-byte; markers are comments so the payload
+// stays well-formed markup. Returns null — caller falls back to the
+// whitespace-only extractor — on any structure this scanner cannot fully
+// account for.
+function compressXml(text: string): string | null {
+  const originalCount = text.split("\n").length;
+  const lines = text.split("\n").map((l) => l.replace(XML_XMLNS_RE, ""));
+
+  const out: (string | null)[] = [...lines];
+  try {
+    xmlCompressRange(lines, out, 0, lines.length - 1, 0);
+  } catch (err) {
+    if (err instanceof UnparseableXml) return null;
+    throw err;
   }
 
-  if (skipping) {
-    result.push(`    [${repetitionCount} total <${lastTagName}> elements]`);
-  }
-
-  const resultCount = result.length;
+  const kept = out.filter((l): l is string => l !== null);
+  const resultCount = kept.length;
   if (resultCount >= originalCount * QUALITY_RATIO) {
     return null;
   }
 
-  return `${result.join("\n")}\n\n[XML compressed: ${resultCount} of ${originalCount} lines]`;
+  return `${kept.join("\n")}\n\n[XML compressed: ${resultCount} of ${originalCount} lines]`;
 }
 
 // ----- Public entry point ---------------------------------------------------

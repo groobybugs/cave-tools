@@ -2,6 +2,7 @@ import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   applyBudget,
+  collapseRepeatedLines,
   extractStructuredData,
   rewriteCommandWithRtk,
 } from "../compression/utils.js";
@@ -167,6 +168,10 @@ export const bashTool: Tool & {
       // semantic pass returned null (compression didn't help / toggle off).
       const semantic = compressStructuredSemantic(processed, rewrittenCommand);
       processed = semantic ?? extractStructuredData(processed, rewrittenCommand);
+
+      // Collapse runs of near-identical lines (timestamped/counted spam)
+      // before the line budget, so the budget sees compacted content.
+      processed = collapseRepeatedLines(processed);
 
       // Apply budget compression
       processed = applyBudget(processed, "bash");

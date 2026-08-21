@@ -532,6 +532,52 @@ export function collapseBlankLines(text: string): string {
   return text.replace(/(\r?\n){3,}/g, "\n\n");
 }
 
+// Runs of adjacent lines that differ only inside number runs (timestamps,
+// counters, request ids) collapse to the first line plus a count marker.
+// "GET /api 200 12ms" x 200 pays 2 lines, not 200. Ported from the caveman
+// engine's digit-masked repetition compressor: first occurrence always kept
+// verbatim, our own markers never re-collapse (idempotent), and the result is
+// only emitted when it is actually smaller.
+const RUN_LENGTH_MIN = 4;
+const RUN_MARKER_PREFIX = "[... ";
+const RUN_MARKER_RE = /^\[\.\.\. \d+ similar lines omitted/;
+
+function maskDigitRuns(line: string): string {
+  return line.replace(/\d+/g, "#");
+}
+
+export function collapseRepeatedLines(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let collapsed = false;
+
+  let i = 0;
+  while (i < lines.length) {
+    const key = maskDigitRuns(lines[i]!);
+    let j = i + 1;
+    while (j < lines.length && maskDigitRuns(lines[j]!) === key) j++;
+    const runLen = j - i;
+    out.push(lines[i]!);
+    if (
+      runLen >= RUN_LENGTH_MIN &&
+      /[a-zA-Z]/.test(lines[i]!) && // pure-numeric runs (seq, counters, bare timestamps) ARE the content
+      lines[i]!.trim().length > 0 &&
+      !RUN_MARKER_RE.test(lines[i]!) &&
+      !lines[i]!.startsWith(RUN_MARKER_PREFIX)
+    ) {
+      out.push(`[... ${runLen - 1} similar lines omitted (cave: run-length) ...]`);
+      collapsed = true;
+    } else {
+      for (let k = i + 1; k < j; k++) out.push(lines[k]!);
+    }
+    i = j;
+  }
+
+  if (!collapsed) return text;
+  const result = out.join("\n");
+  return result.length < text.length ? result : text;
+}
+
 export function truncateLines(
   text: string,
   maxLines: number,

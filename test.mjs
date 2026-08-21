@@ -20,6 +20,7 @@ import { configureTool } from "./dist/tools/configure.js";
 import {
   compactJson,
   compactJsonl,
+  collapseRepeatedLines,
   extractStructuredData,
   recordRead,
   recordEdit,
@@ -213,6 +214,79 @@ async function test() {
   assert.ok(!compressedXml.includes("xmlns"), "namespaces stripped from XML");
   assert.ok(compressedXml.includes("[XML compressed:"), "XML annotation footer present");
   console.log("Semantic structured compression tests passed");
+
+  // Multi-line XML: sibling runs collapse as whole elements (children never
+  // leak through as orphans), marker carries an attribute summary, and an
+  // error-bearing element mid-run is force-kept.
+  const rss = [];
+  rss.push(`<?xml version="1.0"?>`);
+  rss.push(`<rss version="2.0">`);
+  rss.push(`  <channel>`);
+  rss.push(`    <title>Feed</title>`);
+  for (let i = 1; i <= 30; i++) {
+    rss.push(`    <item id="a${i}" status="ok">`);
+    rss.push(`      <title>Story ${i}</title>`);
+    if (i === 15) {
+      rss.push(`      <desc>connection timeout while fetching upstream.</desc>`);
+    } else {
+      rss.push(`      <desc>Routine summary text for item ${i}.</desc>`);
+    }
+    rss.push(`    </item>`);
+  }
+  rss.push(`  </channel>`);
+  rss.push(`</rss>`);
+  const rssText = rss.join("\n");
+  const rssCompressed = compressStructuredSemantic(rssText);
+  assert.ok(rssCompressed !== null, "multi-line XML compresses");
+  assert.ok(rssCompressed.includes("Story 1"), "head element kept");
+  assert.ok(rssCompressed.includes("Story 30"), "tail element kept");
+  assert.ok(rssCompressed.includes("connection timeout"), "error element force-kept");
+  assert.ok(rssCompressed.includes("elements elided"), "elision marker present");
+  assert.ok(rssCompressed.includes("all status=ok"), "marker carries invariant summary");
+  assert.ok(!rssCompressed.includes("<title>Story 5</title>"), "elided children do not leak as orphans");
+  assert.ok(rssCompressed.length < rssText.length, "output actually smaller");
+
+  // XML idempotence: a second pass must not change the payload.
+  const secondPass = compressStructuredSemantic(rssCompressed);
+  if (secondPass !== null) {
+    assert.equal(secondPass, rssCompressed, "second pass is stable");
+  }
+
+  // JSON: error-bearing array items survive the array cap.
+  const results = {
+    results: [
+      { name: "t1", status: "passed" },
+      { name: "t2", status: "passed" },
+      { name: "t3", status: "passed" },
+      { name: "t4", status: "failed", message: "assertion error: timeout" },
+      { name: "t5", status: "passed" },
+    ],
+  };
+  const longResults = JSON.stringify(results, null, 2) + "\n// padding ".repeat(60);
+  const jsonCompressed = compressStructuredSemantic(longResults);
+  if (jsonCompressed !== null) {
+    assert.ok(jsonCompressed.includes("t4"), "failed test item survives the array cap");
+    assert.ok(jsonCompressed.includes("error-bearing"), "stub notes error keeps");
+  }
+
+  // Digit-masked run-length collapse for repeated log spam.
+  const spamLines = [];
+  for (let i = 1; i <= 30; i++) {
+    spamLines.push(`2026-08-21T10:00:00Z INFO GET /api/users 200 12ms req=${i} user=42`);
+  }
+  spamLines.push(`2026-08-21T10:00:01Z ERROR upstream refused the connection`);
+  const spam = spamLines.join("\n");
+  const spamCollapsed = collapseRepeatedLines(spam);
+  assert.ok(spamCollapsed.includes("similar lines omitted"), "spam run collapses");
+  assert.ok(spamCollapsed.includes("req=1"), "first occurrence kept verbatim");
+  assert.ok(spamCollapsed.includes("upstream refused"), "distinct line kept");
+  assert.ok(spamCollapsed.length < spam.length, "collapsed output smaller");
+  assert.equal(collapseRepeatedLines(spamCollapsed), spamCollapsed, "collapse is idempotent");
+  assert.equal(collapseRepeatedLines("short\nunique\nlines\n"), "short\nunique\nlines\n", "no-run input untouched");
+  // Pure-numeric runs (seq, counters) are the content itself — never collapse.
+  const numeric = Array.from({ length: 50 }, (_, k) => String(k + 1)).join("\n");
+  assert.equal(collapseRepeatedLines(numeric), numeric, "pure-numeric runs stay intact");
+  console.log("Compression improvement tests passed");
 
   // Toggle off → null even for inputs that would otherwise compress.
   setStructuredCompression(false);

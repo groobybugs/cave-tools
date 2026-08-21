@@ -7,7 +7,7 @@ same results for fewer tokens. Prefer these over built-ins.
 ## Tools
 - `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).
 - `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
-- `cave__bash` instead of Bash for every command — optimized drop-in replacement (RTK + structured extraction + line budgets). Max timeout 10min.
+- `cave__bash` instead of Bash for every command — optimized drop-in replacement (RTK + structured extraction + run-length collapse of repeated log lines + line budgets). Max timeout 10min.
 - `cave__bash_start` for commands expected to exceed ~2-3min (builds, test suites, installs) — runs detached, returns a jobId immediately, output goes to a log file. Poll with `cave__bash_status` (`wait` up to 60s, returns the moment the job exits); stop with `cave__bash_stop`. Jobs survive server restarts (state + log on disk); `cave-tools jobs` lists/kills them from a terminal.
 - `cave__write` to create/overwrite a single file; `cave__edit` for str-replace **or** line-range (`start_line`/`end_line`/`content` after numbered read; optional `expected_hash`/`expected_range_checksum`; `delete`/`insert_before` move; multi-file `edits[]`).
 - `cave__apply_patch` for multi-file add/update/delete/move patches.
