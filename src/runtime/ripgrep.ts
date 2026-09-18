@@ -53,7 +53,7 @@ function parsePathLines(stdout: string, limit: number): string[] {
     .slice(0, limit);
 }
 
-async function findWithNode(cwd: string, pattern: string, limit: number): Promise<string[]> {
+async function findWithNode(cwd: string, pattern: string, limit: number, hidden = true): Promise<string[]> {
   const matcher = globToRegExp(pattern.includes("/") ? pattern : `**/${pattern}`);
   const basenameMatcher = pattern.includes("/") ? null : globToRegExp(pattern);
   const results: string[] = [];
@@ -68,6 +68,7 @@ async function findWithNode(cwd: string, pattern: string, limit: number): Promis
     }
     for (const entry of entries) {
       if (entry.name === ".git") continue;
+      if (!hidden && entry.name.startsWith(".")) continue;
       const full = path.join(dir, entry.name);
       const relative = toPosixPath(path.relative(cwd, full));
       if (entry.isDirectory()) stack.push(full);
@@ -102,7 +103,7 @@ export async function rgFiles(cwd: string, pattern: string, limit: number, hidde
   }
 
   const rg = await resolveRg();
-  if (!rg) return findWithNode(cwd, pattern, limit);
+  if (!rg) return findWithNode(cwd, pattern, limit, hidden);
   const args = [
     "--no-config",
     "--files",
@@ -112,7 +113,7 @@ export async function rgFiles(cwd: string, pattern: string, limit: number, hidde
     ".",
   ];
   const result = await spawnBin(rg, args, cwd);
-  if (result.error) return findWithNode(cwd, pattern, limit);
+  if (result.error) return findWithNode(cwd, pattern, limit, hidden);
   if (result.code !== 0 && result.code !== 1) throw new Error(result.stderr.trim() || `ripgrep exited with code ${result.code}`);
   return parsePathLines(result.stdout, limit);
 }

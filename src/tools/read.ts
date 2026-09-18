@@ -29,10 +29,10 @@ const IMAGE_MIME: Record<string, string> = {
 };
 
 // Hard cap to avoid blowing up the MCP transport with multi-MB base64 payloads.
-// Anthropic image input cap is 5 MB; we mirror that.
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+// Matches opencode 2.0 MAX_MEDIA_INGEST_BYTES (20 MB).
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 // Same cap reused for PDFs returned as embedded resources.
-const MAX_PDF_BYTES = 5 * 1024 * 1024;
+const MAX_PDF_BYTES = 20 * 1024 * 1024;
 
 // Per-line and per-read byte caps, ported from opencode. These defend the
 // budget/codebook compression against pathological inputs (minified lines,

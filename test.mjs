@@ -507,6 +507,13 @@ async function test() {
     const findRecursive = await findTool.handler({ pattern: "**/*.ts", path: findDir, limit: 50 });
     assert.match(findRecursive.content[0].text, /sub\/deep\.ts/);
 
+    // hidden=false excludes dotfiles (upstream opencode glob behavior).
+    writeFileSync(join(findDir, ".secret"), "s\n", "utf-8");
+    const findHidden = await findTool.handler({ pattern: "*", path: findDir, limit: 50 });
+    assert.match(findHidden.content[0].text, /\.secret/);
+    const findNoHidden = await findTool.handler({ pattern: "*", path: findDir, limit: 50, hidden: false });
+    assert.doesNotMatch(findNoHidden.content[0].text, /\.secret/);
+
     // limit truncation notice.
     const findLimited = await findTool.handler({ pattern: "*", path: findDir, limit: 1 });
     assert.match(findLimited.content[0].text, /1 results limit reached/);
@@ -779,6 +786,52 @@ async function test() {
     rmSync(fuzzyDir, { recursive: true, force: true });
   }
   console.log("cave__edit fuzzy replacer tests passed");
+  console.log();
+
+  console.log("6e2. Testing cave__edit upstream match tiers:");
+  const tierDir = mkdtempSync(join(tmpdir(), "cave-edit-tiers-"));
+  try {
+    // Tier 2: unicode-punctuation normalization (curly quotes/dash → ASCII).
+    const uniFile = join(tierDir, "uni.txt");
+    writeFileSync(uniFile, "it’s a “test” — done\n", "utf-8");
+    const uniResult = await editTool.handler({
+      file_path: uniFile,
+      old_string: "it's a \"test\" - done",
+      new_string: "it's a \"test\" - changed",
+    });
+    assert.equal(uniResult.isError, undefined, `unicode tier should match: ${uniResult.content[0].text}`);
+    assert.ok(readFileSync(uniFile, "utf-8").includes("changed"));
+
+    // Tier 3: trailing-whitespace-tolerant line window.
+    const trailFile = join(tierDir, "trail.txt");
+    writeFileSync(trailFile, "alpha   \nbeta\t\n", "utf-8");
+    const trailResult = await editTool.handler({
+      file_path: trailFile,
+      old_string: "alpha\nbeta",
+      new_string: "alpha\nGAMMA",
+    });
+    assert.equal(trailResult.isError, undefined, `trimEnd tier should match: ${trailResult.content[0].text}`);
+    assert.ok(readFileSync(trailFile, "utf-8").includes("GAMMA"));
+
+    // CAVE_TOOLS_FUZZY_EDIT=0 disables the fuzzy fallback (strict upstream parity).
+    const fuzzyOffFile = join(tierDir, "fuzzyoff.txt");
+    writeFileSync(fuzzyOffFile, "const   x   =   1;\n", "utf-8");
+    process.env.CAVE_TOOLS_FUZZY_EDIT = "0";
+    try {
+      const offResult = await editTool.handler({
+        file_path: fuzzyOffFile,
+        old_string: "const x = 1;",
+        new_string: "const x = 2;",
+      });
+      assert.equal(offResult.isError, true);
+      assert.match(offResult.content[0].text, /Could not find oldString/);
+    } finally {
+      delete process.env.CAVE_TOOLS_FUZZY_EDIT;
+    }
+  } finally {
+    rmSync(tierDir, { recursive: true, force: true });
+  }
+  console.log("cave__edit upstream tier tests passed");
   console.log();
 
   console.log("6f. Testing cave__edit line-range mode:");
@@ -1716,6 +1769,15 @@ async function test() {
     assert.equal(bigTimeout.isError, true);
     assert.match(bigTimeout.content[0].text, /must be <= 600000ms/);
 
+    // timeout 0 disables the kill timer (matches opencode shell).
+    const noTimeout = await bashTool.handler({
+      command: "echo no-timeout-ok",
+      description: "zero timeout disables timer",
+      timeout: 0,
+    });
+    assert.equal(noTimeout.isError, undefined, noTimeout.content[0].text);
+    assert.match(noTimeout.content[0].text, /no-timeout-ok/);
+
     // classification + truncation: verbatim policy (`cat`) keeps head+tail when
     // output exceeds 500 lines; compressible policy (`seq`) applies budget trim.
     const verbatimDir = mkdtempSync(join(tmpdir(), "cave-bash-verbatim-"));
@@ -1919,12 +1981,10 @@ async function test() {
       const rawHtml = await webfetchTool.handler({ url: `${base}/html`, format: "html" });
       assert.match(rawHtml.content[0].text, /<h1>Title<\/h1>/);
 
-      // image → base64 image content block.
+      // images are rejected (matching upstream opencode webfetch).
       const imgRes = await webfetchTool.handler({ url: `${base}/img` });
-      assert.equal(imgRes.isError, undefined);
-      const imgBlock = imgRes.content.find((c) => c.type === "image");
-      assert.ok(imgBlock, "image response includes an image content block");
-      assert.equal(imgBlock.mimeType, "image/png");
+      assert.equal(imgRes.isError, true);
+      assert.match(imgRes.content[0].text, /Unsupported fetched image content type: image\/png/);
 
       // 5MB cap rejects oversized responses.
       const bigRes = await webfetchTool.handler({ url: `${base}/big`, timeout: 10 });

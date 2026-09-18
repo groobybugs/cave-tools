@@ -41,7 +41,7 @@ export const bashTool: Tool & {
       },
       timeout: {
         type: "number",
-        description: `Timeout in milliseconds (must be positive, max ${MAX_TIMEOUT})`,
+        description: `Timeout in milliseconds (0 disables the timeout, max ${MAX_TIMEOUT})`,
         default: DEFAULT_TIMEOUT,
       },
       allowFailure: {
@@ -65,20 +65,21 @@ export const bashTool: Tool & {
     const allowFailure = args.allowFailure === true;
     const shouldRedact = args.redact_secrets !== false;
 
-    // Validate timeout: reject negative, fall back to default for 0/missing.
+    // Validate timeout: reject negative/NaN, fall back to default when
+    // missing. 0 disables the timeout entirely (matches opencode shell).
     const rawTimeout = args.timeout;
-    if (rawTimeout !== undefined && Number(rawTimeout) < 0) {
+    const timeout = rawTimeout === undefined ? DEFAULT_TIMEOUT : Number(rawTimeout);
+    if (!Number.isFinite(timeout) || timeout < 0) {
       return {
         content: [
           {
             type: "text",
-            text: `Invalid timeout value: ${rawTimeout}. Timeout must be a positive number.`,
+            text: `Invalid timeout value: ${rawTimeout}. Timeout must be a non-negative number.`,
           },
         ],
         isError: true,
       };
     }
-    const timeout = Number(rawTimeout) || DEFAULT_TIMEOUT;
     if (timeout > MAX_TIMEOUT) {
       return {
         content: [

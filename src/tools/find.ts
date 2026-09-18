@@ -12,7 +12,7 @@ export const findTool: Tool & {
 } = {
   name: "cave__find",
   description:
-    "Optimized drop-in replacement for the built-in Glob/find (fd when available, Node fallback). Returns matching file paths relative to the search directory, with output trimmed to a line budget.",
+    "Optimized drop-in replacement for the built-in Glob/find (fd when available, Node fallback). Returns matching file paths relative to the search directory, with output trimmed to a line budget. Set hidden=false to exclude dotfiles (upstream opencode glob default).",
   inputSchema: {
     type: "object",
     properties: {
@@ -29,12 +29,19 @@ export const findTool: Tool & {
         type: "number",
         description: "Maximum number of results (default: 1000)",
       },
+      hidden: {
+        type: "boolean",
+        description:
+          "Include hidden files and directories (default: true). Set false to match upstream opencode glob behavior.",
+        default: true,
+      },
     },
     required: ["pattern"],
   },
   handler: async (args) => {
     const pattern = String(args.pattern);
     const limit = Math.max(1, Number(args.limit) || DEFAULT_LIMIT);
+    const hidden = args.hidden !== false;
 
     let searchPath: string;
     try {
@@ -48,7 +55,7 @@ export const findTool: Tool & {
 
     let lines: string[];
     try {
-      lines = await rgFiles(searchPath, pattern, limit);
+      lines = await rgFiles(searchPath, pattern, limit, hidden);
     } catch (error) {
       return {
         content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],

@@ -348,6 +348,86 @@ const REPLACERS: Replacer[] = [
   MultiOccurrenceReplacer,
 ];
 
+// ── Upstream tiers (ported from opencode 2.0 plugin/edit.ts) ────────────────
+// opencode 2.0 narrowed matching to exact + two strict fallbacks below. They
+// run first so match priority matches upstream exactly.
+
+interface SpanMatch {
+  start: number;
+  end: number;
+}
+
+// Unicode-punctuation normalization. Every replacement maps one char to one
+// char, so normalized offsets index the original string directly.
+function normalizeForMatch(value: string): string {
+  return value
+    .replace(/[‘’‚‛]/g, "'")
+    .replace(/[“”„‟]/g, '"')
+    .replace(/[‐‑‒–—―−]/g, "-")
+    .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
+}
+
+function findOccurrences(content: string, search: string): SpanMatch[] {
+  const result: SpanMatch[] = [];
+  if (search.length === 0) return result;
+  let offset = 0;
+  while (true) {
+    const at = content.indexOf(search, offset);
+    if (at === -1) break;
+    result.push({ start: at, end: at + search.length });
+    offset = at + search.length;
+  }
+  return result;
+}
+
+// Sliding line window comparing trimEnd-favicon-normalized lines. Tolerates
+// trailing-whitespace drift (and \r\n vs \n) but nothing else.
+function findLineOccurrences(content: string, search: string): SpanMatch[] {
+  const trailingNewline = search.endsWith("\n");
+  const expected = search.split("\n");
+  if (trailingNewline) expected.pop();
+  if (expected.length === 0) return [];
+  const lines: Array<{ start: number; end: number; text: string; contentEnd: number; newline: boolean }> = [];
+  for (const match of content.matchAll(/[^\n]*(?:\n|$)/g)) {
+    if (match[0] === "") continue;
+    const start = match.index ?? 0;
+    const newline = match[0].endsWith("\n");
+    const text = newline ? match[0].slice(0, -1) : match[0];
+    lines.push({
+      start,
+      end: start + match[0].length,
+      text,
+      contentEnd: start + text.length - (text.endsWith("\r") ? 1 : 0),
+      newline,
+    });
+  }
+  const candidates: SpanMatch[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const actual = lines.slice(index, index + expected.length);
+    if (actual.length !== expected.length) continue;
+    let allMatch = true;
+    for (let lineIndex = 0; lineIndex < actual.length; lineIndex++) {
+      if (
+        normalizeForMatch(actual[lineIndex]!.text.trimEnd()) !==
+        normalizeForMatch(expected[lineIndex]!.trimEnd())
+      ) {
+        allMatch = false;
+        break;
+      }
+    }
+    if (!allMatch) continue;
+    const last = actual[actual.length - 1]!;
+    if (trailingNewline && !last.newline) continue;
+    candidates.push({ start: actual[0]!.start, end: trailingNewline ? last.end : last.contentEnd });
+  }
+  const deduped: SpanMatch[] = [];
+  for (const candidate of candidates) {
+    if (deduped.some((kept) => kept.end > candidate.start && kept.start < candidate.end)) continue;
+    deduped.push(candidate);
+  }
+  return deduped;
+}
+
 // Guard against a short `find` matching a wildly larger span (e.g. a single
 // normalized line collapsing onto a giant region).
 function isDisproportionateMatch(search: string, oldString: string): boolean {
@@ -369,11 +449,59 @@ export interface MatchResult {
 // `search` is the literal text present in `content` (may differ from `find`
 // when a fuzzy replacer matched). For replace_all the caller replaces every
 // occurrence of `search`; otherwise uniqueness is enforced here.
+//
+// Match priority mirrors opencode 2.0: exact → unicode-normalized exact →
+// trailing-whitespace-tolerant line window. The first non-empty tier wins; a
+// multi-match tier without replace_all is an immediate uniqueness error (no
+// fall-through to fuzzier tiers). When no tier matches, the legacy fuzzy
+// replacers run as a final cave-extension fallback — set
+// CAVE_TOOLS_FUZZY_EDIT=0 to disable them for strict upstream parity.
 export function findReplacement(
   content: string,
   find: string,
   replaceAll: boolean,
 ): MatchResult {
+  if (find.length === 0) {
+    return { error: "not-found: old_string cannot be empty." };
+  }
+  // Tier 1: exact occurrences.
+  const exact = findOccurrences(content, find);
+  if (exact.length > 0) {
+    if (replaceAll || exact.length === 1) {
+      const m = exact[0]!;
+      return { search: content.slice(m.start, m.end), index: m.start };
+    }
+    return { error: "non-unique", nonUnique: true };
+  }
+
+  // Tier 2: unicode-normalized exact. Normalization is length-preserving, so
+  // normalized offsets index the original content directly.
+  if (find.length > 0 && normalizeForMatch(find) !== find) {
+    const unicode = findOccurrences(normalizeForMatch(content), normalizeForMatch(find));
+    if (unicode.length > 0) {
+      if (replaceAll || unicode.length === 1) {
+        const m = unicode[0]!;
+        return { search: content.slice(m.start, m.end), index: m.start };
+      }
+      return { error: "non-unique", nonUnique: true };
+    }
+  }
+
+  // Tier 3: trailing-whitespace-tolerant line window.
+  const lined = findLineOccurrences(content, find);
+  if (lined.length > 0) {
+    if (replaceAll || lined.length === 1) {
+      const m = lined[0]!;
+      return { search: content.slice(m.start, m.end), index: m.start };
+    }
+    return { error: "non-unique", nonUnique: true };
+  }
+
+  // Tier 4 (cave extension): legacy fuzzy chain.
+  if (process.env.CAVE_TOOLS_FUZZY_EDIT === "0") {
+    return { error: "not-found: Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings. Re-read the file and provide the full exact oldString." };
+  }
+
   let nonUniqueSeen = false;
 
   for (const replacer of REPLACERS) {

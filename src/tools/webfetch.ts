@@ -8,8 +8,10 @@ const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5MB
 const DEFAULT_TIMEOUT_SECONDS = 30;
 const MAX_TIMEOUT_SECONDS = 120;
 
-const CHROME_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+// User-Agent mirrors opencode 2.0 (openCodeUserAgent): an honest bot string
+// rather than a browser impersonation.
+const OPENCODE_UA =
+  "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; OpenCode-User/1.0; +https://opencode.ai";
 
 interface WebFetchInput {
   url: string;
@@ -127,10 +129,6 @@ async function readBoundedBody(response: Response): Promise<ArrayBuffer> {
     offset += chunk.byteLength;
   }
   return out.buffer;
-}
-
-function isImageMime(mime: string): boolean {
-  return mime.startsWith("image/") && mime !== "image/svg+xml" && mime !== "image/vnd.fastbidsheet";
 }
 
 function isTextualMime(mime: string): boolean {
@@ -355,7 +353,7 @@ export const webfetchTool: Tool & {
 } = {
   name: "cave__webfetch",
   description:
-    "Fetch a URL and return its content as markdown, text, or html. Images are returned as base64 image content blocks. Non-2xx responses are errors. Output is redacted, archived if large, and trimmed to a line budget. Use when you need to retrieve and analyze a specific web page. Note: follows redirects and allows fetching any http(s) URL including localhost/private IPs (same posture as the built-in webfetch).",
+    "Fetch a URL and return its content as markdown, text, or html. Images and other non-textual content are rejected (matching upstream opencode webfetch). Non-2xx responses are errors. Output is redacted, archived if large, and trimmed to a line budget. Use when you need to retrieve and analyze a specific web page. Note: follows redirects and allows fetching any http(s) URL including localhost/private IPs (same posture as the built-in webfetch).",
   inputSchema: {
     type: "object",
     properties: {
@@ -384,7 +382,7 @@ export const webfetchTool: Tool & {
     const url = input.url;
 
     const headers: Record<string, string> = {
-      "User-Agent": CHROME_UA,
+      "User-Agent": OPENCODE_UA,
       Accept: acceptFor(input.format),
       "Accept-Language": "en-US,en;q=0.9",
     };
@@ -396,7 +394,7 @@ export const webfetchTool: Tool & {
       } catch (error) {
         // Retry with honest UA only on Cloudflare bot challenge.
         if (error instanceof CloudflareChallengeError) {
-          result = await fetchBounded(url, { ...headers, "User-Agent": "cave-tools" }, input.timeout);
+          result = await fetchBounded(url, { ...headers, "User-Agent": "opencode" }, input.timeout);
         } else {
           throw error;
         }
@@ -404,14 +402,9 @@ export const webfetchTool: Tool & {
 
       const mime = result.contentType.split(";")[0]?.trim().toLowerCase() || "";
 
-      if (isImageMime(mime)) {
-        const base64 = Buffer.from(result.buffer).toString("base64");
-        return {
-          content: [
-            { type: "text", text: `Image fetched successfully (${result.contentType})` },
-            { type: "image", data: base64, mimeType: mime },
-          ],
-        };
+      // Upstream opencode 2.0 rejects images instead of attaching them.
+      if (mime.startsWith("image/")) {
+        throw new Error(`Unsupported fetched image content type: ${mime}`);
       }
       if (!isTextualMime(mime)) {
         throw new Error(`Unsupported fetched file content type: ${mime}`);

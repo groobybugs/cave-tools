@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 
 export interface RunCommandOptions {
   cwd?: string;
+  /** Kill timeout in ms. 0 disables the timeout (no timer). */
   timeout: number;
   shell?: string;
   /** Max bytes retained in memory per stream (stdout, stderr). Default 100KB. */
@@ -200,16 +201,20 @@ export function runCommand(command: string, options: RunCommandOptions): Promise
     proc.stdout?.on("data", (chunk: Buffer) => stdoutCap.push(chunk));
     proc.stderr?.on("data", (chunk: Buffer) => stderrCap.push(chunk));
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      kill("SIGTERM");
-      forceTimer = setTimeout(() => kill("SIGKILL"), options.forceKillAfterMs ?? 3000);
-    }, options.timeout);
+    // A timeout of 0 disables the kill timer (matches opencode shell).
+    let timer: NodeJS.Timeout | undefined;
+    if (options.timeout > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        kill("SIGTERM");
+        forceTimer = setTimeout(() => kill("SIGKILL"), options.forceKillAfterMs ?? 3000);
+      }, options.timeout);
+    }
 
     proc.on("error", (err) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       if (forceTimer) clearTimeout(forceTimer);
       reject(err);
     });
@@ -217,7 +222,7 @@ export function runCommand(command: string, options: RunCommandOptions): Promise
     proc.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       if (forceTimer) clearTimeout(forceTimer);
       const out = stdoutCap.finalize();
       const err = stderrCap.finalize();
