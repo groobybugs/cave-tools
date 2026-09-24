@@ -222,6 +222,13 @@ function removeOpencodeMcp() {
       delete config.mcp['cave-tools'];
       changed = true;
     }
+    // OpenCode 2 native shape: mcp.servers.cave-tools
+    const servers = config.mcp && config.mcp.servers;
+    if (servers && typeof servers === 'object' && !Array.isArray(servers)
+        && Object.prototype.hasOwnProperty.call(servers, 'cave-tools')) {
+      delete servers['cave-tools'];
+      changed = true;
+    }
     const stripList = (key) => {
       if (!Array.isArray(config[key])) return;
       const next = config[key].filter((entry) => {
@@ -638,12 +645,20 @@ function removeCodex() {
   const hooksPath = path.join(codexDir, 'hooks.json');
   const CODEX_HOOK_MARKER = 'CAVE-TOOLS ACTIVE';
 
-  // 1. Strip [mcp_servers.cave-tools] from config.toml.
+  // 1. Strip [mcp_servers.cave-tools] and its [mcp_servers.cave-tools.tools.*]
+  //    approval sub-tables from config.toml. Line-based: a character-class
+  //    regex stops at the `[` inside `args = ["mcp"]` and leaves it behind.
   if (fs.existsSync(configPath)) {
     const cfg = fs.readFileSync(configPath, 'utf8');
-    const sectionRe = /\n*\[\s*mcp_servers\.cave-tools\s*\]\s*\n[^\[]*/g;
-    if (sectionRe.test(cfg)) {
-      const nextCfg = cfg.replace(sectionRe, '\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+    const ownHeader = /^\s*\[\s*mcp_servers\.cave-tools(\.[^\]]+)?\s*\]\s*$/;
+    const anyHeader = /^\s*\[[^\]]+\]\s*$/;
+    let skipping = false;
+    const kept = cfg.split('\n').filter((line) => {
+      if (anyHeader.test(line)) skipping = ownHeader.test(line);
+      return !skipping;
+    });
+    if (kept.length !== cfg.split('\n').length) {
+      const nextCfg = kept.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
       backupOnce(configPath);
       if (DRY_RUN) {
         trackPath(configPath, 'update');
@@ -665,9 +680,13 @@ function removeCodex() {
       const otherHooksPresent = hooks.includes('SessionStart') && (
         hooks.includes('CAVEMAN') || hooks.includes('caveman') ||
         /"command"\s*:\s*"echo[^"]*caveman/i.test(hooks));
-      const shouldFlip = /^\s*hooks\s*=\s*true\s*$/m.test(cfg) && !stillNeeded && !otherHooksPresent;
+      // Re-read: step 1 may have rewritten the file, and flipping the stale
+      // copy would restore the stripped cave-tools sections.
+      const currentCfg = DRY_RUN ? cfg : fs.readFileSync(configPath, 'utf8');
+      const hooksTrueRe = /^([ \t]*)hooks[ \t]*=[ \t]*true[ \t]*$/m;
+      const shouldFlip = hooksTrueRe.test(currentCfg) && !stillNeeded && !otherHooksPresent;
       if (shouldFlip) {
-        const nextCfg = cfg.replace(/^(\s*)hooks\s*=\s*true\s*$/m, '$1hooks = false');
+        const nextCfg = currentCfg.replace(hooksTrueRe, '$1hooks = false');
         backupOnce(configPath);
         if (!DRY_RUN) {
           fs.writeFileSync(configPath, nextCfg, { mode: 0o644 });

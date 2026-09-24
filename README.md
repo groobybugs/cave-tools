@@ -107,15 +107,18 @@ Some clients use a different wrapper key:
 | ZCode       | `~/.agents/mcp.json` import source, plus `~/.zcode/AGENTS.md` | `mcpServers`                                   |
 | Hermes Agent | `~/.hermes/config.yaml` + `plugins/cave-tools/`               | YAML `mcp_servers` + native plugin (`pre_tool_call` block) |
 
-opencode example (installer writes MCP + plugin entry):
+opencode example (installer writes MCP + plugin entry; OpenCode 2 shape, see the opencode section below for why `codemode: false`):
 
 ```json
 {
   "mcp": {
-    "cave-tools": {
-      "type": "local",
-      "command": ["cave-tools", "mcp"],
-      "enabled": true
+    "servers": {
+      "cave-tools": {
+        "type": "local",
+        "command": ["cave-tools", "mcp"],
+        "disabled": false,
+        "codemode": false
+      }
     }
   },
   "plugin": ["/home/you/.config/opencode/plugins/cave-tools"]
@@ -347,8 +350,8 @@ opencode has no Claude-style `hooks.json`, but it **does** have a native plugin 
 
 | Piece | Path | Role |
 |-------|------|------|
-| MCP server | `opencode.json` → `mcp.cave-tools` | Tools (`cave__read`, …) |
-| Native plugin | `plugins/cave-tools/plugin.js` | Mode flag, per-turn reinforce, built-in redirect |
+| MCP server | `opencode.json` → `mcp.servers.cave-tools` (V2, `codemode: false`) or `mcp.cave-tools` (V1) | Tools (`cave__read`, …) |
+| Native plugin | `plugins/cave-tools/index.js` → `plugin.js` | Mode flag, per-turn reinforce, built-in redirect. V2 resolves a plugin directory only via `<dir>/server` or `<dir>/index` (ignores `package.json` `main`/`exports`), so `index.js` is required |
 | Always-on rules | `AGENTS.md` (fenced block) | Base ruleset every session |
 | Skill | `skills/cave-tools/SKILL.md` | Discoverable skill text |
 | Slash command | `command/cave-tools.md` (and `commands/` if present) | `/cave-tools off\|hint\|enforce\|strict` |
@@ -372,21 +375,26 @@ pnpm run install:agents -- --agent opencode
 # cave-tools install  # if your install path runs install:agents
 ```
 
-What the installer writes into `~/.config/opencode/opencode.json`:
+What the installer writes into `~/.config/opencode/opencode.json` on OpenCode 2 (detected via `opencode --version` or an existing `mcp.servers`):
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "cave-tools": {
-      "type": "local",
-      "command": ["node", "/path/to/cave-tools/dist/cli.js", "mcp"],
-      "enabled": true
+    "servers": {
+      "cave-tools": {
+        "type": "local",
+        "command": ["node", "/path/to/cave-tools/dist/cli.js", "mcp"],
+        "disabled": false,
+        "codemode": false
+      }
     }
   },
   "plugin": ["/home/you/.config/opencode/plugins/cave-tools"]
 }
 ```
+
+`codemode: false` matters. OpenCode 2 defaults every MCP server to Code Mode, which hides its tools behind the `execute` JavaScript dispatcher (`tools["cave-tools"].cave__read(...)`) instead of the native tool list, so agents see built-in `read`/`grep`/`glob` first. `codemode` is ignored inside a V1-shaped `mcp.<name>` entry, hence the native `mcp.servers` shape. On OpenCode 1 the installer keeps the V1 shape (`mcp.cave-tools` with `enabled: true`).
 
 Optional extra hard-deny via opencode `permission` (plugin already blocks in enforce/strict; this is belt-and-suspenders):
 
@@ -399,13 +407,28 @@ Optional extra hard-deny via opencode `permission` (plugin already blocks in enf
 }
 ```
 
+OpenCode 2's built-in `explore` subagent denies every tool except `read`/`glob`/`grep`/`webfetch`/`websearch`, so it can never reach cave-tools. Append allows for the read-only tools (agent rules append; last match wins):
+
+```json
+"agents": {
+  "explore": {
+    "permissions": [
+      { "action": "cave-tools_cave__read", "resource": "*", "effect": "allow" },
+      { "action": "cave-tools_cave__grep", "resource": "*", "effect": "allow" },
+      { "action": "cave-tools_cave__find", "resource": "*", "effect": "allow" },
+      { "action": "cave-tools_cave__ls", "resource": "*", "effect": "allow" }
+    ]
+  }
+}
+```
+
 Uninstall strips MCP + plugin entry, plugin dir, skill, command, AGENTS fence, and the mode flag:
 
 ```bash
 pnpm run remove:agents -- --agent opencode
 ```
 
-Restart opencode after install so the plugin loads. Verify: `plugin` array contains the absolute `.../plugins/cave-tools` directory, `plugin.js` exists inside it, and a new session writes `~/.config/opencode/.cave-tools-active`.
+Restart opencode after install so the plugin loads (V2 also auto-reloads on config changes). Verify: `plugin` array contains the absolute `.../plugins/cave-tools` directory, `index.js` + `plugin.js` exist inside it, `opencode.log` shows `loading plugin id=.../plugins/cave-tools entrypoint=.../index.js`, and a new session writes `~/.config/opencode/.cave-tools-active`.
 
 ### Antigravity 2.0 / Gemini CLI
 

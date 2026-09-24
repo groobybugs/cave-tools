@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -105,6 +106,24 @@ function ensureOpencodePluginEntry(config, pluginAbs) {
     const next = current.filter((item) => !isCaveToolsPluginRef(item));
     next.push(pluginAbs);
     config[key] = next;
+  }
+}
+
+// V2 if the installed CLI reports major >= 2, or the config already uses the
+// native V2 mcp.servers shape.
+function isOpencodeV2(config) {
+  const servers = config && config.mcp && config.mcp.servers;
+  if (servers && typeof servers === 'object' && !Array.isArray(servers)) return true;
+  try {
+    const out = execFileSync('opencode', ['--version'], {
+      encoding: 'utf8',
+      timeout: 10000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const match = out.match(/(\d+)\.\d+/);
+    return Boolean(match) && Number(match[1]) >= 2;
+  } catch {
+    return false;
   }
 }
 
@@ -446,6 +465,18 @@ function installClaudeMcp() {
 // Codex reads AGENTS.md each session; the hook is auto-activation parity with
 // Claude Code's SessionStart. Idempotent via marker checks.
 const CODEX_HOOK_MARKER = 'CAVE-TOOLS ACTIVE';
+const CODEX_AUTO_APPROVED_TOOLS = [
+  'cave__read',
+  'cave__grep',
+  'cave__find',
+  'cave__ls',
+  'cave__status',
+  'cave__compress',
+  'cave__invalidate',
+  'cave__bash_status',
+  'cave__webfetch',
+  'cave__websearch',
+];
 
 function codexConfigDir() {
   return path.join(HOME, '.codex');
@@ -506,6 +537,35 @@ function installCodex() {
       fs.writeFileSync(configPath, nextConfig, { mode: 0o644 });
       trackPath(configPath, 'update');
       log(`updated: ${configPath} [mcp_servers.cave-tools]`);
+    }
+  }
+
+  // 1b. Per-tool approval. Codex's default MCP mode (`auto`) asks before any
+  //     tool without a readOnlyHint, and subagents / `codex exec` run with an
+  //     approval policy of `never`, so every cave call fails there with
+  //     "MCP tool call requires approval" and the agent falls back to shell.
+  //     Approve only the read-only tools: the MCP server runs outside Codex's
+  //     sandbox, so cave__bash / cave__edit / cave__write keep prompting.
+  let approvalConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
+  const approvalBefore = approvalConfig;
+  for (const tool of CODEX_AUTO_APPROVED_TOOLS) {
+    // Add only when missing so a hand-tuned per-tool entry survives reinstall.
+    const header = `mcp_servers.cave-tools.tools.${tool}`;
+    if (!approvalConfig.includes(`[${header}]`)) {
+      approvalConfig = upsertTomlSection(approvalConfig, header, ['approval_mode = "approve"']);
+    }
+  }
+  if (approvalConfig === approvalBefore) {
+    log(`unchanged: ${configPath} cave-tools read-only approvals`);
+  } else {
+    backupOnce(configPath);
+    if (DRY_RUN) {
+      trackPath(configPath, 'update');
+      log(`dry-run: would approve read-only cave-tools tools in ${configPath}`);
+    } else {
+      fs.writeFileSync(configPath, approvalConfig, { mode: 0o644 });
+      trackPath(configPath, 'update');
+      log(`updated: ${configPath} approved read-only cave-tools tools`);
     }
   }
 
@@ -811,11 +871,29 @@ function installOpencodeMcp() {
     config.mcp = {};
   }
   const opencodeMcp = resolveCaveToolsMcpCommand();
-  config.mcp['cave-tools'] = {
-    type: 'local',
-    command: [opencodeMcp.command, ...opencodeMcp.args],
-    enabled: true,
-  };
+  const mcpCommand = [opencodeMcp.command, ...opencodeMcp.args];
+  if (isOpencodeV2(config)) {
+    // V2 defaults MCP servers to Code Mode: tools hide behind the `execute`
+    // JS dispatcher instead of the native tool list, so agents never see
+    // cave__* next to read/grep/glob. codemode is a V2-only field, and V2
+    // ignores it inside a V1-shaped entry — write the native mcp.servers shape.
+    delete config.mcp['cave-tools'];
+    if (!config.mcp.servers || typeof config.mcp.servers !== 'object' || Array.isArray(config.mcp.servers)) {
+      config.mcp.servers = {};
+    }
+    config.mcp.servers['cave-tools'] = {
+      type: 'local',
+      command: mcpCommand,
+      disabled: false,
+      codemode: false,
+    };
+  } else {
+    config.mcp['cave-tools'] = {
+      type: 'local',
+      command: mcpCommand,
+      enabled: true,
+    };
+  }
   const pluginAbs = opencodePluginAbs(configDir);
   ensureOpencodePluginEntry(config, pluginAbs);
   writeJson(configPath, config);
@@ -827,6 +905,12 @@ function installOpencodeMcp() {
     path.join(OPENCODE_PLUGIN_SRC, 'plugin.js'),
     path.join(pluginDir, 'plugin.js'),
     'opencode plugin.js',
+  );
+  // OpenCode 2 loads a plugin directory only through <dir>/server or <dir>/index.
+  copyFileIfNeeded(
+    path.join(OPENCODE_PLUGIN_SRC, 'index.js'),
+    path.join(pluginDir, 'index.js'),
+    'opencode plugin index.js',
   );
   copyFileIfNeeded(
     path.join(OPENCODE_PLUGIN_SRC, 'package.json'),
