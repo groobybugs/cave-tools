@@ -1,11 +1,10 @@
 // cave-tools — opencode plugin
 //
-// Mirrors Claude Code hooks as closely as opencode allows:
-//   - event (session.created): write mode flag each session
-//   - chat.message: parse /cave-tools + natural-language toggles
-//   - experimental.chat.system.transform: per-turn reinforcement
-//   - experimental.session.compacting: keep rules across compaction
-//   - tool.execute.before: block built-ins in enforce/strict (throw)
+// Mirrors Claude Code hooks as closely as opencode allows.
+// OpenCode 2 reads { id, setup(ctx) }. OpenCode 1.18.29+ reads server().
+//   V2: session.hook("prompt"|"context"|"compaction"), tool.hook("execute.before")
+//   V1: event / chat.message / experimental.chat.system.transform /
+//       experimental.session.compacting / tool.execute.before
 //
 // Always-on ruleset lives in ~/.config/opencode/AGENTS.md (Tier-3 base).
 // This plugin handles dynamic state only.
@@ -16,14 +15,10 @@
 //   ├── plugin.js              ← this file
 //   └── cave-tools-config.cjs  ← copied from claude/hooks/cave-tools-config.js
 //
-// Hook mapping (opencode >= 1.15.x):
-//   - event (event.type === 'session.created')
-//   - chat.message
-//   - experimental.chat.system.transform
-//   - experimental.session.compacting
-//   - tool.execute.before
+// Register an absolute plugin path. Relative ./plugins/... breaks when Orca
+// sets OPENCODE_CONFIG_DIR to ~/.config/orca/opencode-hooks/shared.
 //
-// See: https://opencode.ai/docs/plugins/
+// See: https://opencode.ai/v2/docs/build/plugins
 // Caveman reference: JuliusBrussee/caveman src/plugins/opencode/plugin.js
 
 import { createRequire } from 'node:module';
@@ -201,11 +196,61 @@ function denyMessage(tool) {
   }
 }
 
-export const CaveToolsPlugin = async (_ctx) => {
-  // Factory-time flag write covers one-shot `opencode run` race where
-  // session.created may fire before event dispatch is wired.
-  handleSessionCreated();
+function promptText(event) {
+  if (!event) return '';
+  if (typeof event.prompt === 'string') return event.prompt;
+  if (event.prompt && typeof event.prompt.text === 'string') return event.prompt.text;
+  if (typeof event.text === 'string') return event.text;
+  return '';
+}
 
+function pushSystem(event, text) {
+  if (!event || !text) return;
+  if (Array.isArray(event.system)) {
+    const last = event.system[event.system.length - 1];
+    if (event.system.length === 0 || typeof last === 'string') {
+      event.system.push(text);
+      return;
+    }
+    event.system.push({ type: 'text', text });
+    return;
+  }
+  if (Array.isArray(event.context)) event.context.push(text);
+}
+
+function denyBuiltin(toolName, args) {
+  const active = readFlag(flagPath) || getDefaultMode();
+  if (!active || active === 'off' || active === 'hint') return;
+
+  if (String(toolName || '').includes('cave__')) return;
+
+  const tool = normalizeBuiltin(toolName);
+  if (!tool || tool === 'bash') return; // bash stays escape-hatch
+
+  if (active === 'enforce' || active === 'strict') {
+    if (tool === 'read') {
+      const fp = extractFilePath(args);
+      if (isImagePath(fp)) return; // rare image passthrough
+      throw new Error(denyMessage('read'));
+    }
+    if (tool === 'grep') throw new Error(denyMessage('grep'));
+    if (tool === 'glob') throw new Error(denyMessage('glob'));
+  }
+
+  if (active === 'strict' && tool === 'edit') {
+    const fp = extractFilePath(args);
+    if (!fp) return;
+    if (wasReadViaCave(fp)) return;
+    throw new Error(denyMessage('edit'));
+  }
+}
+
+function eventType(event) {
+  if (!event) return '';
+  return String(event.type || (event.event && event.event.type) || '');
+}
+
+function v1HookMap() {
   return {
     event: async ({ event } = {}) => {
       if (event && event.type === 'session.created') handleSessionCreated();
@@ -241,33 +286,91 @@ export const CaveToolsPlugin = async (_ctx) => {
     },
 
     'tool.execute.before': async (input, output) => {
-      const active = readFlag(flagPath) || getDefaultMode();
-      if (!active || active === 'off' || active === 'hint') return;
-
-      const tool = normalizeBuiltin(input && input.tool);
-      if (!tool || tool === 'bash') return; // bash stays escape-hatch
-
-      // Only redirect built-ins; leave MCP cave__* alone
-      if (String(input.tool || '').includes('cave__')) return;
-
-      if (active === 'enforce' || active === 'strict') {
-        if (tool === 'read') {
-          const fp = extractFilePath(output && output.args);
-          if (isImagePath(fp)) return; // rare image passthrough
-          throw new Error(denyMessage('read'));
-        }
-        if (tool === 'grep') throw new Error(denyMessage('grep'));
-        if (tool === 'glob') throw new Error(denyMessage('glob'));
-      }
-
-      if (active === 'strict' && tool === 'edit') {
-        const fp = extractFilePath(output && output.args);
-        if (!fp) return;
-        if (wasReadViaCave(fp)) return;
-        throw new Error(denyMessage('edit'));
-      }
+      denyBuiltin(input && input.tool, output && output.args);
     },
   };
+}
+
+export const CaveToolsPlugin = async (_ctx) => {
+  // Factory-time flag write covers one-shot `opencode run` race where
+  // session.created may fire before event dispatch is wired.
+  handleSessionCreated();
+  return v1HookMap();
 };
 
-export default CaveToolsPlugin;
+async function setup(ctx) {
+  handleSessionCreated();
+
+  const registrations = [];
+  const remember = (reg) => {
+    if (reg && typeof reg.dispose === 'function') registrations.push(reg);
+    return reg;
+  };
+
+  if (ctx && ctx.session && typeof ctx.session.hook === 'function') {
+    remember(await ctx.session.hook('prompt', (event) => {
+      const change = parseModeChange(promptText(event));
+      if (change) applyModeChange(change);
+    }));
+
+    remember(await ctx.session.hook('context', (event) => {
+      const active = readFlag(flagPath);
+      if (active && active !== 'off') pushSystem(event, reinforcementLine(active));
+    }));
+
+    remember(await ctx.session.hook('compaction', (event) => {
+      const active = readFlag(flagPath);
+      if (active && active !== 'off') {
+        pushSystem(
+          event,
+          reinforcementLine(active) +
+            '\nCave-tools AGENTS.md rules still apply after compaction. Prefer cave__* tools.'
+        );
+      }
+    }));
+  }
+
+  if (ctx && ctx.tool && typeof ctx.tool.hook === 'function') {
+    remember(await ctx.tool.hook('execute.before', (event) => {
+      const toolName = event && (event.tool || event.name);
+      const args = (event && (event.input || event.args)) || {};
+      denyBuiltin(toolName, args);
+    }));
+  }
+
+  let abort = null;
+  if (ctx && ctx.event && typeof ctx.event.subscribe === 'function') {
+    const controller = new AbortController();
+    abort = () => controller.abort();
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          const type = eventType(event);
+          if (type === 'session.created' || type.endsWith('.session.created')) {
+            handleSessionCreated();
+          }
+        }
+      } catch (e) {
+        if (!e || e.name === 'AbortError') return;
+      }
+    })();
+  }
+
+  return () => {
+    if (abort) {
+      try { abort(); } catch (e) {}
+    }
+    for (const reg of registrations) {
+      try { void reg.dispose(); } catch (e) {}
+    }
+  };
+}
+
+// V2 reads id + setup(); V1 1.18.29+ reads server(). Do not import
+// @opencode/plugin — this file is copied to ~/.config/opencode/plugins and
+// must load without extra node_modules.
+export default {
+  id: 'cave-tools',
+  setup,
+  server: CaveToolsPlugin,
+};

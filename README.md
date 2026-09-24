@@ -86,7 +86,7 @@ Installer/remover detect installed clients and prompt when run in an interactive
 
 **`--with-extra-rules`** (opt-in) also writes a second fenced block — `<!-- cave-discipline-begin -->` — into every selected target's rules file, bundling five rules: (1) prefer cave-tools MCP, (2) prefix non-cave-tools bash with `rtk` (fallback `rtk proxy`), (3) use codebase-memory-mcp and `index_repository` at init, (4) wait for MCP init before proceeding, (5) subagents must follow these rules too. Off by default — personal/team extras layered on top of the standard cave-tools block. Pass the same flag to `remove:agents` to strip only the discipline block (leaves the cave-tools block intact).
 
-Supported targets: `claude`, `codex`, `gemini`, `antigravity`, `antigravity-cli`, `antigravity-ide`, `antigravity-shared`, `antigravity-backup`, `kiro`, `cursor`, `opencode`, `grok`, `zcode`. Run `pnpm run install:agents -- --list` to see which are detected on this machine.
+Supported targets: `claude`, `codex`, `gemini`, `antigravity`, `antigravity-cli`, `antigravity-ide`, `antigravity-shared`, `antigravity-backup`, `kiro`, `cursor`, `opencode`, `grok`, `zcode`, `hermes`. Run `pnpm run install:agents -- --list` to see which are detected on this machine.
 
 Some clients use a different wrapper key:
 
@@ -105,6 +105,7 @@ Some clients use a different wrapper key:
 | opencode    | `~/.config/opencode/opencode.json` + `plugins/cave-tools/`    | `mcp` + native plugin (per-turn reinforce + tool block) |
 | Grok Build CLI | `~/.grok/config.toml`, `~/.grok/hooks/cave-tools.json`     | TOML `[mcp_servers.cave-tools]` + native hooks |
 | ZCode       | `~/.agents/mcp.json` import source, plus `~/.zcode/AGENTS.md` | `mcpServers`                                   |
+| Hermes Agent | `~/.hermes/config.yaml` + `plugins/cave-tools/`               | YAML `mcp_servers` + native plugin (`pre_tool_call` block) |
 
 opencode example (installer writes MCP + plugin entry):
 
@@ -117,7 +118,7 @@ opencode example (installer writes MCP + plugin entry):
       "enabled": true
     }
   },
-  "plugin": ["./plugins/cave-tools/plugin.js"]
+  "plugin": ["/home/you/.config/opencode/plugins/cave-tools"]
 }
 ```
 
@@ -181,7 +182,7 @@ Instruction blocks are advisory — agents may still reach for the built-in `Rea
 
 Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting with status `2` and emitting a message to stderr. The installer wires a single mode-aware redirect group; this section documents the equivalent manual setup.
 
-1. Register the hooks in `~/.claude/settings.json` (`pnpm run install:agents` does this). Plugin installs load the same events from `claude/hooks/hooks.json` via `claude/.claude-plugin/plugin.json` (`"hooks": "./hooks/hooks.json"`); that file's event map must stay wrapped in a top-level `hooks` key, or the plugin registers nothing. Claude Code does support an `args` array (exec form, recommended for `${CLAUDE_PLUGIN_ROOT}` paths), but the installer emits a single `command` string so every Node hook runs through the `cave-node` launcher shim, which resolves a node >= 20 instead of whatever is first on `PATH`.
+1. Register the hooks in `~/.claude/settings.json` (`pnpm run install:agents` does this). Plugin installs load the same events from `claude/hooks/hooks.json` via `claude/.claude-plugin/plugin.json` (`"hooks": "./hooks/hooks.json"`); that file's event map must stay wrapped in a top-level `hooks` key, or the plugin registers nothing. Claude Code does support an `args` array (exec form, recommended for `${CLAUDE_PLUGIN_ROOT}` paths), but both wirings emit a single `command` string so every Node hook runs through the `cave-node` launcher shim, which resolves a node >= 20 instead of whatever is first on `PATH`: the installer points at the shim's absolute path, and `hooks.json` guards on `command -v cave-node` and falls back to a bare `node` where the shim is absent. The statusline hooks in `hooks.json` are guarded the same way (`command -v cave-tools`), so a plugin install without the npm bin on `PATH` is a no-op instead of a per-session hook error.
 
    ```json
    {
@@ -353,13 +354,15 @@ opencode has no Claude-style `hooks.json`, but it **does** have a native plugin 
 | Slash command | `command/cave-tools.md` (and `commands/` if present) | `/cave-tools off\|hint\|enforce\|strict` |
 | Mode flag | `.cave-tools-active` | Written by plugin on `session.created` |
 
-Plugin hooks (opencode ≥ 1.15):
+Plugin hooks (OpenCode 2; V1 `server()` hooks still exported):
 
-- `event` / `session.created` → write mode flag (default `enforce`, overridable via `CAVE_TOOLS_MODE` or `~/.config/cave-tools/config.json`)
-- `chat.message` → parse `/cave-tools …` and natural-language on/off
-- `experimental.chat.system.transform` → per-turn reinforcement (Claude `UserPromptSubmit` twin)
-- `experimental.session.compacting` → keep rules across compaction
-- `tool.execute.before` → block built-in `read`/`grep`/`glob`/`list` in `enforce`/`strict` (throw with `cave__*` redirect); `strict` also requires prior `cave__read` before `edit`/`write`/`apply_patch`. `bash` stays an escape hatch.
+- `setup` / `session.created` → write mode flag (default `enforce`, overridable via `CAVE_TOOLS_MODE` or `~/.config/cave-tools/config.json`)
+- `session.hook("prompt")` → parse `/cave-tools …` and natural-language on/off
+- `session.hook("context")` → per-turn reinforcement (Claude `UserPromptSubmit` twin)
+- `session.hook("compaction")` → keep rules across compaction
+- `tool.hook("execute.before")` → block built-in `read`/`grep`/`glob`/`list` in `enforce`/`strict` (throw with `cave__*` redirect); `strict` also requires prior `cave__read` before `edit`/`write`/`apply_patch`. `bash` stays an escape hatch.
+
+The installer writes an **absolute** plugin path. Relative `./plugins/cave-tools/plugin.js` fails when Orca remaps `OPENCODE_CONFIG_DIR` to `~/.config/orca/opencode-hooks/shared`.
 
 Install:
 
@@ -381,7 +384,7 @@ What the installer writes into `~/.config/opencode/opencode.json`:
       "enabled": true
     }
   },
-  "plugin": ["./plugins/cave-tools/plugin.js"]
+  "plugin": ["/home/you/.config/opencode/plugins/cave-tools"]
 }
 ```
 
@@ -402,7 +405,7 @@ Uninstall strips MCP + plugin entry, plugin dir, skill, command, AGENTS fence, a
 pnpm run remove:agents -- --agent opencode
 ```
 
-Restart opencode after install so the plugin loads. Verify: `plugin` array contains `./plugins/cave-tools/plugin.js`, `~/.config/opencode/plugins/cave-tools/plugin.js` exists, and a new session writes `~/.config/opencode/.cave-tools-active`.
+Restart opencode after install so the plugin loads. Verify: `plugin` array contains the absolute `.../plugins/cave-tools` directory, `plugin.js` exists inside it, and a new session writes `~/.config/opencode/.cave-tools-active`.
 
 ### Antigravity 2.0 / Gemini CLI
 

@@ -45,7 +45,7 @@ process.stdin.on('end', () => {
     const statusMatch = /^\/cave-tools(?::cave-tools)?\s+status\s*$/i.exec(prompt);
     if (statusMatch) {
       try {
-        const out = execFileSync('cave-tools', ['status'], { encoding: 'utf8', timeout: 5000 });
+        const out = runStatus();
         process.stdout.write(JSON.stringify({ decision: 'block', reason: out.trim() }));
       } catch (e) {
         process.stdout.write(JSON.stringify({
@@ -100,6 +100,19 @@ process.stdin.on('end', () => {
     // Silent fail
   }
 });
+
+// Run `cave-tools status`. A hook inherits the launcher's PATH, which in GUI and
+// desktop sessions often lacks ~/.local/bin, so retry through the launcher shim
+// the installer writes there when the bare PATH lookup finds nothing.
+function runStatus() {
+  const opts = { encoding: 'utf8', timeout: 5000 };
+  try {
+    return execFileSync('cave-tools', ['status'], opts);
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw e;
+    return execFileSync(path.join(os.homedir(), '.local', 'bin', 'cave-tools'), ['status'], opts);
+  }
+}
 
 function buildReminder(mode) {
   const base = 'CAVE-TOOLS MODE ACTIVE (' + mode + '). ' +

@@ -6,13 +6,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-activate.js\"",
+            "command": "if command -v cave-node >/dev/null 2>&1; then exec cave-node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-activate.js\"; else exec node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-activate.js\"; fi",
             "timeout": 5,
             "statusMessage": "Loading cave-tools rules..."
           },
           {
             "type": "command",
-            "command": "cave-tools status --emit-statusline",
+            "command": "command -v cave-tools >/dev/null 2>&1 && cave-tools status --emit-statusline || true",
             "timeout": 3,
             "async": true
           }
@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-subagent.js\"",
+            "command": "if command -v cave-node >/dev/null 2>&1; then exec cave-node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-subagent.js\"; else exec node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-subagent.js\"; fi",
             "timeout": 5
           }
         ]
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-mode-tracker.js\"",
+            "command": "if command -v cave-node >/dev/null 2>&1; then exec cave-node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-mode-tracker.js\"; else exec node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-mode-tracker.js\"; fi",
             "timeout": 5
           }
         ]
@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cave-tools status --emit-statusline",
+            "command": "command -v cave-tools >/dev/null 2>&1 && cave-tools status --emit-statusline || true",
             "timeout": 3,
             "async": true
           }
@@ -72,7 +72,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-recover.js\"",
+            "command": "if command -v cave-node >/dev/null 2>&1; then exec cave-node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-recover.js\"; else exec node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-recover.js\"; fi",
             "timeout": 5
           }
         ]
@@ -84,7 +84,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-recover.js\"",
+            "command": "if command -v cave-node >/dev/null 2>&1; then exec cave-node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-recover.js\"; else exec node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-recover.js\"; fi",
             "timeout": 5
           }
         ]

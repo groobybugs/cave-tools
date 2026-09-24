@@ -1,0 +1,8 @@
+name: cave-tools
+version: "0.1.0"
+description: Redirect Hermes built-in file tools to the cave-tools MCP equivalents.
+author: cave-tools
+hooks:
+  - pre_tool_call
+provides_hooks:
+  - pre_tool_call

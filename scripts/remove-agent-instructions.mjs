@@ -207,7 +207,7 @@ function removeGrokTomlMcp() {
   log(`updated: ${configPath} removed [mcp_servers.cave-tools]`);
 }
 
-const OPENCODE_PLUGIN_REL = './plugins/cave-tools/plugin.js';
+const OPENCODE_PLUGIN_REL = './plugins/cave-tools';
 
 function removeOpencodeMcp() {
   const configDir = opencodeConfigDir();
@@ -222,18 +222,24 @@ function removeOpencodeMcp() {
       delete config.mcp['cave-tools'];
       changed = true;
     }
-    if (Array.isArray(config.plugin)) {
-      const next = config.plugin.filter((entry) => {
-        if (typeof entry !== 'string') return true;
-        return entry !== OPENCODE_PLUGIN_REL
-          && !entry.endsWith('/plugins/cave-tools/plugin.js')
-          && !entry.includes('plugins/cave-tools');
+    const stripList = (key) => {
+      if (!Array.isArray(config[key])) return;
+      const next = config[key].filter((entry) => {
+        const value = typeof entry === 'string'
+          ? entry
+          : (entry && typeof entry === 'object' ? (entry.package || '') : '');
+        if (!value) return true;
+        return value !== OPENCODE_PLUGIN_REL
+          && !value.endsWith('/plugins/cave-tools/plugin.js')
+          && !value.includes('plugins/cave-tools');
       });
-      if (next.length !== config.plugin.length) {
-        config.plugin = next;
+      if (next.length !== config[key].length) {
+        config[key] = next;
         changed = true;
       }
-    }
+    };
+    stripList('plugin');
+    stripList('plugins');
     if (changed) {
       writeJson(configPath, config);
       log(`${DRY_RUN ? 'dry-run: would update' : 'updated'}: ${configPath} removed mcp.cave-tools + plugin`);
@@ -244,6 +250,7 @@ function removeOpencodeMcp() {
 
   removeBlock(path.join(configDir, 'AGENTS.md'));
   removeDirIfExists(path.join(configDir, 'plugins', 'cave-tools'));
+  removeDirIfExists(path.join(HOME, '.config', 'orca', 'opencode-hooks', 'shared', 'plugins', 'cave-tools'));
   removeDirIfExists(path.join(configDir, 'skills', 'cave-tools'));
   removeFileIfExists(path.join(configDir, 'command', 'cave-tools.md'));
   removeFileIfExists(path.join(configDir, 'commands', 'cave-tools.md'));

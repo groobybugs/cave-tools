@@ -4,5 +4,8 @@
   "description": "cave-tools plugin for opencode — mode tracking, per-turn reinforcement, built-in tool redirect",
   "type": "module",
   "main": "plugin.js",
+  "exports": {
+    ".": "./plugin.js"
+  },
   "private": true
 }

@@ -51,11 +51,11 @@ const OPENCODE_CAVE_TOOLS_BLOCK = [
   MARKER_BEGIN,
   '# Cave Tools MCP',
   '',
-  'Native opencode plugin (`./plugins/cave-tools/plugin.js`) keeps cave-tools active every turn:',
+  'Native opencode plugin (`~/.config/opencode/plugins/cave-tools/plugin.js`) keeps cave-tools active every turn:',
   '- `session.created` writes mode flag (`~/.config/opencode/.cave-tools-active`)',
-  '- `experimental.chat.system.transform` injects per-turn reinforcement (Claude UserPromptSubmit twin)',
-  '- `tool.execute.before` blocks built-in read/grep/glob/list in `enforce`/`strict` (points to `cave__*`)',
-  '- `experimental.session.compacting` keeps rules across compaction',
+  '- OpenCode 2: `session.hook("context")` injects per-turn reinforcement (Claude UserPromptSubmit twin)',
+  '- OpenCode 2: `tool.hook("execute.before")` blocks built-in read/grep/glob/list in `enforce`/`strict` (points to `cave__*`)',
+  '- OpenCode 2: `session.hook("compaction")` keeps rules across compaction',
   '- Switch: `/cave-tools off|hint|enforce|strict` or natural language ("use cave-tools" / "stop cave-tools")',
   '',
   'Prefer cave__* over built-ins (same results, fewer tokens):',
@@ -75,8 +75,69 @@ const OPENCODE_CAVE_TOOLS_BLOCK = [
   '',
 ].join('\n');
 
-const OPENCODE_PLUGIN_REL = './plugins/cave-tools/plugin.js';
+const OPENCODE_PLUGIN_REL = './plugins/cave-tools';
 const OPENCODE_PLUGIN_SRC = path.join(REPO_ROOT, 'src', 'plugins', 'opencode');
+const HERMES_PLUGIN_SRC = path.join(REPO_ROOT, 'src', 'plugins', 'hermes');
+
+function opencodePluginAbs(configDir) {
+  return path.join(configDir, 'plugins', 'cave-tools');
+}
+
+function isCaveToolsPluginRef(entry) {
+  if (typeof entry === 'string') {
+    return entry === OPENCODE_PLUGIN_REL
+      || entry === OPENCODE_PLUGIN_REL + '/plugin.js'
+      || entry.endsWith('/plugins/cave-tools')
+      || entry.endsWith('/plugins/cave-tools/plugin.js')
+      || entry.includes('/plugins/cave-tools');
+  }
+  if (entry && typeof entry === 'object') {
+    return isCaveToolsPluginRef(entry.package || '');
+  }
+  return false;
+}
+
+function ensureOpencodePluginEntry(config, pluginAbs) {
+  const keys = new Set(['plugin']);
+  if (Array.isArray(config.plugins)) keys.add('plugins');
+  for (const key of keys) {
+    const current = Array.isArray(config[key]) ? config[key] : [];
+    const next = current.filter((item) => !isCaveToolsPluginRef(item));
+    next.push(pluginAbs);
+    config[key] = next;
+  }
+}
+
+function linkOpencodePluginForOrca(pluginDir) {
+  const dest = path.join(HOME, '.config', 'orca', 'opencode-hooks', 'shared', 'plugins', 'cave-tools');
+  const parent = path.dirname(dest);
+  if (!fs.existsSync(parent)) return;
+  if (DRY_RUN) {
+    log('dry-run: would link ' + dest + ' -> ' + pluginDir);
+    return;
+  }
+  try {
+    const st = fs.lstatSync(dest);
+    if (st.isSymbolicLink()) {
+      let cur = fs.readlinkSync(dest);
+      if (!path.isAbsolute(cur)) cur = path.resolve(parent, cur);
+      if (path.resolve(cur) === path.resolve(pluginDir)) {
+        log('unchanged: ' + dest);
+        return;
+      }
+      fs.unlinkSync(dest);
+    } else {
+      log('skip (exists, not symlink): ' + dest);
+      return;
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  fs.symlinkSync(pluginDir, dest);
+  trackPath(dest, 'write');
+  log('linked: ' + dest + ' -> ' + pluginDir);
+}
+
 const OPENCODE_CONFIG_SRC = path.join(REPO_ROOT, 'claude', 'hooks', 'cave-tools-config.js');
 const OPENCODE_SKILL_SRC = path.join(REPO_ROOT, 'claude', 'skills', 'cave-tools');
 
@@ -134,6 +195,7 @@ const DISCIPLINE_RULES_PATH = path.join(REPO_ROOT, 'rules', 'cave-discipline.md'
 // Kiro steering is file-per-concern with YAML frontmatter (inclusion: always).
 // Generic CAVE_TOOLS_BLOCK is Claude/opencode-shaped — wrong for Kiro tool names.
 const KIRO_CAVE_TOOLS_PATH = path.join(REPO_ROOT, 'rules', 'cave-tools-kiro.md');
+const HERMES_CAVE_TOOLS_PATH = path.join(REPO_ROOT, 'rules', 'cave-tools-hermes.md');
 const KIRO_COMPRESSION_PATH = path.join(REPO_ROOT, 'rules', 'cave-tools-kiro-compression.md');
 const KIRO_EDIT_SAFETY_PATH = path.join(REPO_ROOT, 'rules', 'cave-tools-kiro-edit-safety.md');
 const KIRO_REDIRECT_HOOK_SRC = path.join(REPO_ROOT, 'scripts', 'kiro', 'cave-tools-redirect.sh');
@@ -754,12 +816,10 @@ function installOpencodeMcp() {
     command: [opencodeMcp.command, ...opencodeMcp.args],
     enabled: true,
   };
-  if (!Array.isArray(config.plugin)) config.plugin = [];
-  if (!config.plugin.includes(OPENCODE_PLUGIN_REL)) {
-    config.plugin.push(OPENCODE_PLUGIN_REL);
-  }
+  const pluginAbs = opencodePluginAbs(configDir);
+  ensureOpencodePluginEntry(config, pluginAbs);
   writeJson(configPath, config);
-  log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${configPath} mcp.cave-tools + plugin ${OPENCODE_PLUGIN_REL}`);
+  log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${configPath} mcp.cave-tools + plugin ${pluginAbs}`);
 
   // 3. Plugin payload
   ensureDir(pluginDir);
@@ -779,6 +839,7 @@ function installOpencodeMcp() {
     path.join(pluginDir, 'cave-tools-config.cjs'),
     'opencode cave-tools-config.cjs',
   );
+  linkOpencodePluginForOrca(pluginDir);
 
   // 4. Slash command
   copyFileIfNeeded(
@@ -976,6 +1037,7 @@ function targetDefinitions() {
     { key: 'opencode', label: 'OpenCode', configPath: path.join(opencodeConfigDir(), 'opencode.json'), detectPath: opencodeConfigDir(), special: 'opencode' },
     { key: 'grok', label: 'Grok Build CLI', configPath: path.join(grokConfigDir(), 'config.toml'), detectPath: grokConfigDir(), special: 'grok' },
     { key: 'zcode', label: 'ZCode', configPath: path.join(zcodeConfigDir(), 'AGENTS.md'), detectPath: zcodeConfigDir(), special: 'zcode' },
+    { key: 'hermes', label: 'Hermes Agent', configPath: path.join(HOME, '.hermes', 'config.yaml'), detectPath: path.join(HOME, '.hermes'), special: 'hermes' },
   ];
 }
 
@@ -1096,6 +1158,7 @@ function installSelectedTargets(targets) {
   if (keys.has('opencode')) installOpencodeMcp();
   if (keys.has('grok')) installGrok();
   if (keys.has('zcode')) installZcodeMcp();
+  if (keys.has('hermes')) installHermes();
 
   for (const target of targets) {
     if (target.shape === 'mcpServers') installMcpServersTarget(target.label, target.configPath, target.detectPath);
@@ -1119,6 +1182,8 @@ function installGeminiAndAntigravityRules() {
   upsertFencedBlock(path.join(geminiDir, 'AGENTS.md'), CAVE_TOOLS_BLOCK, { skipIfExistingGuidance: true });
   upsertDisciplineBlock(path.join(geminiDir, 'AGENTS.md'));
 
+  installGeminiRedirectHook(geminiDir);
+
   // Antigravity variants have their own rules locations alongside the shared
   // gemini config. With --with-extra-rules, write the discipline block to the
   // cli/AGENTS.md and the ide/agents/ dir so both variants pick it up.
@@ -1127,6 +1192,120 @@ function installGeminiAndAntigravityRules() {
     if (fs.existsSync(path.dirname(agCliAgents))) upsertDisciplineBlock(agCliAgents);
     const agIdeAgentsDir = path.join(geminiDir, 'antigravity-ide', 'agents');
     if (fs.existsSync(agIdeAgentsDir)) upsertDisciplineBlock(path.join(agIdeAgentsDir, 'cave-discipline.md'));
+  }
+}
+
+// Gemini's BeforeTool can block, and it reads the same flat
+// {"decision":"deny"} shape Grok does, so the shared redirect script serves it
+// with no new emitter. Antigravity is excluded: it is an IDE with no hook API.
+function installGeminiRedirectHook(geminiDir) {
+  const hooksDir = path.join(geminiDir, 'hooks');
+  const redirectPath = path.join(hooksDir, 'cave-tools-redirect.sh');
+  copyFile(path.join(CLAUDE_BUNDLE_DIR, 'hooks/cave-tools-redirect.sh'), redirectPath, 0o755);
+
+  const settingsPath = path.join(geminiDir, 'settings.json');
+  const settings = readJson(settingsPath);
+  if (!settings.hooks || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks)) {
+    settings.hooks = {};
+  }
+  if (!Array.isArray(settings.hooks.BeforeTool)) settings.hooks.BeforeTool = [];
+
+  const already = settings.hooks.BeforeTool.some((group) =>
+    Array.isArray(group?.hooks)
+    && group.hooks.some((h) => String(h?.command ?? '').includes('cave-tools-redirect')));
+  if (already) {
+    log(`unchanged: ${settingsPath} hooks.BeforeTool cave-tools redirect`);
+    return;
+  }
+
+  // Prepend so the block decision lands before the rtk rewrite and any
+  // observer hooks that would otherwise report a call we are about to deny.
+  settings.hooks.BeforeTool.unshift({
+    matcher: 'read_file|read_many_files|grep_search|search_file_content|glob|list_directory|google_search|web_fetch',
+    hooks: [{ type: 'command', command: redirectPath }],
+  });
+  writeJson(settingsPath, settings);
+  log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${settingsPath} hooks.BeforeTool cave-tools redirect`);
+}
+
+// Hermes keeps MCP servers and plugin activation in one YAML file. There is no
+// YAML dependency in this repo, so both edits are line-oriented and idempotent
+// — the same approach upsertTomlSection takes for Grok and Codex.
+function upsertHermesYaml(text, mcp) {
+  let out = text.endsWith('\n') || text === '' ? text : `${text}\n`;
+
+  if (!/^plugins:/m.test(out)) {
+    out += 'plugins:\n  enabled:\n  - cave-tools\n';
+  } else if (!/^\s+-\s*cave-tools\s*$/m.test(out)) {
+    // Append to the existing enabled list, after its last "- item" line.
+    out = out.replace(/(^plugins:\n(?:.*\n)*?\s+enabled:\n(?:\s+-\s*\S.*\n)*)/m,
+      (block) => `${block}  - cave-tools\n`);
+  }
+
+  if (!/^mcp_servers:/m.test(out)) {
+    out += [
+      'mcp_servers:',
+      '  cave-tools:',
+      `    command: ${mcp.command}`,
+      '    args:',
+      ...mcp.args.map((a) => `    - ${a}`),
+      '',
+    ].join('\n');
+  } else if (!/^\s+cave-tools:/m.test(out.slice(out.indexOf('mcp_servers:')))) {
+    out = out.replace(/^mcp_servers:\n/m, [
+      'mcp_servers:',
+      '  cave-tools:',
+      `    command: ${mcp.command}`,
+      '    args:',
+      ...mcp.args.map((a) => `    - ${a}`),
+      '',
+    ].join('\n'));
+  }
+
+  return out;
+}
+
+function installHermes() {
+  const hermesDir = path.join(HOME, '.hermes');
+  if (!fs.existsSync(hermesDir)) {
+    log(`skip (not installed): Hermes Agent → ${hermesDir}`);
+    return;
+  }
+
+  const configPath = path.join(hermesDir, 'config.yaml');
+  const pluginDir = path.join(hermesDir, 'plugins', 'cave-tools');
+  const soulMd = path.join(hermesDir, 'SOUL.md');
+
+  backupGlobalRule(soulMd, 'hermes-SOUL.md');
+
+  copyFile(path.join(HERMES_PLUGIN_SRC, '__init__.py'), path.join(pluginDir, '__init__.py'), 0o644);
+  copyFile(path.join(HERMES_PLUGIN_SRC, 'plugin.yaml'), path.join(pluginDir, 'plugin.yaml'), 0o644);
+
+  const exists = fs.existsSync(configPath);
+  const current = exists ? fs.readFileSync(configPath, 'utf8') : '';
+  const next = upsertHermesYaml(current, resolveCaveToolsMcpCommand());
+  if (next === current) {
+    log(`unchanged: ${configPath} mcp_servers.cave-tools + plugins.enabled`);
+  } else if (DRY_RUN) {
+    trackPath(configPath, exists ? 'update' : 'create');
+    log(`dry-run: would update ${configPath} mcp_servers.cave-tools + plugins.enabled`);
+  } else {
+    backupOnce(configPath);
+    ensureDir(path.dirname(configPath));
+    fs.writeFileSync(configPath, next, { mode: 0o644 });
+    trackPath(configPath, exists ? 'update' : 'create');
+    log(`updated: ${configPath} mcp_servers.cave-tools + plugins.enabled`);
+  }
+
+  // SOUL.md is the user-level system prompt Hermes auto-injects; AGENTS.md is
+  // resolved per-project from the cwd, so global guidance belongs here. Hermes
+  // tool names differ from Claude's, so use the Hermes rules file rather than
+  // the generic block — same split Kiro uses.
+  if (!fs.existsSync(HERMES_CAVE_TOOLS_PATH)) {
+    log(`skip (missing): ${HERMES_CAVE_TOOLS_PATH}`);
+  } else {
+    const body = fs.readFileSync(HERMES_CAVE_TOOLS_PATH, 'utf8').trim();
+    upsertFencedBlock(soulMd, `${MARKER_BEGIN}\n${body}\n${MARKER_END}\n`, { skipIfExistingGuidance: true });
   }
 }
 

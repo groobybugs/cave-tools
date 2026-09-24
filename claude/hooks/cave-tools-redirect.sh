@@ -3,13 +3,16 @@
 # Blocks built-in Read/Grep/Glob/WebFetch/WebSearch when cave-tools mode is
 # `enforce` or `strict`, pointing the model at the cave-tools equivalent.
 #
-# Works for Claude Code and Grok Build CLI (dual harness):
+# Works for Claude Code, Grok Build CLI and Gemini CLI (tri-harness):
 #   - Claude stdin:  tool_name / tool_input.file_path
 #   - Grok stdin:    toolName  / toolInput.file_path (or filePath / path / targetFile)
+#   - Gemini stdin:  tool_name / tool_input.file_path, with hook_event_name=BeforeTool
 #   - Tool aliases:  read_file≡Read, grep≡Grep, list_dir|Glob≡Glob,
 #                    search_replace≡Edit|Write, web_fetch≡WebFetch,
 #                    web_search≡WebSearch, run_terminal_cmd≡Bash
-#   - Deny: JSON decision on stdout for Grok; stderr + exit 2 for Claude
+#   - Deny: JSON decision on stdout — Grok and Gemini both read the flat
+#     {"decision":"deny","reason":...}; Claude reads
+#     hookSpecificOutput.permissionDecision=deny (exit 0)
 #
 # Honors the flag file at $CLAUDE_CONFIG_DIR/.cave-tools-active:
 #   off    → exits 0, no blocking (skill dormant)
@@ -70,6 +73,12 @@ IS_GROK=0
 if printf '%s' "$INPUT" | jq -e 'has("toolName") or has("toolInput")' >/dev/null 2>&1; then
   IS_GROK=1
 fi
+# Gemini CLI sends the Claude-style snake_case envelope but expects the flat
+# decision object Grok uses, so it needs its own discriminator.
+IS_GEMINI=0
+if printf '%s' "$INPUT" | jq -e '.hook_event_name == "BeforeTool"' >/dev/null 2>&1; then
+  IS_GEMINI=1
+fi
 FPATH=$(printf '%s' "$INPUT" | jq -r '
   .tool_input.file_path
   // .tool_input.filePath
@@ -92,24 +101,37 @@ FPATH=$(printf '%s' "$INPUT" | jq -r '
 
 # Normalize Grok / Cursor-style names to Claude canonical names used below.
 case "$TOOL" in
-  read_file|ReadFile) TOOL=Read ;;
-  grep|Grep) TOOL=Grep ;;
-  list_dir|ListDir|Glob|glob) TOOL=Glob ;;
-  search_replace|MultiEdit|Edit|Write|write_file|WriteFile) TOOL=Edit ;;
+  read_file|ReadFile|read_many_files) TOOL=Read ;;
+  grep|Grep|grep_search|search_file_content) TOOL=Grep ;;
+  list_dir|ListDir|Glob|glob|list_directory) TOOL=Glob ;;
+  search_replace|MultiEdit|Edit|Write|write_file|WriteFile|replace) TOOL=Edit ;;
   web_fetch|webfetch|WebFetch|fetch_url) TOOL=WebFetch ;;
-  web_search|websearch|WebSearch) TOOL=WebSearch ;;
-  bash|Bash|shell|run_terminal_cmd) TOOL=Bash ;;
+  web_search|websearch|WebSearch|google_search) TOOL=WebSearch ;;
+  bash|Bash|shell|run_terminal_cmd|run_shell_command) TOOL=Bash ;;
 esac
 
 deny() {
   local reason="$1"
-  # Grok PreToolUse requires explicit deny JSON on stdout; keep Claude stdout
-  # clean so existing exit-2/stderr UX does not regress.
-  if [ "$IS_GROK" = "1" ]; then
-    printf '%s\n' "{\"decision\":\"deny\",\"reason\":$(printf '%s' "$reason" | jq -Rs .)}"
+  local json_reason
+  json_reason=$(printf '%s' "$reason" | jq -Rs . 2>/dev/null)
+  # No jq, no JSON: fall back to the exit-2 blocking path so a missing
+  # dependency can never turn a deny into a silent allow.
+  if [ -z "$json_reason" ]; then
+    echo "BLOCKED: $reason" >&2
+    exit 2
   fi
+  # Grok PreToolUse expects a top-level decision object; Claude Code expects the
+  # documented PreToolUse decision under hookSpecificOutput. Only one harness
+  # reads stdout, so emit exactly one shape (stdout must hold the JSON alone).
+  if [ "$IS_GROK" = "1" ] || [ "$IS_GEMINI" = "1" ]; then
+    printf '%s\n' "{\"decision\":\"deny\",\"reason\":$json_reason}"
+    echo "BLOCKED: $reason" >&2
+    exit 2
+  fi
+  printf '%s\n' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":$json_reason}}"
+  # Debug-log copy only; the permissionDecisionReason above is what Claude sees.
   echo "BLOCKED: $reason" >&2
-  exit 2
+  exit 0
 }
 
 case "$TOOL" in
