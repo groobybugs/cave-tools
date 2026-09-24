@@ -352,6 +352,7 @@ export const webfetchTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__webfetch",
+  annotations: { readOnlyHint: true, openWorldHint: true },
   description:
     "Fetch a URL and return its content as markdown, text, or html. Images and other non-textual content are rejected (matching upstream opencode webfetch). Non-2xx responses are errors. Output is redacted, archived if large, and trimmed to a line budget. Use when you need to retrieve and analyze a specific web page. Note: follows redirects and allows fetching any http(s) URL including localhost/private IPs (same posture as the built-in webfetch).",
   inputSchema: {

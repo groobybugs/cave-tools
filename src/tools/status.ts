@@ -18,6 +18,7 @@ export const statusTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__status",
+  annotations: { readOnlyHint: true },
   description:
     "Show token-optimization stats for the current session: dedup cache hit rate, total tokens saved, per-tool output budgets, and RTK availability.",
   inputSchema: {

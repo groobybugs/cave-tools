@@ -206,6 +206,7 @@ export const readTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__read",
+  annotations: { readOnlyHint: true },
   description:
     "Optimized drop-in replacement for the built-in Read. Returns the same file content, but sends a stub when the file is unchanged since the last read in this session (skips re-sending identical content). Image files (.png, .jpg, .jpeg, .gif, .webp, .bmp, .svg) are returned as image content blocks (base64); PDFs are returned as embedded resources; offset/limit are ignored for images, signatures, and aggressive modes. Binary files are rejected. Use mode='signatures' to return only function/class/type signatures (TS/JS/Rust). Use mode='aggressive' to drop comments and blank lines. Set line_numbers=true to prefix output with line numbers for precise edits (disables codebook compression).",
   inputSchema: {

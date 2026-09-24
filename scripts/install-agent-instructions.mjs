@@ -544,6 +544,8 @@ function installCodex() {
   //     tool without a readOnlyHint, and subagents / `codex exec` run with an
   //     approval policy of `never`, so every cave call fails there with
   //     "MCP tool call requires approval" and the agent falls back to shell.
+  //     The server now sets readOnlyHint on those tools, which `auto` honours;
+  //     this explicit config also covers older cave-tools builds.
   //     Approve only the read-only tools: the MCP server runs outside Codex's
   //     sandbox, so cave__bash / cave__edit / cave__write keep prompting.
   let approvalConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';

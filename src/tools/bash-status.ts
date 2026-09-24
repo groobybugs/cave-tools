@@ -36,6 +36,7 @@ export const bashStatusTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__bash_status",
+  annotations: { readOnlyHint: true },
   description:
     "Checks a background job started with cave__bash_start. Returns state (running/exited/killed/lost), exit code, duration, and a log tail. Optional 'wait' blocks server-side up to 60 seconds, returning the moment the job exits — use it instead of sleep-polling. Called without jobId, lists the session's jobs.",
   inputSchema: {

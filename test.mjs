@@ -54,6 +54,20 @@ import { createServer } from "node:http";
 async function test() {
   console.log("Testing Cave Tools...\n");
 
+  // Codex's default MCP approval mode (`auto`) skips the prompt only for
+  // readOnlyHint tools; subagents cannot answer a prompt, so a missing hint
+  // makes every call fail there. Mutating tools must stay unhinted.
+  console.log("0. Testing tool annotations:");
+  for (const tool of [readTool, grepTool, findTool, lsTool, statusTool, bashStatusTool,
+    compressTool, invalidateTool, webfetchTool, websearchTool]) {
+    assert.equal(tool.annotations?.readOnlyHint, true, `${tool.name} readOnlyHint`);
+  }
+  for (const tool of [bashTool, bashStartTool, bashStopTool, writeTool, editTool,
+    applyPatchTool, configureTool]) {
+    assert.notEqual(tool.annotations?.readOnlyHint, true, `${tool.name} must not be readOnly`);
+  }
+  console.log("tool annotation tests passed\n");
+
   // Test bash
   console.log("1. Testing cave__bash:");
   const bashResult = await bashTool.handler({

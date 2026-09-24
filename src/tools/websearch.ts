@@ -149,6 +149,7 @@ export const websearchTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__websearch",
+  annotations: { readOnlyHint: true, openWorldHint: true },
   description:
     `Search the web using Exa or Parallel MCP backends, then run the result through Cave Tools redaction, archiving, and line-budget compression. Use for current information beyond knowledge cutoff. Current year: ${new Date().getFullYear()}.`,
   inputSchema: {

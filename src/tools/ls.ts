@@ -11,6 +11,7 @@ export const lsTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__ls",
+  annotations: { readOnlyHint: true },
   description:
     "Optimized drop-in replacement for listing a directory. Returns entries sorted alphabetically, with '/' suffix for directories, includes dotfiles, and trims output to a line budget.",
   inputSchema: {

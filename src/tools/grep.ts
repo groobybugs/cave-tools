@@ -10,6 +10,7 @@ export const grepTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__grep",
+  annotations: { readOnlyHint: true },
   description:
     "Optimized drop-in replacement for the built-in Grep (ripgrep). Returns matching lines with file paths and line numbers, respects .gitignore, with output trimmed to a line budget.",
   inputSchema: {

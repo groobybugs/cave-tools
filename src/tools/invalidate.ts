@@ -6,6 +6,7 @@ export const invalidateTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__invalidate",
+  annotations: { readOnlyHint: true },
   description:
     "Invalidate the read dedup cache for one or more paths without touching disk. Call this after editing files outside Cave Tools so the next cave__read returns fresh content instead of an unchanged stub. To write file content, use cave__write.",
   inputSchema: {

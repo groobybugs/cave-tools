@@ -11,6 +11,7 @@ export const findTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__find",
+  annotations: { readOnlyHint: true },
   description:
     "Optimized drop-in replacement for the built-in Glob/find (fd when available, Node fallback). Returns matching file paths relative to the search directory, with output trimmed to a line budget. Set hidden=false to exclude dotfiles (upstream opencode glob default).",
   inputSchema: {

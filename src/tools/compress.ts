@@ -7,6 +7,7 @@ export const compressTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__compress",
+  annotations: { readOnlyHint: true },
   description:
     "Reduce arbitrary text to fewer tokens through the full pipeline: ANSI stripping, blank-line collapse, line budgeting, and optional structured JSON/XML extraction. Use action='expand' with archive_id to retrieve a large archived output.",
   inputSchema: {
