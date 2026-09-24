@@ -3,14 +3,15 @@
 # Blocks built-in Read/Grep/Glob/WebFetch/WebSearch when cave-tools mode is
 # `enforce` or `strict`, pointing the model at the cave-tools equivalent.
 #
-# Works for Claude Code, Grok Build CLI and Gemini CLI (tri-harness):
+# Works for Claude Code, Grok Build CLI, Gemini CLI and Antigravity:
 #   - Claude stdin:  tool_name / tool_input.file_path
 #   - Grok stdin:    toolName  / toolInput.file_path (or filePath / path / targetFile)
 #   - Gemini stdin:  tool_name / tool_input.file_path, with hook_event_name=BeforeTool
-#   - Tool aliases:  read_file≡Read, grep≡Grep, list_dir|Glob≡Glob,
-#                    search_replace≡Edit|Write, web_fetch≡WebFetch,
-#                    web_search≡WebSearch, run_terminal_cmd≡Bash
-#   - Deny: JSON decision on stdout — Grok and Gemini both read the flat
+#   - Antigravity:   toolCall.name / toolCall.args.AbsolutePath (IDE and CLI)
+#   - Tool aliases:  read_file|view_file≡Read, grep≡Grep, list_dir|find_by_name|Glob≡Glob,
+#                    search_replace≡Edit|Write, web_fetch|read_url_content≡WebFetch,
+#                    web_search|search_web≡WebSearch, run_terminal_cmd|run_command≡Bash
+#   - Deny: JSON decision on stdout — Grok, Gemini and Antigravity read the flat
 #     {"decision":"deny","reason":...}; Claude reads
 #     hookSpecificOutput.permissionDecision=deny (exit 0)
 #
@@ -67,7 +68,7 @@ esac
 
 # Extract tool name + path from Claude or Grok event envelopes.
 TOOL=$(printf '%s' "$INPUT" | jq -r '
-  .tool_name // .toolName // .tool // empty
+  .tool_name // .toolName // .tool // .toolCall.name // empty
 ' 2>/dev/null)
 IS_GROK=0
 if printf '%s' "$INPUT" | jq -e 'has("toolName") or has("toolInput")' >/dev/null 2>&1; then
@@ -78,6 +79,11 @@ fi
 IS_GEMINI=0
 if printf '%s' "$INPUT" | jq -e '.hook_event_name == "BeforeTool"' >/dev/null 2>&1; then
   IS_GEMINI=1
+fi
+# Antigravity (IDE + CLI) nests the call under toolCall {name, args}.
+IS_ANTIGRAVITY=0
+if printf '%s' "$INPUT" | jq -e 'has("toolCall")' >/dev/null 2>&1; then
+  IS_ANTIGRAVITY=1
 fi
 FPATH=$(printf '%s' "$INPUT" | jq -r '
   .tool_input.file_path
@@ -98,16 +104,25 @@ FPATH=$(printf '%s' "$INPUT" | jq -r '
   // .toolInput.old_file_path
   // empty
 ' 2>/dev/null)
+# Antigravity: toolCall.args uses PascalCase keys, and a value may arrive
+# JSON-encoded ("\"/abs/path\""), so decode it when it parses as a string.
+if [ "$IS_ANTIGRAVITY" = "1" ] && [ -z "$FPATH" ]; then
+  FPATH=$(printf '%s' "$INPUT" | jq -r '
+    (.toolCall.args.AbsolutePath // .toolCall.args.TargetFile // empty)
+    | if type == "string" then (try fromjson catch .) else . end
+    | if type == "string" then . else empty end
+  ' 2>/dev/null)
+fi
 
 # Normalize Grok / Cursor-style names to Claude canonical names used below.
 case "$TOOL" in
-  read_file|ReadFile|read_many_files) TOOL=Read ;;
+  read_file|ReadFile|read_many_files|view_file) TOOL=Read ;;
   grep|Grep|grep_search|search_file_content) TOOL=Grep ;;
-  list_dir|ListDir|Glob|glob|list_directory) TOOL=Glob ;;
-  search_replace|MultiEdit|Edit|Write|write_file|WriteFile|replace) TOOL=Edit ;;
-  web_fetch|webfetch|WebFetch|fetch_url) TOOL=WebFetch ;;
-  web_search|websearch|WebSearch|google_search) TOOL=WebSearch ;;
-  bash|Bash|shell|run_terminal_cmd|run_shell_command) TOOL=Bash ;;
+  list_dir|ListDir|Glob|glob|list_directory|find_by_name) TOOL=Glob ;;
+  search_replace|MultiEdit|Edit|Write|write_file|WriteFile|replace|write_to_file|replace_file_content|multi_replace_file_content) TOOL=Edit ;;
+  web_fetch|webfetch|WebFetch|fetch_url|read_url_content) TOOL=WebFetch ;;
+  web_search|websearch|WebSearch|google_search|search_web) TOOL=WebSearch ;;
+  bash|Bash|shell|run_terminal_cmd|run_shell_command|run_command) TOOL=Bash ;;
 esac
 
 deny() {
@@ -127,6 +142,11 @@ deny() {
     printf '%s\n' "{\"decision\":\"deny\",\"reason\":$json_reason}"
     echo "BLOCKED: $reason" >&2
     exit 2
+  fi
+  # Antigravity reads the same flat decision from stdout on a clean exit.
+  if [ "$IS_ANTIGRAVITY" = "1" ]; then
+    printf '%s\n' "{\"decision\":\"deny\",\"reason\":$json_reason}"
+    exit 0
   fi
   printf '%s\n' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":$json_reason}}"
   # Debug-log copy only; the permissionDecisionReason above is what Claude sees.
@@ -168,7 +188,9 @@ case "$TOOL" in
     ' 2>/dev/null)
     [ "$BG" = "true" ] && exit 0
     CMD=$(printf '%s' "$INPUT" | jq -r '
-      .tool_input.command // .toolInput.command // empty
+      .tool_input.command // .toolInput.command
+      // (.toolCall.args.CommandLine | if type == "string" then (try fromjson catch .) else . end)
+      // empty
     ' 2>/dev/null)
     case "$CMD" in
       *"tail -f"*|*"watch "*|*"journalctl -f"*|*--watch*) exit 0 ;;

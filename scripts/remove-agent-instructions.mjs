@@ -209,6 +209,32 @@ function removeGrokTomlMcp() {
 
 const OPENCODE_PLUGIN_REL = './plugins/cave-tools';
 
+// Antigravity: drop our named PreToolUse group from the shared hooks.json and
+// the script it points at, leaving other groups (e.g. orca-status) intact.
+function removeAntigravityRedirectHook() {
+  const configDir = path.join(HOME, '.gemini', 'config');
+  const hooksPath = path.join(configDir, 'hooks.json');
+  const hooks = readJsonForRemoval(hooksPath);
+  if (hooks && Object.prototype.hasOwnProperty.call(hooks, 'cave-tools')) {
+    delete hooks['cave-tools'];
+    writeJson(hooksPath, hooks);
+    log(`${DRY_RUN ? 'dry-run: would update' : 'updated'}: ${hooksPath} removed cave-tools PreToolUse redirect`);
+  }
+  removeFileIfExists(path.join(configDir, 'hooks', 'cave-tools-redirect.sh'));
+}
+
+function removeAntigravityCliPermissions() {
+  const settingsPath = path.join(HOME, '.gemini', 'antigravity-cli', 'settings.json');
+  const settings = readJsonForRemoval(settingsPath);
+  const allow = settings?.permissions?.allow;
+  if (!Array.isArray(allow)) return;
+  const next = allow.filter((rule) => !String(rule).startsWith('mcp(cave-tools/'));
+  if (next.length === allow.length) return;
+  settings.permissions.allow = next;
+  writeJson(settingsPath, settings);
+  log(`${DRY_RUN ? 'dry-run: would update' : 'updated'}: ${settingsPath} removed cave-tools permissions`);
+}
+
 function removeOpencodeMcp() {
   const configDir = opencodeConfigDir();
   const configPath = path.join(configDir, 'opencode.json');
@@ -800,6 +826,8 @@ function removeSelectedTargets(targets) {
   if ([...keys].some((key) => key === 'gemini' || key.startsWith('antigravity'))) {
     removeBlock(path.join(HOME, '.gemini', 'GEMINI.md'));
     removeBlock(path.join(HOME, '.gemini', 'AGENTS.md'));
+    removeAntigravityRedirectHook();
+    removeAntigravityCliPermissions();
     if (WITH_EXTRA_RULES) {
       removeDisciplineBlock(path.join(HOME, '.gemini', 'AGENTS.md'));
       removeDisciplineBlock(path.join(HOME, '.gemini', 'antigravity-cli', 'AGENTS.md'));

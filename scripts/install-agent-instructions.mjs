@@ -465,7 +465,7 @@ function installClaudeMcp() {
 // Codex reads AGENTS.md each session; the hook is auto-activation parity with
 // Claude Code's SessionStart. Idempotent via marker checks.
 const CODEX_HOOK_MARKER = 'CAVE-TOOLS ACTIVE';
-const CODEX_AUTO_APPROVED_TOOLS = [
+const CAVE_READ_ONLY_TOOLS = [
   'cave__read',
   'cave__grep',
   'cave__find',
@@ -550,7 +550,7 @@ function installCodex() {
   //     sandbox, so cave__bash / cave__edit / cave__write keep prompting.
   let approvalConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
   const approvalBefore = approvalConfig;
-  for (const tool of CODEX_AUTO_APPROVED_TOOLS) {
+  for (const tool of CAVE_READ_ONLY_TOOLS) {
     // Add only when missing so a hand-tuned per-tool entry survives reinstall.
     const header = `mcp_servers.cave-tools.tools.${tool}`;
     if (!approvalConfig.includes(`[${header}]`)) {
@@ -1269,6 +1269,8 @@ function installGeminiAndAntigravityRules() {
   upsertDisciplineBlock(path.join(geminiDir, 'AGENTS.md'));
 
   installGeminiRedirectHook(geminiDir);
+  installAntigravityRedirectHook(geminiDir);
+  installAntigravityCliPermissions(geminiDir);
 
   // Antigravity variants have their own rules locations alongside the shared
   // gemini config. With --with-extra-rules, write the discipline block to the
@@ -1281,9 +1283,68 @@ function installGeminiAndAntigravityRules() {
   }
 }
 
+// Antigravity 2.0 (IDE and CLI) runs PreToolUse hooks from the shared
+// customization dir ~/.gemini/config/hooks.json: a map of named groups, with
+// the call on stdin as toolCall {name, args} and a flat {"decision":"deny"}
+// read from stdout. The shared redirect script handles that envelope. Our
+// group is keyed "cave-tools", so reinstall overwrites only it.
+const ANTIGRAVITY_HOOK_GROUP = 'cave-tools';
+const ANTIGRAVITY_REDIRECT_MATCHER = [
+  'view_file', 'grep_search', 'find_by_name', 'list_dir', 'search_web', 'read_url_content',
+  'run_command', 'write_to_file', 'replace_file_content', 'multi_replace_file_content',
+].join('|');
+
+function installAntigravityRedirectHook(geminiDir) {
+  const configDir = path.join(geminiDir, 'config');
+  if (!fs.existsSync(configDir)) {
+    log(`skip (not installed): Antigravity hooks → ${configDir}`);
+    return;
+  }
+  const redirectPath = path.join(configDir, 'hooks', 'cave-tools-redirect.sh');
+  copyFile(path.join(CLAUDE_BUNDLE_DIR, 'hooks/cave-tools-redirect.sh'), redirectPath, 0o755);
+
+  const hooksPath = path.join(configDir, 'hooks.json');
+  const hooks = readJson(hooksPath);
+  hooks[ANTIGRAVITY_HOOK_GROUP] = {
+    PreToolUse: [{
+      matcher: ANTIGRAVITY_REDIRECT_MATCHER,
+      hooks: [{ type: 'command', command: redirectPath, timeout: 5 }],
+    }],
+  };
+  writeJson(hooksPath, hooks);
+  log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${hooksPath} ${ANTIGRAVITY_HOOK_GROUP} PreToolUse redirect`);
+}
+
+// Antigravity CLI defaults every MCP tool to Ask. Allow the read-only cave
+// tools so a subagent that cannot answer a prompt still reaches them; the
+// CLI syncs permissions to the IDE. Mutating tools keep asking.
+function installAntigravityCliPermissions(geminiDir) {
+  const cliDir = path.join(geminiDir, 'antigravity-cli');
+  if (!fs.existsSync(cliDir)) {
+    log(`skip (not installed): Antigravity CLI permissions → ${cliDir}`);
+    return;
+  }
+  const settingsPath = path.join(cliDir, 'settings.json');
+  const settings = readJson(settingsPath);
+  if (!settings.permissions || typeof settings.permissions !== 'object' || Array.isArray(settings.permissions)) {
+    settings.permissions = {};
+  }
+  const allow = Array.isArray(settings.permissions.allow) ? settings.permissions.allow : [];
+  const missing = CAVE_READ_ONLY_TOOLS
+    .map((tool) => `mcp(cave-tools/${tool})`)
+    .filter((rule) => !allow.includes(rule));
+  if (missing.length === 0) {
+    log(`unchanged: ${settingsPath} cave-tools read-only permissions`);
+    return;
+  }
+  settings.permissions.allow = [...allow, ...missing];
+  writeJson(settingsPath, settings);
+  log(`${DRY_RUN ? 'dry-run: would configure' : 'configured'}: ${settingsPath} allow ${missing.length} read-only cave-tools tools`);
+}
+
 // Gemini's BeforeTool can block, and it reads the same flat
 // {"decision":"deny"} shape Grok does, so the shared redirect script serves it
-// with no new emitter. Antigravity is excluded: it is an IDE with no hook API.
+// with no new emitter.
 function installGeminiRedirectHook(geminiDir) {
   const hooksDir = path.join(geminiDir, 'hooks');
   const redirectPath = path.join(hooksDir, 'cave-tools-redirect.sh');

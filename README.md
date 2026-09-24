@@ -432,7 +432,9 @@ Restart opencode after install so the plugin loads (V2 also auto-reloads on conf
 
 ### Antigravity 2.0 / Gemini CLI
 
-Antigravity and Gemini CLI have no `deny`/hook system — enforcement is the global rules file plus the UI tool toggles.
+Antigravity 2.0 (IDE and CLI) runs `PreToolUse` hooks from `~/.gemini/config/hooks.json`, a map of named groups. The installer adds a `cave-tools` group that runs the shared redirect script (copied to `~/.gemini/config/hooks/cave-tools-redirect.sh`) on `view_file`, `grep_search`, `find_by_name`, `list_dir`, `search_web`, `read_url_content`, plus `run_command` and the edit tools for `strict`. The script reads Antigravity's `toolCall {name, args}` input and answers with the flat `{"decision":"deny","reason":...}`. The mode comes from the Claude flag file (`~/.claude/.cave-tools-active`, default `enforce`). Other groups (e.g. `orca-status`) are left alone.
+
+Antigravity CLI defaults every MCP tool to Ask, and a subagent may not be able to answer. The installer adds `mcp(cave-tools/<tool>)` to `permissions.allow` in `~/.gemini/antigravity-cli/settings.json` for the read-only tools only (read, grep, find, ls, status, compress, invalidate, bash_status, webfetch, websearch); the CLI syncs permissions to the IDE. Antigravity calls MCP tools through a generic `call_mcp_tool` dispatcher rather than as native tools.
 
 - Add global rules at `~/.gemini/GEMINI.md` (Antigravity's native global rules — three-dot menu in the Agent chat → **+ Global** creates it) and/or the cross-tool `~/.gemini/AGENTS.md`.
 - These files do **not** support `@file` imports — inline the rules directly. A bare `@RTK.md` line is silently ignored, so paste the actual content.
