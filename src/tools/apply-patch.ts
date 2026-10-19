@@ -730,13 +730,12 @@ function relativize(absolute: string): string {
 export const applyPatchTool: Tool & { handler: (args: Record<string, unknown>) => Promise<ToolResult> } = {
   name: "cave__apply_patch",
   description:
-    "Apply one patch containing add, update, delete, and move file operations. Every patch operation is verified before any disk write; if a write-time error occurs after verification, partial state may remain on disk.",
+    "Apply a multi-file add/update/delete/move patch. All ops are verified before writing; a write-time error may leave partial state.",
   inputSchema: {
     type: "object",
     properties: {
       patchText: {
         type: "string",
-        description: "The full patch text describing add, update, delete, and move operations",
       },
     },
     required: ["patchText"],

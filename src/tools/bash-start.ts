@@ -9,21 +9,20 @@ export const bashStartTool: Tool & {
 } = {
   name: "cave__bash_start",
   description:
-    "Starts a long-running shell command in the background and returns immediately with a jobId. Use for builds, test suites, installs, or anything expected to exceed a couple of minutes. Output is written to a log file on disk, never to the conversation. Poll with cave__bash_status (supports wait up to 60s); stop with cave__bash_stop. Prefer this over cave__bash with sleep-polling loops.",
+    "Run a command over ~2 min (builds, tests, installs) detached; returns a jobId, output goes to a log file. Poll with cave__bash_status, stop with cave__bash_stop. Never sleep-poll in cave__bash.",
   inputSchema: {
     type: "object",
     properties: {
       command: {
         type: "string",
-        description: "The shell command to execute in the background",
       },
       description: {
         type: "string",
-        description: "Clear, concise description of what the command does (5-10 words)",
+        description: "5-10 word summary",
       },
       workdir: {
         type: "string",
-        description: "Working directory to run the command in. Use this instead of 'cd'.",
+        description: "Use instead of cd",
       },
     },
     required: ["command", "description"],

@@ -9,38 +9,35 @@ export const compressTool: Tool & {
   name: "cave__compress",
   annotations: { readOnlyHint: true },
   description:
-    "Reduce arbitrary text to fewer tokens through the full pipeline: ANSI stripping, blank-line collapse, line budgeting, and optional structured JSON/XML extraction. Use action='expand' with archive_id to retrieve a large archived output.",
+    "Compress text to fewer tokens (ANSI strip, line budget, JSON/XML extraction). action='expand' + archive_id retrieves archived output.",
   inputSchema: {
     type: "object",
     properties: {
       text: {
         type: "string",
-        description: "The text to optimize",
       },
       command_hint: {
         type: "string",
-        description:
-          "The command that produced this output (for structured extraction)",
+        description: "Command that produced the text",
       },
       structured: {
         type: "boolean",
-        description: "Whether to apply structured JSON/XML extraction",
+        description: "JSON/XML extraction",
         default: true,
       },
       tool_name: {
         type: "string",
-        description: "Tool name for budget selection (bash, read, grep)",
+        description: "Budget to apply (bash, read, grep)",
         default: "bash",
       },
       action: {
         type: "string",
         enum: ["compress", "expand"],
-        description: "Action: optimize text (default) or expand an archive_id",
         default: "compress",
       },
       archive_id: {
         type: "string",
-        description: "Archive ID to expand when action='expand'",
+        description: "For action='expand'",
       },
     },
     required: ["text"],

@@ -75,6 +75,8 @@ import { tmpdir } from "node:os";
 import { join, delimiter as pathDelimiter } from "node:path";
 import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { listedTools } from "./dist/index.js";
 
 async function test() {
   console.log("Testing Cave Tools...\n");
@@ -2780,6 +2782,69 @@ process.exit(1);
     }
     console.log("RTK strip / timeout / counter tests passed");
     console.log();
+  }
+
+  {
+    console.log("Testing tool profile filtering:");
+    const hidden = ["cave__configure", "cave__compress", "cave__status"];
+    const full = listedTools("full").map((t) => t.name);
+    assert.equal(full.length, 17, "full lists all tools");
+    for (const name of hidden) assert.ok(full.includes(name), `full lists ${name}`);
+    for (const profile of [undefined, "", "standard", "bogus"]) {
+      const names = listedTools(profile).map((t) => t.name);
+      assert.equal(names.length, 14, `profile ${profile} lists 14 tools`);
+      for (const name of hidden) assert.ok(!names.includes(name), `profile ${profile} hides ${name}`);
+    }
+    assert.equal(listedTools(" FULL ").length, 17, "profile is trimmed + case-insensitive");
+    console.log("tool profile tests passed\n");
+  }
+
+  {
+    console.log("Testing compact ruleset extraction:");
+    const require = createRequire(import.meta.url);
+    const config = require("./claude/hooks/cave-tools-config.js");
+    const skill = readFileSync("./claude/skills/cave-tools/SKILL.md", "utf8");
+    for (const mode of ["hint", "enforce", "strict"]) {
+      const compact = config.extractCompactRuleset(skill, mode);
+      assert.ok(compact, `${mode}: compact block found`);
+      assert.equal(compact, config.fallbackRuleset(mode), `${mode}: fallback in sync with SKILL.md`);
+      assert.equal(config.buildRuleset(mode), compact, `${mode}: buildRuleset uses compact block`);
+      assert.ok(Buffer.byteLength(compact, "utf8") <= 900, `${mode}: compact ruleset <= 900 bytes`);
+      assert.match(compact, new RegExp(`\\*\\*${mode}\\*\\*`), `${mode}: keeps active mode row`);
+      for (const other of ["hint", "enforce", "strict"].filter((m) => m !== mode)) {
+        assert.doesNotMatch(compact, new RegExp(`\\*\\*${other}\\*\\*`), `${mode}: drops ${other} row`);
+      }
+      assert.doesNotMatch(compact, /cave-tools-compact-(begin|end)/, `${mode}: markers stripped`);
+    }
+    assert.equal(config.extractCompactRuleset("# no markers here", "enforce"), null);
+    assert.equal(
+      config.extractCompactRuleset("<!-- cave-tools-compact-begin -->\nunterminated", "enforce"),
+      null,
+    );
+    console.log("compact ruleset tests passed\n");
+  }
+
+  {
+    console.log("Testing per-turn reminder by mode:");
+    const configDir = mkdtempSync(join(tmpdir(), "cave-reminder-"));
+    try {
+      const runTracker = (mode) => {
+        writeFileSync(join(configDir, ".cave-tools-active"), mode);
+        return execFileSync(process.execPath, ["./claude/hooks/cave-tools-mode-tracker.js"], {
+          input: JSON.stringify({ prompt: "hello" }),
+          encoding: "utf8",
+          env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+        });
+      };
+      const hint = JSON.parse(runTracker("hint"));
+      assert.equal(hint.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+      assert.match(hint.hookSpecificOutput.additionalContext, /CAVE-TOOLS MODE ACTIVE \(hint\)/);
+      assert.equal(runTracker("enforce"), "", "enforce: no reminder");
+      assert.equal(runTracker("strict"), "", "strict: no reminder");
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+    console.log("per-turn reminder tests passed\n");
   }
 
   console.log("All tests passed!");

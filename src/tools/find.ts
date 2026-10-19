@@ -13,27 +13,24 @@ export const findTool: Tool & {
   name: "cave__find",
   annotations: { readOnlyHint: true },
   description:
-    "Optimized drop-in replacement for the built-in Glob/find (fd when available, Node fallback). Returns matching file paths relative to the search directory, with output trimmed to a line budget. Set hidden=false to exclude dotfiles (upstream opencode glob default).",
+    "Use instead of Glob/find (fd or Node fallback). Returns paths relative to path, trimmed to a budget.",
   inputSchema: {
     type: "object",
     properties: {
       pattern: {
         type: "string",
-        description:
-          "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'",
+        description: "e.g. '**/*.ts'",
       },
       path: {
         type: "string",
-        description: "Directory to search in (default: current directory)",
       },
       limit: {
         type: "number",
-        description: "Maximum number of results (default: 1000)",
+        description: "Max results (default 1000)",
       },
       hidden: {
         type: "boolean",
-        description:
-          "Include hidden files and directories (default: true). Set false to match upstream opencode glob behavior.",
+        description: "Include dotfiles; false matches opencode glob",
         default: true,
       },
     },

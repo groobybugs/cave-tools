@@ -20,7 +20,7 @@ export const statusTool: Tool & {
   name: "cave__status",
   annotations: { readOnlyHint: true },
   description:
-    "Show token-optimization stats for the current session: dedup cache hit rate, total tokens saved, per-tool output budgets, and RTK availability.",
+    "Session stats: cache hit rate, tokens saved, budgets, RTK availability.",
   inputSchema: {
     type: "object",
     properties: {},

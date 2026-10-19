@@ -4,10 +4,11 @@
 // Two responsibilities:
 //   1. Detect /cave-tools commands and natural-language activations/deactivations.
 //      Updates the flag file accordingly.
-//   2. Per-turn reinforcement: emit a short reminder when cave-tools is active.
-//      The SessionStart hook injects the full ruleset once, but models drift
-//      when other plugins inject competing style instructions every turn.
-//      This keeps cave-tools visible in the model's attention on every prompt.
+//   2. Per-turn reinforcement (hint mode only): emit a short reminder so
+//      cave-tools stays visible when nothing else steers the model. In
+//      enforce/strict, PreToolUse already blocks the built-ins and the
+//      SessionStart ruleset re-fires after compaction, so no reminder is sent
+//      (it would accumulate in history every turn).
 
 'use strict';
 
@@ -83,11 +84,11 @@ process.stdin.on('end', () => {
       try { fs.unlinkSync(flagPath); } catch (e) {}
     }
 
-    // Per-turn reinforcement. readFlag enforces symlink-safe read + size cap
-    // + VALID_MODES whitelist. Returns null on any anomaly — we emit nothing
-    // rather than inject untrusted bytes into model context.
+    // Per-turn reinforcement, hint mode only. readFlag enforces symlink-safe
+    // read + size cap + VALID_MODES whitelist. Returns null on any anomaly —
+    // we emit nothing rather than inject untrusted bytes into model context.
     const activeMode = readFlag(flagPath);
-    if (activeMode && activeMode !== 'off') {
+    if (activeMode === 'hint') {
       const reminder = buildReminder(activeMode);
       process.stdout.write(JSON.stringify({
         hookSpecificOutput: {
@@ -115,16 +116,9 @@ function runStatus() {
 }
 
 function buildReminder(mode) {
-  const base = 'CAVE-TOOLS MODE ACTIVE (' + mode + '). ' +
+  return 'CAVE-TOOLS MODE ACTIVE (' + mode + '). ' +
     'Prefer cave__read / cave__bash / cave__grep / cave__find / cave__ls over built-ins. ' +
     'Call cave__invalidate after external edits; never run `rtk <cmd>` inside cave__bash. ' +
     'Medium+ edits: cave__read line_numbers=true → cave__edit start_line/end_line/content ' +
     '(+ expected_hash or expected_range_checksum); delete:true / insert_before for move.';
-  if (mode === 'strict') {
-    return base + ' STRICT: built-in Read/Grep/Glob/WebFetch/WebSearch blocked; Bash blocked too (background jobs and stream monitors still allowed); Edit/Write need prior cave__read; range/move need hash or range_checksum.';
-  }
-  if (mode === 'enforce') {
-    return base + ' ENFORCE: built-in Read/Grep/Glob/WebFetch/WebSearch blocked by PreToolUse.';
-  }
-  return base;
 }

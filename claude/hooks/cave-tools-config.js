@@ -170,13 +170,53 @@ function readFlag(flagPath) {
   }
 }
 
+const COMPACT_BEGIN = '<!-- cave-tools-compact-begin -->';
+const COMPACT_END = '<!-- cave-tools-compact-end -->';
+
+// Keep non-table lines plus only the intensity-table row for the active mode.
+function filterModeRows(text, mode) {
+  return text.split('\n').filter((line) => {
+    const tableRowMatch = line.match(/^\|\s*\*\*(\S+?)\*\*\s*\|/);
+    return !tableRowMatch || tableRowMatch[1] === mode;
+  }).join('\n');
+}
+
+// Pull the compact block delimited by the cave-tools-compact markers out of
+// SKILL.md. Returns null when the markers are missing.
+function extractCompactRuleset(skillContent, mode) {
+  const begin = skillContent.indexOf(COMPACT_BEGIN);
+  if (begin === -1) return null;
+  const end = skillContent.indexOf(COMPACT_END, begin + COMPACT_BEGIN.length);
+  if (end === -1) return null;
+  return filterModeRows(skillContent.slice(begin + COMPACT_BEGIN.length, end), mode).trim();
+}
+
+// Hardcoded copy of the SKILL.md compact block, used when SKILL.md can't be
+// found. test.mjs asserts it matches the SKILL.md block.
+function fallbackRuleset(mode) {
+  return filterModeRows(
+    'Use cave tools instead of built-ins (same results, fewer tokens):\n' +
+    '- Read→`cave__read`, Grep→`cave__grep`, Glob→`cave__find`, ls→`cave__ls`, Bash→`cave__bash`, WebSearch/WebFetch→`cave__websearch`/`cave__webfetch`.\n' +
+    '- Never prefix `rtk` inside `cave__bash`; use `workdir`, not `cd`.\n' +
+    '- Jobs over ~2 min: `cave__bash_start`, poll `cave__bash_status` (`wait` ≤60s), stop `cave__bash_stop`. Never sleep-poll.\n' +
+    '- Edit: `cave__edit` old_string/new_string, or line range after `cave__read` `line_numbers=true` (pass `expected_hash`/`expected_range_checksum`). `cave__write` whole files, `cave__apply_patch` multi-file.\n' +
+    '- After editing outside Cave Tools, call `cave__invalidate`.\n' +
+    '- Read before edit, never in parallel. No write tools in Plan Mode.\n' +
+    '| **hint** | Advisory; built-ins allowed. |\n' +
+    '| **enforce** | Built-in Read/Grep/Glob/WebFetch/WebSearch are blocked. |\n' +
+    '| **strict** | Also blocks Bash (background jobs/monitors OK); Edit/Write need prior cave__read; range/move need a hash proof. |',
+    mode
+  );
+}
+
 // Build the cave-tools ruleset text for a given mode.
 //
-// Reads SKILL.md at runtime (source of truth) so edits propagate without
-// hardcoded duplication, strips YAML frontmatter, and filters the intensity
-// table down to the active level's row. Falls back to a compact hardcoded
-// ruleset when SKILL.md can't be found. Shared by the SessionStart activation
-// hook and the SubagentStart hook so the rule text never drifts between them.
+// Reads SKILL.md at runtime (source of truth) and injects only its compact
+// block (between the cave-tools-compact markers) to keep per-session tokens
+// low. If the markers are missing, falls back to the old behavior: whole
+// SKILL.md minus YAML frontmatter, intensity table filtered to the active
+// level. Without SKILL.md, uses fallbackRuleset(). Shared by the SessionStart
+// activation hook and the SubagentStart hook so the rule text never drifts.
 function buildRuleset(mode) {
   const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   const skillCandidates = [
@@ -193,42 +233,14 @@ function buildRuleset(mode) {
   }
 
   if (skillContent) {
+    const compact = extractCompactRuleset(skillContent, mode);
+    if (compact) return compact;
     // Strip YAML frontmatter
     const body = skillContent.replace(/^---[\s\S]*?---\s*/, '');
-    // Keep intensity-table header rows + only the active level's row
-    const filtered = body.split('\n').reduce((acc, line) => {
-      const tableRowMatch = line.match(/^\|\s*\*\*(\S+?)\*\*\s*\|/);
-      if (tableRowMatch) {
-        if (tableRowMatch[1] === mode) acc.push(line);
-        return acc;
-      }
-      acc.push(line);
-      return acc;
-    }, []);
-    return filtered.join('\n');
+    return filterModeRows(body, mode);
   }
 
-  // Fallback when SKILL.md is not found.
-  return (
-    'Prefer cave-tools over built-in Read/Grep/Glob/Bash and use cave__websearch for compact current web research.\n\n' +
-    '## Persistence\n\n' +
-    'ACTIVE EVERY RESPONSE. Off only: `/cave-tools off` or "stop cave-tools".\n\n' +
-    'Current level: **' + mode + '**. Switch: `/cave-tools off|hint|enforce|strict`.\n\n' +
-    '## Rules\n\n' +
-    '- `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).\n' +
-    '- `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.\n' +
-    '- `cave__bash` instead of Bash — RTK rewriting + structured extraction + line budgets.\n' +
-    '- Never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).\n' +
-    '- `cave__write` to create/overwrite; `cave__edit` for str-replace **or** line-range ' +
-    '(`start_line`/`end_line`/`content` after `line_numbers=true`; optional `expected_hash` / ' +
-    '`expected_range_checksum`; `delete` / `insert_before`); `cave__apply_patch` for multi-file.\n' +
-    '- `cave__websearch` / `cave__webfetch` instead of WebSearch / WebFetch; results redacted/archived/budget-compressed.\n' +
-    '- After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s).\n' +
-    '- Use `cave__compress` for large pasted or tool-produced text.\n' +
-    '- Use `cave__status` to inspect savings, hit rate, budgets.\n\n' +
-    '## Edit Safety\n\n' +
-    'In Plan Mode / read-only phase, never call write tools. Before any edit, read the exact target path first. Do not batch read+edit in parallel.'
-  );
+  return fallbackRuleset(mode);
 }
 
 module.exports = {
@@ -241,4 +253,6 @@ module.exports = {
   safeWriteFlag,
   readFlag,
   buildRuleset,
+  extractCompactRuleset,
+  fallbackRuleset,
 };

@@ -9,17 +9,16 @@ export const bashStopTool: Tool & {
 } = {
   name: "cave__bash_stop",
   description:
-    "Stops a background job started with cave__bash_start by signalling its process group. Sends SIGTERM by default and escalates to SIGKILL after 3s if the process is still alive.",
+    "Stop a cave__bash_start job by signalling its process group; escalates to SIGKILL after 3s.",
   inputSchema: {
     type: "object",
     properties: {
       jobId: {
         type: "string",
-        description: "Job ID from cave__bash_start",
       },
       signal: {
         type: "string",
-        description: "Signal to send first: SIGTERM (default), SIGINT, SIGHUP, or SIGKILL.",
+        description: "SIGTERM, SIGINT, SIGHUP, or SIGKILL",
         default: "SIGTERM",
       },
     },

@@ -74,33 +74,31 @@ export const bashStatusTool: Tool & {
   name: "cave__bash_status",
   annotations: { readOnlyHint: true },
   description:
-    "Checks a background job started with cave__bash_start. Returns state (running/exited/killed/lost), exit code, duration, and log output. Set tail_lines=0 for status only (no log read). Pass cursor from a prior next_cursor for bounded incremental output without duplicates. Without cursor, returns the compatible log tail. Optional 'wait' blocks server-side up to 60 seconds, returning the moment the job exits. Called without jobId, lists the session's jobs.",
+    "Check a cave__bash_start job: state, exit code, duration, log output.",
   inputSchema: {
     type: "object",
     properties: {
       jobId: {
         type: "string",
-        description: "Job ID from cave__bash_start. Omit to list this session's jobs.",
+        description: "Omit to list session jobs",
       },
       tail_lines: {
         type: "number",
         minimum: 0,
-        description: `Log lines to return (default ${DEFAULT_TAIL_LINES}); 0 returns status only without reading the log`,
+        description: "Log lines; 0 = status only",
         default: DEFAULT_TAIL_LINES,
       },
       cursor: {
         type: "number",
         minimum: 0,
-        description:
-          "Byte cursor for incremental log output. Use next_cursor from the prior response. Omit for tail behavior.",
+        description: "Prior next_cursor for incremental output; omit for tail",
       },
       wait: {
         type: "number",
-        description: `Seconds to block until the job exits (max ${MAX_WAIT_SECONDS}). Returns immediately if already finished.`,
+        description: `Seconds to block until exit (max ${MAX_WAIT_SECONDS})`,
       },
       redact_secrets: {
         type: "boolean",
-        description: "When false, skip secret redaction on the log tail. Default true.",
         default: true,
       },
     },

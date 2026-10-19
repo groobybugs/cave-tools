@@ -354,18 +354,18 @@ export const webfetchTool: Tool & {
   name: "cave__webfetch",
   annotations: { readOnlyHint: true, openWorldHint: true },
   description:
-    "Fetch a URL and return its content as markdown, text, or html. Images and other non-textual content are rejected (matching upstream opencode webfetch). Non-2xx responses are errors. Output is redacted, archived if large, and trimmed to a line budget. Use when you need to retrieve and analyze a specific web page. Note: follows redirects and allows fetching any http(s) URL including localhost/private IPs (same posture as the built-in webfetch).",
+    "Use instead of WebFetch. Returns markdown/text/html; non-text content rejected, non-2xx is an error. Follows redirects; any http(s) URL incl. localhost.",
   inputSchema: {
     type: "object",
     properties: {
-      url: { type: "string", description: "Fully-formed http(s) URL to fetch" },
+      url: { type: "string" },
       format: {
         type: "string",
         enum: ["text", "markdown", "html"],
-        description: "Return format. Defaults to markdown.",
+        description: "Default markdown",
       },
-      timeout: { type: "number", description: `Timeout in seconds (max ${MAX_TIMEOUT_SECONDS})` },
-      redact_secrets: { type: "boolean", description: "When false, skip secret redaction. Default true." },
+      timeout: { type: "number", description: `Seconds, max ${MAX_TIMEOUT_SECONDS}` },
+      redact_secrets: { type: "boolean", description: "false skips redaction" },
     },
     required: ["url"],
   },

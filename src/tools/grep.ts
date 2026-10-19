@@ -14,40 +14,34 @@ export const grepTool: Tool & {
   name: "cave__grep",
   annotations: { readOnlyHint: true },
   description:
-    "Optimized drop-in replacement for the built-in Grep (ripgrep). Returns matching lines with file paths and line numbers, respects .gitignore, caps hits per file, collapses consecutive duplicate lines, and trims output to a line budget.",
+    "Use instead of Grep (ripgrep). Respects .gitignore, caps hits per file, trims output to a budget.",
   inputSchema: {
     type: "object",
     properties: {
       pattern: {
         type: "string",
-        description: "Search pattern (regex or literal string)",
+        description: "Regex (or literal with literal=true)",
       },
       path: {
         type: "string",
-        description: "Directory or file to search (default: current directory)",
       },
       glob: {
         type: "string",
-        description:
-          "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'",
+        description: "File filter, e.g. '*.ts'",
       },
       ignoreCase: {
         type: "boolean",
-        description: "Case-insensitive search (default: false)",
       },
       literal: {
         type: "boolean",
-        description:
-          "Treat pattern as literal string instead of regex (default: false)",
       },
       context: {
         type: "number",
-        description:
-          "Number of lines to show before and after each match (default: 0)",
+        description: "Lines around each match",
       },
       limit: {
         type: "number",
-        description: "Maximum number of matches to return (default: 100)",
+        description: "Max matches (default 100)",
       },
     },
     required: ["pattern"],

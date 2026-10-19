@@ -22,39 +22,33 @@ export const bashTool: Tool & {
 } = {
   name: "cave__bash",
   description:
-    "Optimized drop-in replacement for the built-in shell tool. Runs the same command and returns its output, applying RTK command rewriting where available and trimming noisy output to the essentials. Sensitive tokens and keys are redacted from output by default. Output is streamed and captured without a buffer ceiling; large output is archived. Use 'workdir' instead of 'cd'.",
+    "Use instead of Bash. Applies RTK rewriting (never prefix rtk yourself), redacts secrets, trims output to a budget, archives large output.",
   inputSchema: {
     type: "object",
     properties: {
       command: {
         type: "string",
-        description: "The shell command to execute",
       },
       description: {
         type: "string",
-        description:
-          "Clear, concise description of what the command does (5-10 words)",
+        description: "5-10 word summary",
       },
       workdir: {
         type: "string",
-        description:
-          "Working directory to run the command in. Use this instead of 'cd'.",
+        description: "Use instead of cd",
       },
       timeout: {
         type: "number",
-        description: `Timeout in milliseconds (0 disables the timeout, max ${MAX_TIMEOUT})`,
+        description: `ms; 0 disables, max ${MAX_TIMEOUT}`,
         default: DEFAULT_TIMEOUT,
       },
       allowFailure: {
         type: "boolean",
-        description:
-          "When true, non-zero exits are returned as normal text instead of MCP errors. Default false.",
+        description: "Return non-zero exits as text, not errors",
         default: false,
       },
       redact_secrets: {
         type: "boolean",
-        description:
-          "When false, skip secret redaction. Default true.",
         default: true,
       },
     },

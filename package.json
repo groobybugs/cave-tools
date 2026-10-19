@@ -29,7 +29,8 @@
     "mcp": "node dist/cli.js mcp",
     "install:agents": "node scripts/install-agent-instructions.mjs",
     "remove:agents": "node scripts/remove-agent-instructions.mjs",
-    "prepack": "pnpm run build"
+    "prepack": "pnpm run build",
+    "measure": "node scripts/measure-overhead.mjs"
   },
   "keywords": [
     "mcp",

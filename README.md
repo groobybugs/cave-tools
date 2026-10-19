@@ -149,6 +149,16 @@ All tool names use the MCP names exported by the server.
 | `cave__status`    | Show RTK availability, cache stats, and budgets.                                          | Cave Tools-specific helper.                                         |
 | `cave__configure` | Change line budgets for the current MCP session.                                          | Cave Tools-specific helper.                                         |
 
+### Tool profile
+
+`CAVE_TOOLS_PROFILE` controls which tools the server advertises in `tools/list`
+(fewer schemas = fewer tokens every session):
+
+- `standard` (default): hides `cave__configure`, `cave__compress`, and `cave__status`. They still work when called by name.
+- `full`: lists all 17 tools.
+
+Run `pnpm run measure` to print the per-tool schema size and the hook ruleset/reminder sizes.
+
 ## Usage Guidance For Agents
 
 Use this instruction block in agent rules:
@@ -258,7 +268,7 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
    - stream monitors: `tail -f`, `watch `, `journalctl -f`, `--watch`
    - `CAVE_TOOLS_ALLOW_BASH=1` in the environment
 
-   SessionStart / SubagentStart / UserPromptSubmit emit `hookSpecificOutput.additionalContext` JSON so Claude injects the ruleset. `PostToolUseFailure` and `PermissionDenied` run `cave-tools-recover.js`, which explains the cave-tools retry after a failed `cave__*` call and returns `retry: true` after a classifier denial — otherwise the model tends to fall back to the built-ins it was just blocked from.
+   SessionStart / SubagentStart emit `hookSpecificOutput.additionalContext` JSON so Claude injects the compact ruleset (the block between the `cave-tools-compact` markers in `SKILL.md`); UserPromptSubmit adds a short per-turn reminder in `hint` mode only (enforce/strict already block built-ins via PreToolUse). `PostToolUseFailure` and `PermissionDenied` run `cave-tools-recover.js`, which explains the cave-tools retry after a failed `cave__*` call and returns `retry: true` after a classifier denial — otherwise the model tends to fall back to the built-ins it was just blocked from.
 
    The `/cave-tools` skill also declares the same `PreToolUse` group in its frontmatter with `--from-skill`, so enforcement still applies on hosts where nothing wired `settings.json` (cloud sessions, fresh machines). That copy exits 0 as soon as `~/.claude/.cave-tools-wired` exists, so it never double-fires next to the settings copy.
 

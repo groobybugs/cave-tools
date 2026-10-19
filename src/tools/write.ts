@@ -8,21 +8,21 @@ export const writeTool: Tool & {
 } = {
   name: "cave__write",
   description:
-    "Write a single file (create or overwrite), then invalidate the dedup cache. Provide `content` to write text, or `truncate: true` to write an empty file (0 bytes). `content: \"\"` also writes an empty file. To only invalidate the cache after editing files outside Cave Tools (no disk write), use cave__invalidate instead.",
+    "Create or overwrite one file and refresh the read cache. Empty content or truncate=true writes an empty file. For cache-only refresh use cave__invalidate.",
   inputSchema: {
     type: "object",
     properties: {
       file_path: {
         type: "string",
-        description: "Absolute path of the file to write (create or overwrite)",
+        description: "Absolute path",
       },
       content: {
         type: "string",
-        description: "Text to write. Omit only when using `truncate`. An empty string writes an empty file.",
+        description: "Omit only with truncate",
       },
       truncate: {
         type: "boolean",
-        description: "Write an empty file (0 bytes) instead of `content`.",
+        description: "Write a 0-byte file",
         default: false,
       },
     },

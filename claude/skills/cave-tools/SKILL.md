@@ -22,7 +22,7 @@ Prefer cave-tools over built-in Read/Grep/Glob/Bash and use Cave Tools for compa
 
 ## Persistence
 
-ACTIVE EVERY RESPONSE. No drift after many turns. Rules survive compaction via UserPromptSubmit reinforcement (Claude Code) / `experimental.chat.system.transform` + `experimental.session.compacting` (opencode native plugin). Off only: `/cave-tools off` or "stop cave-tools".
+ACTIVE EVERY RESPONSE. No drift after many turns. Rules survive compaction via SessionStart re-injection + UserPromptSubmit reminder in hint mode (Claude Code) / `experimental.chat.system.transform` + `experimental.session.compacting` (opencode native plugin). Off only: `/cave-tools off` or "stop cave-tools".
 
 Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 
@@ -79,3 +79,20 @@ Yes: `cave__read` returns stub → edit with built-in Edit → call `cave__inval
 ## Savings
 
 Run `cave-tools status` (CLI) or `cave__status` (MCP) for reduction %, hit rate, RTK rewrites, budgets. The statusline badge shows the live summary as `[CAVE-TOOLS] ↓X% • Yk tok` (or `[CAVE-TOOLS] ↓X% • Ncache` on a fresh session with no tokens saved yet).
+
+## Compact ruleset
+
+The hooks inject only the block below at SessionStart/SubagentStart (keep it short; it costs tokens every session).
+
+<!-- cave-tools-compact-begin -->
+Use cave tools instead of built-ins (same results, fewer tokens):
+- Read→`cave__read`, Grep→`cave__grep`, Glob→`cave__find`, ls→`cave__ls`, Bash→`cave__bash`, WebSearch/WebFetch→`cave__websearch`/`cave__webfetch`.
+- Never prefix `rtk` inside `cave__bash`; use `workdir`, not `cd`.
+- Jobs over ~2 min: `cave__bash_start`, poll `cave__bash_status` (`wait` ≤60s), stop `cave__bash_stop`. Never sleep-poll.
+- Edit: `cave__edit` old_string/new_string, or line range after `cave__read` `line_numbers=true` (pass `expected_hash`/`expected_range_checksum`). `cave__write` whole files, `cave__apply_patch` multi-file.
+- After editing outside Cave Tools, call `cave__invalidate`.
+- Read before edit, never in parallel. No write tools in Plan Mode.
+| **hint** | Advisory; built-ins allowed. |
+| **enforce** | Built-in Read/Grep/Glob/WebFetch/WebSearch are blocked. |
+| **strict** | Also blocks Bash (background jobs/monitors OK); Edit/Write need prior cave__read; range/move need a hash proof. |
+<!-- cave-tools-compact-end -->

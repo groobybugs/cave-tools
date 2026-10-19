@@ -220,60 +220,54 @@ export const editTool: Tool & {
 } = {
   name: "cave__edit",
   description:
-    "Edit a file by search/replace, line-range, or move. " +
-    "Str-replace: old_string → new_string (fuzzy). " +
-    "Line-range (token-cheap): start_line + end_line + content (new body only). " +
-    "delete: true with start/end deletes lines. insert_before with start/end moves block. " +
-    "Inclusive 1-based lines; tags/checksums from cave__read line_numbers=true. " +
-    "expected_hash (file) and expected_range_checksum (span) reject stale edits. " +
-    "STRICT mode (CAVE_TOOLS_MODE=strict) requires one of those proofs for range/move. " +
-    "Batch via edits[] (mixed; optional per-item file_path for multi-file). Ranges high→low.",
+    "Edit by fuzzy old_string→new_string, or by inclusive 1-based line range from cave__read line_numbers=true " +
+    "(start_line/end_line + content, delete, or insert_before to move). " +
+    "expected_hash/expected_range_checksum reject stale edits; strict mode requires one for range/move. " +
+    "Batch via edits[]; order ranges high→low.",
   inputSchema: {
     type: "object",
     properties: {
       file_path: {
         type: "string",
-        description: "Absolute path to the file to modify (default for batch items without file_path)",
+        description: "Absolute path; default for edits[] items",
       },
       old_string: {
         type: "string",
-        description: "Text to replace (fuzzy). Mutually exclusive with range/move.",
+        description: "Not combinable with range/move",
       },
       new_string: {
         type: "string",
-        description: "Replacement text for str-replace mode",
       },
       replace_all: {
         type: "boolean",
-        description: "Replace every occurrence instead of requiring uniqueness (default false)",
+        description: "Replace all, not just a unique match",
       },
       start_line: {
         type: "number",
-        description: "1-based inclusive start line for range/move/delete",
       },
       end_line: {
         type: "number",
-        description: "1-based inclusive end line. Use start_line-1 with content to insert before start_line.",
+        description: "start_line-1 with content inserts before start_line",
       },
       content: {
         type: "string",
-        description: "Replacement body for range mode (multi-line OK; empty deletes). No line-number prefixes.",
+        description: "New range body, no line prefixes; empty deletes",
       },
       delete: {
         type: "boolean",
-        description: "If true, delete lines [start_line, end_line] (same as content:\"\")",
+        description: "Delete the range",
       },
       insert_before: {
         type: "number",
-        description: "Move lines [start_line, end_line] to insert before this 1-based line (lineCount+1 = end)",
+        description: "Move range before this line (lineCount+1 = end)",
       },
       expected_hash: {
         type: "string",
-        description: "Optional file sha256 (full or ≥8-char prefix from cave__read footer)",
+        description: "File sha256 or ≥8-char prefix",
       },
       expected_range_checksum: {
         type: "string",
-        description: "Optional span checksum from cave__read footer (range_checksum). Verifies only the edited lines.",
+        description: "range_checksum of the edited span",
       },
       edits: {
         type: "array",
@@ -293,7 +287,7 @@ export const editTool: Tool & {
             expected_range_checksum: { type: "string" },
           },
         },
-        description: "Multiple edits (str/range/move). Optional file_path per item for multi-file batch.",
+        description: "Batch; items may set file_path",
       },
     },
     required: [],

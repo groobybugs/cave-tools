@@ -210,39 +210,38 @@ export const readTool: Tool & {
   name: "cave__read",
   annotations: { readOnlyHint: true },
   description:
-    "Optimized drop-in replacement for the built-in Read. Returns the same file content, but sends a stub when the file is unchanged since the last read in this session (skips re-sending identical content). Image files (.png, .jpg, .jpeg, .gif, .webp, .bmp, .svg) are returned as image content blocks (base64); PDFs are returned as embedded resources; offset/limit are ignored for images, signatures, and aggressive modes. Binary files are rejected. Use mode='signatures' to return only function/class/type signatures (TS/JS/Rust). Use mode='aggressive' to drop comments and blank lines. Set line_numbers=true to prefix output with line numbers for precise edits (disables codebook compression).",
+    "Use instead of Read. Returns a stub if the file is unchanged since the last read. Images return as image blocks, PDFs as resources; binary files are rejected.",
   inputSchema: {
     type: "object",
     properties: {
       file_path: {
         type: "string",
-        description: "Absolute path to the file to read",
+        description: "Absolute path",
       },
       offset: {
         type: "number",
-        description: "Line number to start reading from (1-indexed). Ignored for images.",
+        description: "1-indexed start line",
         default: 1,
       },
       limit: {
         type: "number",
-        description: "Maximum number of lines to read. Ignored for images and signatures mode.",
         default: 200,
       },
       mode: {
         type: "string",
         enum: ["full", "signatures", "aggressive"],
-        description: "Read mode: full text (default), signatures only, or aggressive comment stripping.",
+        description: "signatures: TS/JS/Rust signatures only; aggressive: drop comments/blank lines. Both ignore offset/limit.",
         default: "full",
       },
       line_numbers: {
         type: "boolean",
         description:
-          "Prefix each line with a zero-padded line number for precise edits and append a cave_edit_meta footer (file_hash) for cave__edit range mode. Disables codebook compression. Default false.",
+          "Tag lines and append a file_hash/range_checksum footer for cave__edit range mode. Disables codebook compression.",
         default: false,
       },
       force: {
         type: "boolean",
-        description: "Bypass dedup cache and always return full content",
+        description: "Bypass dedup cache",
         default: false,
       },
     },

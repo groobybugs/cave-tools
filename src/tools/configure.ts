@@ -9,30 +9,26 @@ export const configureTool: Tool & {
 } = {
   name: "cave__configure",
   description:
-    "Configure Cave Tools settings: set per-tool budgets, reset cache, or reset statistics.",
+    "Set per-tool budgets, reset cache, or reset stats.",
   inputSchema: {
     type: "object",
     properties: {
       action: {
         type: "string",
         enum: ["set_budget", "reset_cache", "reset_stats"],
-        description: "Configuration action to perform",
       },
       tool_name: {
         type: "string",
-        description: "Tool name for set_budget action (e.g., bash, read, grep)",
+        description: "set_budget target (bash, read, grep)",
       },
       max_lines: {
         type: "number",
-        description: "Maximum lines for set_budget",
       },
       head_lines: {
         type: "number",
-        description: "Head lines for set_budget",
       },
       tail_lines: {
         type: "number",
-        description: "Tail lines for set_budget",
       },
     },
     required: ["action"],

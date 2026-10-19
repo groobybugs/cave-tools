@@ -8,14 +8,14 @@ export const invalidateTool: Tool & {
   name: "cave__invalidate",
   annotations: { readOnlyHint: true },
   description:
-    "Invalidate the read dedup cache for one or more paths without touching disk. Call this after editing files outside Cave Tools so the next cave__read returns fresh content instead of an unchanged stub. To write file content, use cave__write.",
+    "Drop cave__read cache entries (no disk write). Call after editing files outside Cave Tools.",
   inputSchema: {
     type: "object",
     properties: {
       file_paths: {
         type: "array",
         items: { type: "string" },
-        description: "Absolute file paths whose cached reads should be invalidated.",
+        description: "Absolute paths",
       },
     },
     required: ["file_paths"],

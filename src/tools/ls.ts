@@ -13,21 +13,20 @@ export const lsTool: Tool & {
   name: "cave__ls",
   annotations: { readOnlyHint: true },
   description:
-    "Optimized drop-in replacement for listing a directory. Returns entries sorted alphabetically, with '/' suffix for directories, includes dotfiles, and trims output to a line budget.",
+    "Use instead of shell ls. Sorted entries, '/' suffix on dirs, dotfiles included, trimmed to a budget.",
   inputSchema: {
     type: "object",
     properties: {
       path: {
         type: "string",
-        description: "Directory to list (default: current directory)",
       },
       limit: {
         type: "number",
-        description: "Maximum number of entries to return (default: 500)",
+        description: "Max entries (default 500)",
       },
       offset: {
         type: "number",
-        description: "1-based entry offset for pagination (default: 1)",
+        description: "1-based entry offset",
         default: 1,
       },
     },
