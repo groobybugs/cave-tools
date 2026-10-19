@@ -1,6 +1,6 @@
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { resetCache, resetStats, setBudget } from "../compression/utils.js";
+import { getBudget, resetCache, resetStats, setBudget } from "../compression/utils.js";
 
 type ConfigAction = "set_budget" | "reset_cache" | "reset_stats";
 
@@ -19,7 +19,7 @@ export const configureTool: Tool & {
       },
       tool_name: {
         type: "string",
-        description: "set_budget target (bash, read, grep)",
+        description: "set_budget target (bash, read, grep, web)",
       },
       max_lines: {
         type: "number",
@@ -29,6 +29,10 @@ export const configureTool: Tool & {
       },
       tail_lines: {
         type: "number",
+      },
+      max_chars: {
+        type: "number",
+        description: "0 disables; omit to keep",
       },
     },
     required: ["action"],
@@ -42,14 +46,16 @@ export const configureTool: Tool & {
         const maxLines = Number(args.max_lines) || 100;
         const headLines = Number(args.head_lines) || 50;
         const tailLines = Number(args.tail_lines) || 50;
+        const maxChars =
+          args.max_chars === undefined ? getBudget(toolName).maxChars : Number(args.max_chars) || undefined;
 
-        setBudget(toolName, maxLines, headLines, tailLines);
+        setBudget(toolName, maxLines, headLines, tailLines, maxChars);
 
         return {
           content: [
             {
               type: "text",
-              text: `Set budget for ${toolName}: max=${maxLines}, head=${headLines}, tail=${tailLines}`,
+              text: `Set budget for ${toolName}: max=${maxLines}, head=${headLines}, tail=${tailLines}${maxChars ? `, chars=${maxChars}` : ""}`,
             },
           ],
         };

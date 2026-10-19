@@ -423,7 +423,7 @@ export const webfetchTool: Tool & {
 
       if (input.redact_secrets) output = redactSecrets(output);
       const full = output;
-      output = applyBudget(output, "bash");
+      output = applyBudget(output, "web");
       const handle = await archiveHandle(full, output, `webfetch:${url}`);
       return { content: [{ type: "text", text: `${output}${handle}` }] };
     } catch (error) {

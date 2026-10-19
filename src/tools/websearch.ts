@@ -204,7 +204,7 @@ export const websearchTool: Tool & {
       let output = text || NO_RESULTS;
       if (input.redact_secrets) output = redactSecrets(output);
       const full = output;
-      output = applyBudget(output, "bash");
+      output = applyBudget(output, "web");
       const handle = await archiveHandle(full, output, `websearch:${provider}:${input.query}`);
       return { content: [{ type: "text", text: `${output}${handle}` }] };
     } catch (error) {

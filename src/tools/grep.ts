@@ -8,7 +8,7 @@ import { archiveHandle } from "../compression/archive.js";
 import { readLineWindow, rgGrep } from "../runtime/ripgrep.js";
 
 const DEFAULT_LIMIT = 100;
-const PER_FILE_LINE_CAP = 20;
+const PER_FILE_LINE_CAP = 10;
 export const grepTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {

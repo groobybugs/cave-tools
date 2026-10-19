@@ -99,7 +99,7 @@ export const statusTool: Tool & {
       "Budget Configuration:",
       ...Object.entries(budgets).map(
         ([name, budget]) =>
-          `  ${name}: max=${budget.maxLines}, head=${budget.headLines}, tail=${budget.tailLines}`,
+          `  ${name}: max=${budget.maxLines}, head=${budget.headLines}, tail=${budget.tailLines}${budget.maxChars ? `, chars=${budget.maxChars}` : ""}`,
       ),
     ].join("\n");
 

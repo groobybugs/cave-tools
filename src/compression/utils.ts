@@ -167,10 +167,13 @@ interface BounceEvent {
 
 const savingsByTool: Record<string, ToolSavings> = {};
 
+// Trimmed bash/grep/web output is recoverable through the archive handle, so
+// these stay tight. "web" covers cave__webfetch and cave__websearch.
 const budgets: Record<string, BudgetConfig> = {
-  bash: { maxLines: 80, headLines: 40, tailLines: 40 },
+  bash: { maxLines: 50, headLines: 15, tailLines: 35, maxChars: 6000 },
   read: { maxLines: 200, headLines: 100, tailLines: 100 },
-  grep: { maxLines: 120, headLines: 60, tailLines: 60 },
+  grep: { maxLines: 60, headLines: 30, tailLines: 30, maxChars: 6000 },
+  web: { maxLines: 120, headLines: 60, tailLines: 60, maxChars: 8000 },
   find: { maxLines: 120, headLines: 60, tailLines: 60 },
   ls: { maxLines: 60, headLines: 30, tailLines: 30 },
 };
@@ -632,8 +635,9 @@ export function setBudget(
   maxLines: number,
   headLines: number,
   tailLines: number,
+  maxChars?: number,
 ): void {
-  budgets[toolName] = { maxLines, headLines, tailLines };
+  budgets[toolName] = maxChars ? { maxLines, headLines, tailLines, maxChars } : { maxLines, headLines, tailLines };
   void persistStats();
 }
 
@@ -731,6 +735,43 @@ export function truncateLongOutput(text: string): string {
   return truncateLines(text, GLOBAL_MAX_LINES, GLOBAL_HEAD_LINES, GLOBAL_TAIL_LINES);
 }
 
+// Room kept for the "... (N chars truncated) ..." marker and its newlines.
+const CHAR_MARKER_RESERVE = 48;
+
+// Character cap applied after the line budget. Splits the kept budget between
+// head and tail by the tool's head/tail line ratio and cuts at line
+// boundaries; cuts inside a line only when that line alone exceeds maxChars.
+export function truncateChars(
+  text: string,
+  maxChars: number,
+  headLines: number,
+  tailLines: number,
+): string {
+  if (text.length <= maxChars) return text;
+  const keep = Math.max(0, maxChars - CHAR_MARKER_RESERVE);
+  const ratio = headLines + tailLines > 0 ? headLines / (headLines + tailLines) : 0.5;
+  const headBudget = Math.floor(keep * ratio);
+  const tailBudget = keep - headBudget;
+  const lines = text.split("\n");
+  const n = lines.length;
+
+  let h = 0;
+  let used = 0;
+  while (h < n && used + lines[h].length + 1 <= headBudget) used += lines[h++].length + 1;
+  let t = n;
+  used = 0;
+  while (t - 1 >= h && used + lines[t - 1].length + 1 <= tailBudget) used += lines[--t].length + 1;
+
+  let head = lines.slice(0, h).join("\n");
+  let tail = lines.slice(t).join("\n");
+  if (h === 0 && lines[0].length > maxChars) head = lines[0].slice(0, headBudget);
+  if (t === n && lines[n - 1].length > maxChars) tail = lines[n - 1].slice(-tailBudget);
+
+  const dropped = text.length - head.length - tail.length;
+  const marker = `... (${dropped} chars truncated) ...`;
+  return [head, marker, tail].filter((part) => part !== "").join("\n");
+}
+
 /** Same cap as cave__read MAX_BYTES — skip strip/collapse/truncate when already small. */
 export const BUDGET_FAST_PATH_MAX_BYTES = 50 * 1024;
 
@@ -748,7 +789,9 @@ export function fitsBudget(
   maxBytes: number = BUDGET_FAST_PATH_MAX_BYTES,
 ): boolean {
   if (Buffer.byteLength(text, "utf8") > maxBytes) return false;
-  return countLines(text) <= getBudget(toolName).maxLines;
+  const budget = getBudget(toolName);
+  if (budget.maxChars && text.length > budget.maxChars) return false;
+  return countLines(text) <= budget.maxLines;
 }
 
 export function budgetedText(text: string, toolName: string): string {
@@ -764,7 +807,10 @@ export function budgetedText(text: string, toolName: string): string {
   );
   // Final global safety net (defense-in-depth, may be a no-op when the per-tool
   // budget is already tighter).
-  return truncateLongOutput(truncated);
+  const capped = truncateLongOutput(truncated);
+  return budget.maxChars
+    ? truncateChars(capped, budget.maxChars, budget.headLines, budget.tailLines)
+    : capped;
 }
 
 export function applyBudget(text: string, toolName: string): string {

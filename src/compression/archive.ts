@@ -72,7 +72,7 @@ export async function archiveHandle(
   try {
     const { path } = await storeArchive(full, command);
     const lines = full.split("\n").length;
-    return `\n\n[cave: full output ${lines} lines archived → cave__read ${path} offset/limit, or cave__grep path=${path}]`;
+    return `\n\n[cave: full output (${lines} lines) at ${path} — cave__read offset/limit or cave__grep]`;
   } catch {
     return "";
   }

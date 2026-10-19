@@ -20,6 +20,8 @@ export interface BudgetConfig {
   maxLines: number;
   headLines: number;
   tailLines: number;
+  // Optional total character cap applied after the line budget.
+  maxChars?: number;
 }
 
 export interface BounceStats {

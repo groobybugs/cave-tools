@@ -34,6 +34,7 @@ import {
   getBounceStats,
   getAllBudgets,
   applyBudget,
+  truncateChars,
   fitsBudget,
   isSubagentContext,
   resetSubagentContextCache,
@@ -536,7 +537,7 @@ async function test() {
     assert.equal(grepMissing.isError, true);
     assert.match(grepMissing.content[0].text, /Path not found/);
 
-    // Per-file cap: 30 hits in one file → 20 lines + "+N more" marker.
+    // Per-file cap: 30 hits in one file → 10 lines + "+N more" marker.
     const manyHits = Array.from({ length: 30 }, (_, i) => `HIT_TOKEN line ${i + 1}`);
     writeFileSync(join(grepDir, "many.ts"), manyHits.join("\n") + "\n", "utf-8");
     const grepCapped = await grepTool.handler({
@@ -547,8 +548,8 @@ async function test() {
     });
     const capText = grepCapped.content[0].text;
     const capHits = capText.split("\n").filter((l) => l.includes("HIT_TOKEN"));
-    assert.equal(capHits.length, 20, "per-file cap keeps 20 hit lines");
-    assert.match(capText, /\+10 more in many\.ts/);
+    assert.equal(capHits.length, 10, "per-file cap keeps 10 hit lines");
+    assert.match(capText, /\+20 more in many\.ts/);
   } finally {
     rmSync(grepDir, { recursive: true, force: true });
   }
@@ -1854,13 +1855,15 @@ async function test() {
     });
     assert.equal(badTool.isError, undefined);
     assert.match(badTool.content[0].text, /no-such-tool/);
-    // restore default-ish budget for grep so later tests aren't affected.
+    // set_budget without max_chars keeps the tool's char cap.
+    assert.equal(getAllBudgets().grep.maxChars, 6000);
+    // restore the default budget for grep so later tests aren't affected.
     await configureTool.handler({
       action: "set_budget",
       tool_name: "grep",
-      max_lines: 120,
-      head_lines: 60,
-      tail_lines: 60,
+      max_lines: 60,
+      head_lines: 30,
+      tail_lines: 30,
     });
 
     // reset_cache clears the dedup cache.
@@ -1967,7 +1970,7 @@ async function test() {
       allowFailure: true,
     });
     assert.equal(big.isError, undefined, big.content[0].text);
-    const bigHandle = /\[cave: full output (\d+) lines archived → cave__read (\S+) offset\/limit, or cave__grep path=\2\]/.exec(big.content[0].text);
+    const bigHandle = /\[cave: full output \((\d+) lines\) at (\S+) — cave__read offset\/limit or cave__grep\]/.exec(big.content[0].text);
     assert.ok(bigHandle, big.content[0].text);
     const bigArchived = readFileSync(bigHandle[2], "utf8");
     assert.equal(bigArchived.split("\n").length, Number(bigHandle[1]), "handle line count");
@@ -2946,7 +2949,7 @@ process.exit(1);
 
   {
     console.log("Testing recoverable truncation handles:");
-    const handleRe = /\[cave: full output (\d+) lines archived → cave__read (\S+) offset\/limit, or cave__grep path=\2\]/;
+    const handleRe = /\[cave: full output \((\d+) lines\) at (\S+) — cave__read offset\/limit or cave__grep\]/;
     const prevDataDir = process.env.CAVE_TOOLS_DATA_DIR;
     const dataDir = mkdtempSync(join(tmpdir(), "cave-handles-"));
     process.env.CAVE_TOOLS_DATA_DIR = dataDir;
@@ -3103,6 +3106,83 @@ process.exit(1);
     resetSnapshots();
     assert.deepEqual(getSnapshotStats(), { files: 0, bytes: 0 });
     console.log("re-read diff tests passed\n");
+  }
+
+  {
+    console.log("Testing char-cap budgets:");
+    const b = getAllBudgets();
+    assert.deepEqual(b.bash, { maxLines: 50, headLines: 15, tailLines: 35, maxChars: 6000 });
+    assert.deepEqual(b.grep, { maxLines: 60, headLines: 30, tailLines: 30, maxChars: 6000 });
+    assert.deepEqual(b.web, { maxLines: 120, headLines: 60, tailLines: 60, maxChars: 8000 });
+    assert.equal(b.read.maxChars, undefined, "read has no char cap");
+
+    // Long lines under the line budget: char cap trims at line boundaries.
+    const longLines = Array.from({ length: 40 }, (_, i) => `L${String(i).padStart(2, "0")} ` + "x".repeat(396));
+    const capped = applyBudget(longLines.join("\n"), "bash");
+    assert.ok(capped.length <= 6000, `capped ${capped.length}`);
+    const marker = /^\.\.\. \((\d+) chars truncated\) \.\.\.$/m.exec(capped);
+    assert.ok(marker, "char-cap marker present");
+    const kept = capped.split("\n").filter((l) => !l.startsWith("..."));
+    assert.ok(kept.every((l) => longLines.includes(l)), "only whole lines kept");
+    // Head/tail split follows bash's 15/35 line ratio.
+    const headKept = capped.slice(0, marker.index).split("\n").filter(Boolean).length;
+    const tailKept = capped.slice(marker.index + marker[0].length).split("\n").filter(Boolean).length;
+    assert.ok(headKept >= 3 && headKept <= 5, `head ${headKept}`);
+    assert.ok(tailKept >= 9 && tailKept <= 11, `tail ${tailKept}`);
+    assert.equal(kept[0], longLines[0]);
+    assert.equal(kept.at(-1), longLines.at(-1));
+    // Dropped = original minus kept head and tail text (boundary newlines count as dropped).
+    assert.equal(Number(marker[1]), longLines.join("\n").length - (kept.join("\n").length - 1),
+      "marker counts dropped chars");
+
+    // A single giant line is cut inside the line, head + tail kept.
+    const giant = "A".repeat(1000) + "B".repeat(20000) + "C".repeat(1000);
+    const giantCapped = applyBudget(giant, "bash");
+    assert.ok(giantCapped.length <= 6000, `giant ${giantCapped.length}`);
+    const giantParts = /^(A+B*)\n\.\.\. \((\d+) chars truncated\) \.\.\.\n(B*C+)$/.exec(giantCapped);
+    assert.ok(giantParts, "giant line cut into head + marker + tail");
+    // Head/tail of the cut line follow the 15/35 ratio too.
+    assert.ok(giantParts[1].length < giantParts[3].length, "tail share larger than head share");
+    assert.equal(giantParts[1].length + giantParts[3].length + Number(giantParts[2]), giant.length);
+
+    // Line under the cap but over the head share is not cut inside.
+    const mid = ["h".repeat(3000), ...Array.from({ length: 10 }, (_, i) => `t${i} ` + "y".repeat(600))].join("\n");
+    assert.ok(!truncateChars(mid, 6000, 15, 35).includes("h".repeat(10)), "no partial line cut");
+
+    // Web budget is separate from bash.
+    const webText = Array.from({ length: 100 }, (_, i) => `web row ${i}`).join("\n");
+    assert.equal(applyBudget(webText, "web"), webText, "100 lines fit web budget");
+    assert.match(applyBudget(webText, "bash"), /lines truncated/, "100 lines exceed bash budget");
+
+    // A char-cap-only trim still produces a handle.
+    const prevDataDir = process.env.CAVE_TOOLS_DATA_DIR;
+    const dataDir = mkdtempSync(join(tmpdir(), "cave-charcap-"));
+    process.env.CAVE_TOOLS_DATA_DIR = dataDir;
+    try {
+      const wide = await bashTool.handler({
+        command: `node -e 'for (let i = 0; i < 30; i++) console.log("row" + i + " " + "z".repeat(500))'`,
+        description: "wide lines",
+      });
+      const out = wide.content[0].text;
+      assert.match(out, /chars truncated/);
+      assert.doesNotMatch(out, /lines truncated/);
+      const handle = /full output \(\d+ lines\) at (\S+) —/.exec(out);
+      assert.ok(handle, out.slice(-300));
+      assert.match(readFileSync(handle[1], "utf8"), /^row29 z{500}$/m);
+    } finally {
+      if (prevDataDir === undefined) delete process.env.CAVE_TOOLS_DATA_DIR;
+      else process.env.CAVE_TOOLS_DATA_DIR = prevDataDir;
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+
+    // configure: max_chars set, kept when omitted, 0 disables.
+    await configureTool.handler({ action: "set_budget", tool_name: "web", max_lines: 120, head_lines: 60, tail_lines: 60, max_chars: 100 });
+    assert.equal(getAllBudgets().web.maxChars, 100);
+    await configureTool.handler({ action: "set_budget", tool_name: "web", max_lines: 120, head_lines: 60, tail_lines: 60, max_chars: 0 });
+    assert.equal(getAllBudgets().web.maxChars, undefined);
+    await configureTool.handler({ action: "set_budget", tool_name: "web", max_lines: 120, head_lines: 60, tail_lines: 60, max_chars: 8000 });
+    assert.deepEqual(getAllBudgets().web, { maxLines: 120, headLines: 60, tailLines: 60, maxChars: 8000 });
+    console.log("char-cap budget tests passed\n");
   }
 
   console.log("All tests passed!");
