@@ -60,7 +60,7 @@ export const bashStartTool: Tool & {
               `pid: ${job.pid}`,
               `logPath: ${job.logPath}`,
               ``,
-              `Poll with cave__bash_status { "jobId": "${job.jobId}", "wait": 60 } — wait blocks up to 60s and returns the moment the job exits. Stop with cave__bash_stop.`,
+              `Poll with cave__bash_status { "jobId": "${job.jobId}", "wait": 60 } — wait returns on exit. Use tail_lines=0 for status only, or reuse next_cursor for new output only. Stop with cave__bash_stop.`,
             ].join("\n"),
           },
         ],

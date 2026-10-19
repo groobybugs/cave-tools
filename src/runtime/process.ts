@@ -129,6 +129,64 @@ export interface BackgroundHandle {
   onClose: (cb: CloseListener) => void;
 }
 
+export interface StartDurableBackgroundOptions {
+  cwd?: string;
+  shell: string;
+  workerPath: string;
+  jobId: string;
+  logPath: string;
+  resultPath: string;
+}
+
+/**
+ * Starts a detached worker that owns the command and writes its structured
+ * completion result before exiting. The result survives an MCP server restart.
+ */
+export function startDurableBackgroundCommand(
+  command: string,
+  options: StartDurableBackgroundOptions,
+): BackgroundHandle {
+  const detached = process.platform !== "win32";
+  const proc = spawn(
+    process.execPath,
+    [
+      options.workerPath,
+      options.jobId,
+      options.logPath,
+      options.resultPath,
+      options.shell,
+      command,
+    ],
+    {
+      cwd: options.cwd,
+      env: process.env,
+      stdio: "ignore",
+      detached,
+      windowsHide: process.platform === "win32",
+    },
+  );
+  proc.unref();
+
+  const listeners: CloseListener[] = [];
+  let result: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+  const fire = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (result) return;
+    result = { code, signal };
+    for (const cb of listeners.splice(0)) cb(code, signal);
+  };
+  proc.on("close", fire);
+  proc.on("error", () => fire(null, null));
+
+  return {
+    pid: proc.pid as number,
+    onClose: (cb) => {
+      const settled = result;
+      if (settled) queueMicrotask(() => cb(settled.code, settled.signal));
+      else listeners.push(cb);
+    },
+  };
+}
+
 /**
  * Spawns a detached process group whose output goes to logFd, then unrefs it so
  * the server can exit without waiting. Listeners attached after exit replay the

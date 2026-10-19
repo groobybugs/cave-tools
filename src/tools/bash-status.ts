@@ -1,8 +1,14 @@
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { getJobInfo, listSessionJobs, tailFileBytes, waitForJob } from "../runtime/jobs.js";
+import {
+  fileByteSize,
+  getJobInfo,
+  listSessionJobs,
+  readFileChunk,
+  waitForJob,
+} from "../runtime/jobs.js";
 import { redactSecrets } from "../compression/redact.js";
-import { applyBudget } from "../compression/utils.js";
+import { applyBudget, getBudget } from "../compression/utils.js";
 import type { JobRecord } from "../storage/db.js";
 
 const DEFAULT_TAIL_LINES = 50;
@@ -32,13 +38,43 @@ function truncateCommand(command: string): string {
   return oneLine.length > 120 ? `${oneLine.slice(0, 117)}...` : oneLine;
 }
 
+function nonnegativeInteger(value: unknown, fallback: number): number | null {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.floor(parsed);
+}
+
+function limitIncrementalLines(
+  text: string,
+  maxLines: number,
+): { text: string; consumedBytes: number; limited: boolean } {
+  let end = 0;
+  for (let line = 0; line < maxLines; line++) {
+    const newline = text.indexOf("\n", end);
+    if (newline === -1) {
+      return { text, consumedBytes: Buffer.byteLength(text, "utf-8"), limited: false };
+    }
+    end = newline + 1;
+  }
+  if (end >= text.length) {
+    return { text, consumedBytes: Buffer.byteLength(text, "utf-8"), limited: false };
+  }
+  const limitedText = text.slice(0, end);
+  return {
+    text: limitedText,
+    consumedBytes: Buffer.byteLength(limitedText, "utf-8"),
+    limited: true,
+  };
+}
+
 export const bashStatusTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__bash_status",
   annotations: { readOnlyHint: true },
   description:
-    "Checks a background job started with cave__bash_start. Returns state (running/exited/killed/lost), exit code, duration, and a log tail. Optional 'wait' blocks server-side up to 60 seconds, returning the moment the job exits — use it instead of sleep-polling. Called without jobId, lists the session's jobs.",
+    "Checks a background job started with cave__bash_start. Returns state (running/exited/killed/lost), exit code, duration, and log output. Set tail_lines=0 for status only (no log read). Pass cursor from a prior next_cursor for bounded incremental output without duplicates. Without cursor, returns the compatible log tail. Optional 'wait' blocks server-side up to 60 seconds, returning the moment the job exits. Called without jobId, lists the session's jobs.",
   inputSchema: {
     type: "object",
     properties: {
@@ -48,8 +84,15 @@ export const bashStatusTool: Tool & {
       },
       tail_lines: {
         type: "number",
-        description: `Log lines to return (default ${DEFAULT_TAIL_LINES})`,
+        minimum: 0,
+        description: `Log lines to return (default ${DEFAULT_TAIL_LINES}); 0 returns status only without reading the log`,
         default: DEFAULT_TAIL_LINES,
+      },
+      cursor: {
+        type: "number",
+        minimum: 0,
+        description:
+          "Byte cursor for incremental log output. Use next_cursor from the prior response. Omit for tail behavior.",
       },
       wait: {
         type: "number",
@@ -74,7 +117,15 @@ export const bashStatusTool: Tool & {
       const lines = jobs.map(
         (job) => `${job.jobId}  ${formatState(job)}  ${truncateCommand(job.command)}`,
       );
-      return { content: [{ type: "text", text: applyBudget(lines.join("\n"), "bash") }] };
+      const listing = lines.join("\n");
+      return {
+        content: [
+          {
+            type: "text",
+            text: applyBudget(shouldRedact ? redactSecrets(listing) : listing, "bash"),
+          },
+        ],
+      };
     }
 
     const jobId = String(args.jobId);
@@ -91,22 +142,81 @@ export const bashStatusTool: Tool & {
       job = (await waitForJob(jobId, waitSeconds * 1000)) ?? job;
     }
 
-    const tailLines = Math.max(1, Number(args.tail_lines) || DEFAULT_TAIL_LINES);
-    let tail = await tailFileBytes(job.logPath, TAIL_READ_BYTES);
-    const lines = tail.split("\n");
-    if (lines.length > tailLines) tail = lines.slice(-tailLines).join("\n");
-    if (shouldRedact) tail = redactSecrets(tail);
+    const tailLines = nonnegativeInteger(args.tail_lines, DEFAULT_TAIL_LINES);
+    const cursor = nonnegativeInteger(args.cursor, 0);
+    if (tailLines === null || cursor === null) {
+      return {
+        content: [{ type: "text", text: "tail_lines and cursor must be non-negative numbers" }],
+        isError: true,
+      };
+    }
 
-    const text = applyBudget(
-      [
-        `${job.jobId}  ${formatState(job)}`,
-        `command: ${truncateCommand(job.command)}`,
-        `log: ${job.logPath}`,
+    const header = [
+      `${job.jobId}  ${formatState(job)}`,
+      `command: ${truncateCommand(job.command)}`,
+      `log: ${job.logPath}`,
+    ];
+
+    let rawText: string;
+    if (tailLines === 0) {
+      const logSize = fileByteSize(job.logPath);
+      rawText = [
+        ...header,
+        `log_size: ${logSize} bytes`,
+        `next_cursor: ${logSize}`,
+        ``,
+        "(log output omitted; tail_lines=0 read no log bytes; use cursor=0 to read existing output)",
+      ].join("\n");
+    } else if (args.cursor !== undefined) {
+      const chunk = await readFileChunk(job.logPath, cursor, TAIL_READ_BYTES);
+      const budgetLines = Math.max(1, getBudget("bash").maxLines - 8);
+      const limited = limitIncrementalLines(chunk.text, Math.min(tailLines, budgetLines));
+      const nextCursor = chunk.startCursor + limited.consumedBytes;
+      const hasMore = nextCursor < chunk.fileSize;
+      const notes: string[] = [];
+      if (chunk.cursorReset) {
+        notes.push(`cursor_reset: ${chunk.requestedCursor} exceeded log size; resumed at 0`);
+      }
+      if (hasMore) {
+        const reason = limited.limited ? "line limit" : `${TAIL_READ_BYTES}-byte read limit`;
+        notes.push(`output_truncated: more log bytes remain (${reason}); continue with cursor=${nextCursor}`);
+      }
+      rawText = [
+        ...header,
+        `cursor: ${chunk.startCursor}-${nextCursor} of ${chunk.fileSize} bytes`,
+        `next_cursor: ${nextCursor}`,
+        ...notes,
+        ``,
+        limited.text.trimEnd() || "(no new log output)",
+      ].join("\n");
+    } else {
+      const logSize = fileByteSize(job.logPath);
+      const chunk = await readFileChunk(
+        job.logPath,
+        Math.max(0, logSize - TAIL_READ_BYTES),
+        TAIL_READ_BYTES,
+      );
+      let tail = chunk.text;
+      const lines = tail.split("\n");
+      let lineTruncated = false;
+      if (lines.length > tailLines) {
+        tail = lines.slice(-tailLines).join("\n");
+        lineTruncated = true;
+      }
+      const tailTruncated = chunk.startCursor > 0 || lineTruncated;
+      rawText = [
+        ...header,
+        `next_cursor: ${chunk.fileSize}`,
+        ...(tailTruncated
+          ? ["tail_truncated: earlier log output omitted; use cursor=0 for incremental output"]
+          : []),
         ``,
         tail.trimEnd() || "(log empty)",
-      ].join("\n"),
-      "bash",
-    );
+      ].join("\n");
+    }
+
+    const protectedText = shouldRedact ? redactSecrets(rawText) : rawText;
+    const text = applyBudget(protectedText, "bash");
 
     return {
       content: [{ type: "text", text }],

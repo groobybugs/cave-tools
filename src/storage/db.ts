@@ -148,6 +148,9 @@ interface ArchiveRow {
 }
 
 export function caveToolsDataDir(): string {
+  // Override with CAVE_TOOLS_DATA_DIR. This directory holds SQLite stats,
+  // archives, and jobs — not the in-memory file-content cache. Parallel MCP
+  // processes share stats here but never share read-body cache (correctness).
   const override = process.env.CAVE_TOOLS_DATA_DIR?.trim();
   return override || join(homedir(), ".cache", "cave-tools");
 }
@@ -666,11 +669,15 @@ export function getLifetimeStats(): LifetimeStats {
 }
 
 export function registerReadPath(path: string, hash?: string): void {
-  openDb()
-    .prepare(
-      "INSERT INTO read_registry (path, hash, last_read_at) VALUES (?, ?, ?) ON CONFLICT(path) DO UPDATE SET hash = COALESCE(excluded.hash, read_registry.hash), last_read_at = excluded.last_read_at",
-    )
-    .run(path, hash ?? null, Date.now());
+  try {
+    openDb()
+      .prepare(
+        "INSERT INTO read_registry (path, hash, last_read_at) VALUES (?, ?, ?) ON CONFLICT(path) DO UPDATE SET hash = COALESCE(excluded.hash, read_registry.hash), last_read_at = excluded.last_read_at",
+      )
+      .run(path, hash ?? null, Date.now());
+  } catch {
+    // Advisory registry; missing/locked DB must not fail reads.
+  }
 }
 
 export function recordArchive(entry: ArchiveEntry): void {

@@ -23,7 +23,7 @@ import { editTool } from "./tools/edit.js";
 import { applyPatchTool } from "./tools/apply-patch.js";
 import { websearchTool } from "./tools/websearch.js";
 import { webfetchTool } from "./tools/webfetch.js";
-import { pruneDeadSessions } from "./compression/utils.js";
+import { isSubagentContext, pruneDeadSessions } from "./compression/utils.js";
 import { pruneJobs } from "./runtime/jobs.js";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
@@ -73,18 +73,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  // Caller session id from MCP _meta (see cave__read case). Shared by the
-  // background-job tools so job listing is scoped per-session.
+  // Caller session id from MCP _meta (opencode sends sessionID after the
+  // mcp/catalog.ts patch). Claude Code and other clients typically omit it,
+  // so we fall back to "default". Subagent isolation for those clients is
+  // env-based: isSubagentContext() forces fresh reads (never stub).
   const requestSessionId = String(
     (request.params as { _meta?: { sessionID?: unknown } })._meta?.sessionID ?? "default",
   );
 
   switch (name) {
     case "cave__read": {
-      // Read the caller's session id from MCP _meta (sent by opencode after the
-      // mcp/catalog.ts patch). Used to key the dedup cache per-session so
-      // subagents (which share this MCP process) get fresh content. Falls back
-      // to "default" for clients that don't send _meta.
+      // Per-session cache key (opencode _meta.sessionID). Clients that omit it
+      // share DEFAULT_SESSION; env subagent detection still forces fresh reads.
       const meta = (request.params as { _meta?: { sessionID?: unknown } })
         ?._meta;
       const sessionId = String(meta?.sessionID ?? "default");
@@ -166,6 +166,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 export async function startServer(): Promise<void> {
+  // Probe env once so unknown Claude Code / subagent keys log at boot.
+  void isSubagentContext();
   await pruneDeadSessions();
   pruneJobs();
   const transport = new StdioServerTransport();

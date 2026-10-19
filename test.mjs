@@ -2,7 +2,13 @@ import { bashTool } from "./dist/tools/bash.js";
 import { bashStartTool } from "./dist/tools/bash-start.js";
 import { bashStatusTool } from "./dist/tools/bash-status.js";
 import { bashStopTool } from "./dist/tools/bash-stop.js";
-import { getJobInfo } from "./dist/runtime/jobs.js";
+import {
+  getJobInfo,
+  pruneJobs,
+  readFileChunk,
+  resultPathFor,
+  waitForJob,
+} from "./dist/runtime/jobs.js";
 import { insertJob, deleteJob } from "./dist/storage/db.js";
 import { compressTool } from "./dist/tools/compress.js";
 import { editTool } from "./dist/tools/edit.js";
@@ -28,7 +34,25 @@ import {
   getBounceStats,
   getAllBudgets,
   applyBudget,
+  fitsBudget,
+  isSubagentContext,
+  resetSubagentContextCache,
+  updateFileCache,
+  isFileUnchanged,
+  getCacheStats,
+  buildStats,
+  resetCache,
+  stripLeadingRtk,
+  rewriteCommandWithRtk,
+  getRtkStats,
+  getRtkTopPassthrough,
+  resetRtkAvailabilityCache,
 } from "./dist/compression/utils.js";
+import {
+  collapseRepetition,
+  repetitionMarker,
+} from "./dist/compression/repetition.js";
+import { writeIfUnchanged } from "./dist/runtime/file-mutation.js";
 import {
   compressStructuredSemantic,
   isStructuredCompressionEnabled,
@@ -46,10 +70,11 @@ import {
   getCodebookSize,
 } from "./dist/compression/codebook.js";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, unlinkSync, chmodSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, delimiter as pathDelimiter } from "node:path";
 import { createServer } from "node:http";
+import { execFileSync } from "node:child_process";
 
 async function test() {
   console.log("Testing Cave Tools...\n");
@@ -499,10 +524,93 @@ async function test() {
     });
     assert.equal(grepMissing.isError, true);
     assert.match(grepMissing.content[0].text, /Path not found/);
+
+    // Per-file cap: 30 hits in one file → 20 lines + "+N more" marker.
+    const manyHits = Array.from({ length: 30 }, (_, i) => `HIT_TOKEN line ${i + 1}`);
+    writeFileSync(join(grepDir, "many.ts"), manyHits.join("\n") + "\n", "utf-8");
+    const grepCapped = await grepTool.handler({
+      pattern: "HIT_TOKEN",
+      path: grepDir,
+      glob: "many.ts",
+      limit: 100,
+    });
+    const capText = grepCapped.content[0].text;
+    const capHits = capText.split("\n").filter((l) => l.includes("HIT_TOKEN"));
+    assert.equal(capHits.length, 20, "per-file cap keeps 20 hit lines");
+    assert.match(capText, /\+10 more in many\.ts/);
   } finally {
     rmSync(grepDir, { recursive: true, force: true });
   }
   console.log("cave__grep tests passed");
+  console.log();
+
+  console.log("3b. Testing read fast-path, budgets, repetition:");
+  {
+    const budgets = getAllBudgets();
+    assert.equal(budgets.read.maxLines, 200);
+    assert.equal(budgets.read.headLines, 100);
+    assert.equal(budgets.read.tailLines, 100);
+    assert.equal(budgets.ls.maxLines, 60);
+    assert.equal(budgets.ls.headLines, 30);
+    assert.equal(budgets.ls.tailLines, 30);
+    assert.equal(budgets.find.maxLines, 120);
+
+    const fpDir = mkdtempSync(join(tmpdir(), "cave-fastpath-"));
+    try {
+      // Small read: skip codebook even after it learned the react import.
+      const smallBody =
+        "import { useState } from 'react';\nexport const FAST_PATH_UNIQUE = 'y';\n";
+      const smallFile = join(fpDir, "small.ts");
+      writeFileSync(smallFile, smallBody, "utf-8");
+      const smallRead = await readTool.handler({ file_path: smallFile });
+      assert.equal(smallRead.content[0].text, smallBody, "small-read fast-path is identity");
+      assert.doesNotMatch(smallRead.content[0].text, /\[§/, "fast-path skips codebook");
+      assert.equal(fitsBudget(smallBody, "read"), true);
+
+      // Large read: applyBudget head/tail shape (limit above read maxLines).
+      const largeLines = Array.from(
+        { length: 400 },
+        (_, i) => `ZZZ-large-read-${String(i + 1).padStart(3, "0")}`,
+      );
+      const largeFile = join(fpDir, "large.txt");
+      writeFileSync(largeFile, largeLines.join("\n"), "utf-8");
+      const largeRead = await readTool.handler({ file_path: largeFile, limit: 400 });
+      const largeText = largeRead.content[0].text;
+      assert.match(largeText, /^ZZZ-large-read-001\n/);
+      assert.match(largeText, /ZZZ-large-read-100/);
+      assert.match(largeText, /ZZZ-large-read-301/);
+      assert.match(largeText, /ZZZ-large-read-400/);
+      assert.doesNotMatch(largeText, /ZZZ-large-read-200/);
+      assert.match(largeText, /lines truncated/);
+
+      // Truncation hint names offset/limit + force=true (bounce safety).
+      const paged = await readTool.handler({ file_path: largeFile, force: true });
+      assert.match(paged.content[0].text, /offset=201/);
+      assert.match(paged.content[0].text, /limit/);
+      assert.match(paged.content[0].text, /force=true/);
+    } finally {
+      rmSync(fpDir, { recursive: true, force: true });
+    }
+
+    const line = "the same log line repeats a lot and must shrink";
+    const raw = Array.from({ length: 10 }, () => line).join("\n");
+    const once = collapseRepetition(raw);
+    const twice = collapseRepetition(once);
+    assert.equal(once, twice, "repetition collapse is idempotent");
+    assert.match(once, /… \d+ identical lines elided …/);
+    assert.equal((once.match(/identical lines elided/g) || []).length, 1);
+    assert.equal((twice.match(/identical lines elided/g) || []).length, 1);
+    const nested = [repetitionMarker(2), repetitionMarker(2), repetitionMarker(2)].join("\n");
+    assert.equal(collapseRepetition(nested), nested, "marker lines never re-collapse");
+
+    const ids = Array.from({ length: 10 }, (_, i) => `GET /x req=${i} ok payload=hello`);
+    const idText = ids.join("\n");
+    assert.equal(collapseRepetition(idText), idText, "digit-mask off by default");
+    const masked = collapseRepetition(idText, { maskDigits: true });
+    assert.match(masked, /identical lines elided/, "digit-mask opt-in collapses id runs");
+    assert.equal(collapseRepetition(masked, { maskDigits: true }), masked, "masked collapse idempotent");
+  }
+  console.log("read fast-path / repetition tests passed");
   console.log();
 
   console.log("4. Testing cave__find:");
@@ -2198,6 +2306,33 @@ async function test() {
     assert.match(status1.content[0].text, /hello-bg/);
     assert.equal(status1.isError, undefined);
 
+    // Status-only reads no log bytes. Cursor mode returns each byte range once.
+    const statusOnly = await bashStatusTool.handler({
+      jobId: job1,
+      tail_lines: 0,
+      __sessionId: session,
+    });
+    assert.match(statusOnly.content[0].text, /tail_lines=0 read no log bytes/);
+    assert.match(statusOnly.content[0].text, /next_cursor: \d+/);
+    const cursorFirst = await bashStatusTool.handler({
+      jobId: job1,
+      cursor: 0,
+      tail_lines: 100,
+      __sessionId: session,
+    });
+    const nextCursor = Number(cursorFirst.content[0].text.match(/next_cursor: (\d+)/)[1]);
+    const firstBody = cursorFirst.content[0].text.slice(cursorFirst.content[0].text.indexOf("\n\n") + 2);
+    assert.match(firstBody, /hello-bg/);
+    const cursorSecond = await bashStatusTool.handler({
+      jobId: job1,
+      cursor: nextCursor,
+      tail_lines: 100,
+      __sessionId: session,
+    });
+    const secondBody = cursorSecond.content[0].text.slice(cursorSecond.content[0].text.indexOf("\n\n") + 2);
+    assert.match(secondBody, /\(no new log output\)/);
+    assert.doesNotMatch(secondBody, /hello-bg/);
+
     // 2. wait returns as soon as the command finishes, not after full timeout.
     const start2 = await bashStartTool.handler({
       command: "sleep 2; echo done-wait",
@@ -2285,8 +2420,84 @@ async function test() {
     assert.match(status7.content[0].text, /exited \(code 7\)/);
     assert.equal(status7.isError, true);
 
+    // 8. Metadata and log headers are redacted together.
+    const secret = "0123456789abcdef0123456789abcdef";
+    const start8 = await bashStartTool.handler({
+      command: `printf safe-output # token=${secret}`,
+      description: "redaction metadata job",
+      __sessionId: session,
+    });
+    const job8 = start8.content[0].text.match(/jobId: (\S+)/)[1];
+    createdIds.push(job8);
+    createdLogs.push(start8.content[0].text.match(/logPath: (\S+)/)[1]);
+    const status8 = await bashStatusTool.handler({ jobId: job8, wait: 30, __sessionId: session });
+    assert.doesNotMatch(status8.content[0].text, new RegExp(secret));
+    assert.match(status8.content[0].text, /REDACTED/);
+
+    // 9. Byte chunks never split a UTF-8 sequence and resume without duplicates.
+    const utfLog = join(mkdtempSync(join(tmpdir(), "cave-job-utf-")), "utf.log");
+    writeFileSync(utfLog, `${"a".repeat(65535)}€Z`, "utf-8");
+    createdLogs.push(utfLog);
+    const utfFirst = await readFileChunk(utfLog, 0, 65536);
+    assert.equal(utfFirst.text, "a".repeat(65535));
+    assert.equal(utfFirst.nextCursor, 65535);
+    const utfSecond = await readFileChunk(utfLog, utfFirst.nextCursor, 65536);
+    assert.equal(utfSecond.text, "€Z");
+
+    // 10. A launcher process can die while its detached worker later records
+    // structured completion; adopted wait polls and returns before its timeout.
+    const jobsModule = new URL("./dist/runtime/jobs.js", import.meta.url).href;
+    const restartScript = `
+      const { startJob } = await import(${JSON.stringify(jobsModule)});
+      const job = await startJob({
+        command: "sleep 1; printf durable-restart; exit 4",
+        sessionId: ${JSON.stringify(session)}
+      });
+      process.stdout.write(JSON.stringify(job));
+      process.exit(0);
+    `;
+    const restartJob = JSON.parse(execFileSync(
+      process.execPath,
+      ["--input-type=module", "-e", restartScript],
+      { encoding: "utf-8", env: process.env },
+    ));
+    createdIds.push(restartJob.jobId);
+    createdLogs.push(restartJob.logPath);
+    const restartWaitAt = Date.now();
+    const restarted = await waitForJob(restartJob.jobId, 10_000);
+    assert.ok(Date.now() - restartWaitAt < 5_000, "adopted wait returns soon after completion");
+    assert.equal(restarted.state, "exited");
+    assert.equal(restarted.exitCode, 4);
+    assert.match(readFileSync(restartJob.logPath, "utf-8"), /durable-restart/);
+    assert.ok(existsSync(resultPathFor(restartJob.jobId)), "worker wrote durable result sidecar");
+
+    // 11. Pruning never removes an old log still referenced by a running row.
+    const activeId = "j-test-active-prune";
+    const activeLog = join(mkdtempSync(join(tmpdir(), "cave-job-")), `${activeId}.log`);
+    writeFileSync(activeLog, "active\n");
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    utimesSync(activeLog, old, old);
+    insertJob({
+      jobId: activeId,
+      pid: process.pid,
+      sessionId: session,
+      command: "active",
+      workdir: null,
+      startedAt: old.getTime(),
+      endedAt: null,
+      exitCode: null,
+      signal: null,
+      state: "running",
+      logPath: activeLog,
+    });
+    createdIds.push(activeId);
+    createdLogs.push(activeLog);
+    pruneJobs();
+    assert.ok(existsSync(activeLog), "active job log survives orphan pruning");
+
     // Cleanup: remove test rows and logs.
     for (const id of createdIds) {
+      try { unlinkSync(resultPathFor(id)); } catch { /* best effort */ }
       try { deleteJob(id); } catch { /* best effort */ }
     }
     for (const log of createdLogs) {
@@ -2296,7 +2507,285 @@ async function test() {
     console.log();
   }
 
+  console.log("13. Testing filesTracked + subagent context + writeIfUnchanged:");
+  {
+    const savedEnv = {
+      CAVE_TOOLS_FORCE_FRESH: process.env.CAVE_TOOLS_FORCE_FRESH,
+      CURSOR_TASK_ID: process.env.CURSOR_TASK_ID,
+      CLINE_TASK_ID: process.env.CLINE_TASK_ID,
+      CLAUDE_CODE_SUBAGENT: process.env.CLAUDE_CODE_SUBAGENT,
+      ANTHROPIC_SUBAGENT: process.env.ANTHROPIC_SUBAGENT,
+      FOO_TASK_ID: process.env.FOO_TASK_ID,
+      CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT,
+      MY_SUBAGENT_ID: process.env.MY_SUBAGENT_ID,
+    };
+    const applyEnv = (key, value) => {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    };
+    const restoreEnv = () => {
+      for (const [key, value] of Object.entries(savedEnv)) applyEnv(key, value);
+      resetSubagentContextCache();
+    };
+    const clearSubagentEnv = () => {
+      for (const key of Object.keys(savedEnv)) delete process.env[key];
+      resetSubagentContextCache();
+    };
+
+    try {
+      clearSubagentEnv();
+      assert.equal(isSubagentContext(), false, "no signals => not subagent");
+
+      process.env.CAVE_TOOLS_FORCE_FRESH = "1";
+      resetSubagentContextCache();
+      assert.equal(isSubagentContext(), true, "FORCE_FRESH=1");
+
+      process.env.CAVE_TOOLS_FORCE_FRESH = "true";
+      resetSubagentContextCache();
+      assert.equal(isSubagentContext(), true, "FORCE_FRESH=true");
+
+      process.env.CAVE_TOOLS_FORCE_FRESH = "yes";
+      resetSubagentContextCache();
+      assert.equal(isSubagentContext(), false, "FORCE_FRESH=yes ignored");
+
+      delete process.env.CAVE_TOOLS_FORCE_FRESH;
+      process.env.CLINE_TASK_ID = "abc";
+      resetSubagentContextCache();
+      assert.equal(isSubagentContext(), true, "CLINE_TASK_ID");
+
+      delete process.env.CLINE_TASK_ID;
+      process.env.CLAUDE_CODE_SUBAGENT = "1";
+      resetSubagentContextCache();
+      assert.equal(isSubagentContext(), true, "CLAUDE_CODE_SUBAGENT");
+
+      delete process.env.CLAUDE_CODE_SUBAGENT;
+      process.env.ANTHROPIC_SUBAGENT = "yes";
+      resetSubagentContextCache();
+      assert.equal(isSubagentContext(), true, "ANTHROPIC_SUBAGENT");
+
+      delete process.env.ANTHROPIC_SUBAGENT;
+      process.env.CURSOR_TASK_ID = "cursor-task";
+      resetSubagentContextCache();
+      assert.equal(isSubagentContext(), true, "CURSOR_TASK_ID");
+
+      delete process.env.CURSOR_TASK_ID;
+      process.env.FOO_TASK_ID = "t";
+      resetSubagentContextCache();
+      assert.equal(isSubagentContext(), true, "TASK_ID-style FOO_TASK_ID");
+
+      delete process.env.FOO_TASK_ID;
+      process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
+      resetSubagentContextCache();
+      assert.equal(isSubagentContext(), false, "unknown CLAUDE_CODE_* ignored");
+
+      delete process.env.CLAUDE_CODE_ENTRYPOINT;
+      process.env.MY_SUBAGENT_ID = "x";
+      resetSubagentContextCache();
+      assert.equal(isSubagentContext(), false, "unknown *SUBAGENT* ignored");
+      delete process.env.MY_SUBAGENT_ID;
+      resetSubagentContextCache();
+
+      resetCache();
+      const dir = mkdtempSync(join(tmpdir(), "cave-cache-"));
+      const sample = join(dir, "a.txt");
+      writeFileSync(sample, "hello");
+      await updateFileCache(sample, "sess");
+      assert.equal(await isFileUnchanged(sample, "sess"), true, "same session stubs");
+      process.env.CAVE_TOOLS_FORCE_FRESH = "1";
+      resetSubagentContextCache();
+      assert.equal(await isFileUnchanged(sample, "sess"), false, "subagent never stubs");
+      delete process.env.CAVE_TOOLS_FORCE_FRESH;
+      resetSubagentContextCache();
+
+      resetCache();
+      const files = [0, 1, 2].map((i) => {
+        const p = join(dir, `f${i}.txt`);
+        writeFileSync(p, `content-${i}`);
+        return p;
+      });
+      for (const sid of ["s1", "s2"]) {
+        for (const p of files) await updateFileCache(p, sid);
+      }
+      assert.equal(getCacheStats().filesTracked, 6, "getCacheStats filesTracked");
+      assert.equal(buildStats().cache.filesTracked, 6, "buildStats filesTracked");
+
+      // Dedup is representation-aware: exact repeats stub, but a new range,
+      // mode, or numbered view must be delivered once before it can stub.
+      resetCache();
+      const ranged = join(dir, "ranges.ts");
+      writeFileSync(
+        ranged,
+        "export function alpha() {\n  return 1;\n}\nexport function beta() {\n  return 2;\n}\n",
+      );
+      const rangeArgs = {
+        file_path: ranged,
+        offset: 1,
+        limit: 2,
+        mode: "full",
+        __sessionId: "range-session",
+      };
+      const rangeFirst = await readTool.handler(rangeArgs);
+      assert.match(rangeFirst.content[0].text, /alpha/);
+      const rangeRepeat = await readTool.handler(rangeArgs);
+      assert.match(rangeRepeat.content[0].text, /file unchanged/);
+      const rangeNext = await readTool.handler({ ...rangeArgs, offset: 3 });
+      assert.doesNotMatch(rangeNext.content[0].text, /file unchanged/);
+      assert.match(rangeNext.content[0].text, /}/);
+      const signaturesFirst = await readTool.handler({
+        ...rangeArgs,
+        mode: "signatures",
+      });
+      assert.doesNotMatch(signaturesFirst.content[0].text, /file unchanged/);
+      assert.match(signaturesFirst.content[0].text, /alpha/);
+      const signaturesRepeat = await readTool.handler({
+        ...rangeArgs,
+        mode: "signatures",
+      });
+      assert.match(signaturesRepeat.content[0].text, /file unchanged/);
+      const numbered = await readTool.handler({ ...rangeArgs, line_numbers: true });
+      assert.doesNotMatch(numbered.content[0].text, /file unchanged/);
+      assert.match(numbered.content[0].text, /cave_edit_meta/);
+
+      const changed = join(dir, "changed.txt");
+      writeFileSync(changed, "old");
+      const expected = readFileSync(changed);
+      writeFileSync(changed, "new");
+      await assert.rejects(
+        () => writeIfUnchanged(changed, expected, "newer"),
+        /File changed after it was read.*cave__read.*cave__invalidate/,
+      );
+
+      rmSync(dir, { recursive: true, force: true });
+      resetCache();
+    } finally {
+      restoreEnv();
+      resetCache();
+    }
+    console.log("filesTracked + subagent context tests passed");
+    console.log();
+  }
+
+  console.log("14. Testing RTK strip / timeout / counters:");
+  {
+    assert.deepEqual(stripLeadingRtk("rtk git status"), { command: "git status", stripped: true });
+    assert.deepEqual(stripLeadingRtk("FOO=1 rtk git status"), { command: "FOO=1 git status", stripped: true });
+    assert.deepEqual(stripLeadingRtk("FOO=1 BAR=2 rtk git status"), {
+      command: "FOO=1 BAR=2 git status",
+      stripped: true,
+    });
+    assert.deepEqual(stripLeadingRtk('"rtk git status"'), { command: "git status", stripped: true });
+    assert.deepEqual(stripLeadingRtk("'rtk git status'"), { command: "git status", stripped: true });
+    assert.deepEqual(stripLeadingRtk("rtk rtk git status"), { command: "rtk git status", stripped: true });
+    assert.equal(stripLeadingRtk("git status").stripped, false);
+    assert.equal(stripLeadingRtk("rtk").stripped, false);
+    assert.deepEqual(stripLeadingRtk("  rtk   git status  "), { command: "git status", stripped: true });
+
+    const fakeDir = mkdtempSync(join(tmpdir(), "cave-rtk-fake-"));
+    const fakeRtk = join(fakeDir, "rtk");
+    writeFileSync(fakeRtk, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  process.stdout.write("rtk-fake 0\\n");
+  process.exit(0);
+}
+if (args[0] === "rewrite") {
+  const cmd = args.slice(1).join(" ");
+  const sleepMs = Number(process.env.FAKE_RTK_SLEEP_MS || "0");
+  if (sleepMs > 0) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
+  }
+  if (process.env.FAKE_RTK_EMPTY === "1") process.exit(1);
+  if (process.env.FAKE_RTK_IDENTICAL === "1") {
+    process.stdout.write(cmd);
+    process.exit(0);
+  }
+  process.stdout.write(cmd ? ("rtk " + cmd) : "");
+  process.exit(0);
+}
+process.exit(1);
+`);
+    chmodSync(fakeRtk, 0o755);
+
+    const prevPath = process.env.PATH;
+    const prevEmpty = process.env.FAKE_RTK_EMPTY;
+    const prevIdent = process.env.FAKE_RTK_IDENTICAL;
+    const prevSleep = process.env.FAKE_RTK_SLEEP_MS;
+    process.env.PATH = fakeDir + pathDelimiter + (prevPath || "");
+    resetRtkAvailabilityCache();
+
+    const rtkDelta = (before, after) => ({
+      rewrites: after.rewrites - before.rewrites,
+      alreadyWrapped: after.alreadyWrapped - before.alreadyWrapped,
+      passthrough: after.passthrough - before.passthrough,
+    });
+    const assertOnce = (d, field, msg) => {
+      const sum = d.rewrites + d.alreadyWrapped + d.passthrough;
+      assert.equal(sum, 1, `${msg}: expected exactly one counter, got ${JSON.stringify(d)}`);
+      assert.equal(d[field], 1, `${msg}: expected ${field}=1`);
+    };
+
+    try {
+      let before = getRtkStats();
+      const wrapped = await rewriteCommandWithRtk("rtk echo doublewrap");
+      assert.equal(wrapped, "rtk echo doublewrap", "double-wrap stripped once");
+      assert.doesNotMatch(wrapped, /rtk rtk/);
+      assertOnce(rtkDelta(before, getRtkStats()), "alreadyWrapped", "strip wrap");
+
+      before = getRtkStats();
+      const rewritten = await rewriteCommandWithRtk("echo doublewrap");
+      assert.equal(rewritten, "rtk echo doublewrap", "plain command rewritten once");
+      assertOnce(rtkDelta(before, getRtkStats()), "rewrites", "plain rewrite");
+
+      process.env.FAKE_RTK_IDENTICAL = "1";
+      before = getRtkStats();
+      const ident = await rewriteCommandWithRtk("echo same");
+      assert.equal(ident, "echo same");
+      assertOnce(rtkDelta(before, getRtkStats()), "alreadyWrapped", "identical stdout");
+      delete process.env.FAKE_RTK_IDENTICAL;
+
+      process.env.FAKE_RTK_EMPTY = "1";
+      before = getRtkStats();
+      const emptyOut = await rewriteCommandWithRtk("weirdcmd --flag");
+      assert.equal(emptyOut, "weirdcmd --flag", "empty stdout returns original");
+      assertOnce(rtkDelta(before, getRtkStats()), "passthrough", "empty stdout");
+      const top = getRtkTopPassthrough();
+      assert.ok(top.some((e) => e.prefix === "weirdcmd --flag"), "passthrough prefix tracked");
+      delete process.env.FAKE_RTK_EMPTY;
+
+      process.env.FAKE_RTK_SLEEP_MS = "5000";
+      before = getRtkStats();
+      const timed = await rewriteCommandWithRtk("sleepcmd now");
+      assert.equal(timed, "sleepcmd now", "timeout fallback returns original");
+      assertOnce(rtkDelta(before, getRtkStats()), "passthrough", "timeout");
+      delete process.env.FAKE_RTK_SLEEP_MS;
+
+      process.env.PATH = prevPath;
+      resetRtkAvailabilityCache();
+      const bashWrap = await bashTool.handler({
+        command: "rtk echo CAVE_RTK_DOUBLEWRAP",
+        description: "strip one rtk wrap then run",
+      });
+      assert.match(bashWrap.content[0].text, /CAVE_RTK_DOUBLEWRAP/);
+      assert.notEqual(bashWrap.isError, true);
+    } finally {
+      process.env.PATH = prevPath;
+      if (prevEmpty === undefined) delete process.env.FAKE_RTK_EMPTY;
+      else process.env.FAKE_RTK_EMPTY = prevEmpty;
+      if (prevIdent === undefined) delete process.env.FAKE_RTK_IDENTICAL;
+      else process.env.FAKE_RTK_IDENTICAL = prevIdent;
+      if (prevSleep === undefined) delete process.env.FAKE_RTK_SLEEP_MS;
+      else process.env.FAKE_RTK_SLEEP_MS = prevSleep;
+      resetRtkAvailabilityCache();
+      rmSync(fakeDir, { recursive: true, force: true });
+    }
+    console.log("RTK strip / timeout / counter tests passed");
+    console.log();
+  }
+
   console.log("All tests passed!");
 }
 
-test().catch(console.error);
+test().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

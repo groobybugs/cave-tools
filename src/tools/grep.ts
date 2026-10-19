@@ -3,16 +3,18 @@ import path from "path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolResult } from "../types.js";
 import { applyBudget } from "../compression/utils.js";
+import { collapseRepetition } from "../compression/repetition.js";
 import { readLineWindow, rgGrep } from "../runtime/ripgrep.js";
 
 const DEFAULT_LIMIT = 100;
+const PER_FILE_LINE_CAP = 20;
 export const grepTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__grep",
   annotations: { readOnlyHint: true },
   description:
-    "Optimized drop-in replacement for the built-in Grep (ripgrep). Returns matching lines with file paths and line numbers, respects .gitignore, with output trimmed to a line budget.",
+    "Optimized drop-in replacement for the built-in Grep (ripgrep). Returns matching lines with file paths and line numbers, respects .gitignore, caps hits per file, collapses consecutive duplicate lines, and trims output to a line budget.",
   inputSchema: {
     type: "object",
     properties: {
@@ -124,25 +126,56 @@ async function formatMatches(
   if (matches.length === 0) return "";
   const outputLines: string[] = [];
   let linesTruncated = false;
+  let currentFile = "";
+  let fileLineCount = 0;
+  let fileOverflow = 0;
+
+  const flushOverflow = () => {
+    if (fileOverflow > 0 && currentFile) {
+      outputLines.push(`+${fileOverflow} more in ${currentFile}`);
+    }
+  };
+
+  const pushLine = (relative: string, line: string): void => {
+    if (relative !== currentFile) {
+      flushOverflow();
+      currentFile = relative;
+      fileLineCount = 0;
+      fileOverflow = 0;
+    }
+    if (fileLineCount >= PER_FILE_LINE_CAP) {
+      fileOverflow++;
+      return;
+    }
+    fileLineCount++;
+    outputLines.push(line);
+  };
+
   for (const match of matches) {
     const absolute = path.resolve(cwd, match.path);
     const relative = path.relative(searchPath, absolute).replace(/\\/g, "/") || path.basename(absolute);
     if (contextValue === 0) {
       if (match.text.includes("...")) linesTruncated = true;
-      outputLines.push(`${relative}:${match.line}: ${match.text}`);
+      pushLine(relative, `${relative}:${match.line}: ${match.text}`);
       continue;
     }
     try {
       for (const item of await readLineWindow(absolute, match.line, contextValue)) {
         if (item.text.includes("... (truncated)")) linesTruncated = true;
-        outputLines.push(item.match ? `${relative}:${item.line}: ${item.text}` : `${relative}-${item.line}- ${item.text}`);
+        pushLine(
+          relative,
+          item.match
+            ? `${relative}:${item.line}: ${item.text}`
+            : `${relative}-${item.line}- ${item.text}`,
+        );
       }
     } catch {
-      outputLines.push(`${relative}:${match.line}: ${match.text}`);
+      pushLine(relative, `${relative}:${match.line}: ${match.text}`);
     }
   }
+  flushOverflow();
 
-  let output = outputLines.join("\n");
+  let output = collapseRepetition(outputLines.join("\n"));
   const notices: string[] = [];
   if (truncated) notices.push(`${effectiveLimit} matches limit. Use limit=${effectiveLimit * 2} for more, or refine pattern`);
   if (linesTruncated) notices.push("Some lines truncated. Use cave__read to see full lines");

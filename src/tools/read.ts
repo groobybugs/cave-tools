@@ -9,7 +9,8 @@ import {
   recordRead,
   shouldForceFull,
   readStubFor,
-  getFileHash,
+  hashContent,
+  fitsBudget,
 } from "../compression/utils.js";
 import { formatNumberedLine, rangeChecksum } from "./line-range.js";
 
@@ -197,9 +198,10 @@ function selectLines(
 
 function truncationHint(sel: SelectResult): string {
   if (!sel.truncated) return "";
+  const next = sel.lastReadLine + 1;
   return sel.truncatedByBytes
-    ? `\n\n(Output truncated at ${MAX_BYTES} bytes. Use 'offset' to read beyond line ${sel.lastReadLine})`
-    : `\n\n(File has more lines. Use 'offset' to read beyond line ${sel.lastReadLine})`;
+    ? `\n\n(Output truncated at ${MAX_BYTES} bytes. Use offset=${next} and limit, or force=true to re-read.)`
+    : `\n\n(File has more lines. Use offset=${next} and limit, or force=true to re-read.)`;
 }
 
 export const readTool: Tool & {
@@ -253,12 +255,14 @@ export const readTool: Tool & {
     const mode = String(args.mode || "full");
     const lineNumbers = args.line_numbers === true;
     const force = args.force === true;
+    const textDeliveryKey = `text:${mode}:offset=${offset}:limit=${limit}:numbered=${lineNumbers}`;
     // Session id injected by index.ts from MCP _meta.sessionID (opencode patch).
     // Falls back to "default" for clients that don't send _meta — preserving
     // prior single-session dedup behavior.
     const sessionId = String(args.__sessionId ?? "default");
 
     const ext = extname(filePath).toLowerCase();
+    const mediaDeliveryKey = `media:${ext || "unknown"}`;
     let fileStat;
     try {
       fileStat = await stat(filePath);
@@ -294,7 +298,7 @@ export const readTool: Tool & {
 
     if (imageMime) {
       try {
-        if (!force && (await isFileUnchanged(filePath, sessionId))) {
+        if (!force && (await isFileUnchanged(filePath, sessionId, mediaDeliveryKey))) {
           return {
             content: [
               { type: "text", text: readStubFor(filePath, sessionId) },
@@ -318,20 +322,33 @@ export const readTool: Tool & {
         // SVG: send as text (it's just XML), keeps the image route for raster only.
         if (ext === ".svg") {
           const svg = await readUtf8Strict(filePath);
-          await updateFileCache(filePath, sessionId);
+          await updateFileCache(filePath, sessionId, {
+            deliveryKey: mediaDeliveryKey,
+            content: svg,
+            hash: hashContent(svg),
+            mtimeMs: imageStat.mtimeMs,
+            emittedChars: svg.length,
+          });
           return {
             content: [{ type: "text", text: svg }],
           };
         }
 
         const buf = await readFile(filePath);
-        await updateFileCache(filePath, sessionId);
+        const data = buf.toString("base64");
+        await updateFileCache(filePath, sessionId, {
+          deliveryKey: mediaDeliveryKey,
+          content: buf,
+          hash: hashContent(buf),
+          mtimeMs: imageStat.mtimeMs,
+          emittedChars: data.length,
+        });
 
         return {
           content: [
             {
               type: "image",
-              data: buf.toString("base64"),
+              data,
               mimeType: imageMime,
             },
           ],
@@ -351,7 +368,7 @@ export const readTool: Tool & {
 
     if (ext === ".pdf") {
       try {
-        if (!force && (await isFileUnchanged(filePath, sessionId))) {
+        if (!force && (await isFileUnchanged(filePath, sessionId, mediaDeliveryKey))) {
           return {
             content: [
               { type: "text", text: readStubFor(filePath, sessionId) },
@@ -373,7 +390,14 @@ export const readTool: Tool & {
         }
 
         const buf = await readFile(filePath);
-        await updateFileCache(filePath, sessionId);
+        const blob = buf.toString("base64");
+        await updateFileCache(filePath, sessionId, {
+          deliveryKey: mediaDeliveryKey,
+          content: buf,
+          hash: hashContent(buf),
+          mtimeMs: fileStat.mtimeMs,
+          emittedChars: blob.length,
+        });
         return {
           content: [
             {
@@ -381,7 +405,7 @@ export const readTool: Tool & {
               resource: {
                 uri: `file://${filePath}`,
                 mimeType: "application/pdf",
-                blob: buf.toString("base64"),
+                blob,
               },
             },
           ],
@@ -412,11 +436,18 @@ export const readTool: Tool & {
     if (shouldForceFull(filePath)) {
       try {
           const content = await readUtf8Strict(filePath);
+          const contentHash = hashContent(content);
           const lines = content.split("\n");
           const sel = selectLines(lines, offset, limit, lineNumbers);
           if (!sel.body && offset !== 1) return { content: [{ type: "text", text: `Offset ${offset} is out of range` }], isError: true };
           const text = sel.body + truncationHint(sel);
-        await updateFileCache(filePath, sessionId);
+        await updateFileCache(filePath, sessionId, {
+          deliveryKey: textDeliveryKey,
+          content,
+          hash: contentHash,
+          mtimeMs: fileStat?.mtimeMs,
+          emittedChars: text.length,
+        });
         recordRead(filePath, false, text.length);
         return {
           content: [{ type: "text", text }],
@@ -431,7 +462,7 @@ export const readTool: Tool & {
       }
     }
 
-    if (!force && (await isFileUnchanged(filePath, sessionId))) {
+    if (!force && (await isFileUnchanged(filePath, sessionId, textDeliveryKey))) {
       const stub = readStubFor(filePath, sessionId);
       recordRead(filePath, false, stub.length);
       return {
@@ -446,14 +477,21 @@ export const readTool: Tool & {
 
     try {
       const content = await readUtf8Strict(filePath);
+      const contentHash = hashContent(content);
 
       if (mode === "aggressive") {
-        await updateFileCache(filePath, sessionId);
         const compressedContent = aggressiveCompress(content, ext);
         const output =
           compressedContent.length < content.length ? compressedContent : content;
         const compressed = applyBudget(output, "read");
         const wasCompressed = compressed.length < output.length;
+        await updateFileCache(filePath, sessionId, {
+          deliveryKey: textDeliveryKey,
+          content,
+          hash: contentHash,
+          mtimeMs: fileStat?.mtimeMs,
+          emittedChars: compressed.length,
+        });
         recordRead(filePath, wasCompressed, compressed.length);
         return {
           content: [{ type: "text", text: compressed }],
@@ -461,11 +499,17 @@ export const readTool: Tool & {
       }
 
       if (mode === "signatures") {
-        await updateFileCache(filePath, sessionId);
         const sigs = formatSignatures(content, ext);
         const output = sigs || "(no signatures extracted for this file type)";
         const compressed = applyBudget(output, "read");
         const wasCompressed = compressed.length < output.length;
+        await updateFileCache(filePath, sessionId, {
+          deliveryKey: textDeliveryKey,
+          content,
+          hash: contentHash,
+          mtimeMs: fileStat?.mtimeMs,
+          emittedChars: compressed.length,
+        });
         recordRead(filePath, wasCompressed, compressed.length);
         return {
           content: [{ type: "text", text: compressed }],
@@ -477,14 +521,14 @@ export const readTool: Tool & {
       if (!sel.body && offset !== 1) {
         return { content: [{ type: "text", text: `Offset ${offset} is out of range` }], isError: true };
       }
-      await updateFileCache(filePath, sessionId);
+      const skipPipeline = fitsBudget(sel.body, "read", MAX_BYTES);
 
       let outText: string;
       if (lineNumbers) {
         // Numbered lines defeat cross-file codebook matching; skip it.
         outText = sel.body;
         // Footer for line-range cave__edit: file_hash + range_checksum + line tags above.
-        const hash = await getFileHash(filePath);
+        const hash = contentHash;
         const totalLines = lines.length;
         const first = Math.max(1, offset);
         const last = sel.lastReadLine;
@@ -497,6 +541,8 @@ export const readTool: Tool & {
           (hash ? `file_hash: ${hash.slice(0, 16)}\n` : "") +
           (windowCs ? `range_checksum: ${first}-${last}:${windowCs}\n` : "") +
           `// cave__edit: start_line/end_line/content + expected_hash and/or expected_range_checksum\n`;
+      } else if (skipPipeline) {
+        outText = sel.body;
       } else {
         addCodebookFile(filePath, content);
         const { text: codebookText, legend } = compressWithCodebook(sel.body);
@@ -504,8 +550,27 @@ export const readTool: Tool & {
       }
       outText += truncationHint(sel);
 
+      if (skipPipeline) {
+        await updateFileCache(filePath, sessionId, {
+          deliveryKey: textDeliveryKey,
+          content,
+          hash: contentHash,
+          mtimeMs: fileStat?.mtimeMs,
+          emittedChars: outText.length,
+        });
+        recordRead(filePath, false, outText.length);
+        return { content: [{ type: "text", text: outText }] };
+      }
+
       const compressed = applyBudget(outText, "read");
       const wasCompressed = compressed.length < sel.body.length;
+      await updateFileCache(filePath, sessionId, {
+        deliveryKey: textDeliveryKey,
+        content,
+        hash: contentHash,
+        mtimeMs: fileStat?.mtimeMs,
+        emittedChars: compressed.length,
+      });
       recordRead(filePath, wasCompressed, compressed.length);
 
       return {

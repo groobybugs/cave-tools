@@ -2,10 +2,11 @@ import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   applyBudget,
-  collapseRepeatedLines,
   extractStructuredData,
   rewriteCommandWithRtk,
+  stripLeadingRtk,
 } from "../compression/utils.js";
+import { collapseRepetition } from "../compression/repetition.js";
 import { compressStructuredSemantic } from "../compression/structured.js";
 import { redactSecrets } from "../compression/redact.js";
 import { classifyCommand } from "../compression/classify.js";
@@ -97,7 +98,10 @@ export const bashTool: Tool & {
 
     try {
       const cwd = await resolveExistingDirectory(workdir);
-      rewrittenCommand = await rewriteCommandWithRtk(command);
+      const peeled = stripLeadingRtk(command);
+      rewrittenCommand = await rewriteCommandWithRtk(peeled.command, {
+        incomingAlreadyWrapped: peeled.stripped,
+      });
       const result = await runCommand(rewrittenCommand, {
         timeout,
         cwd,
@@ -170,9 +174,10 @@ export const bashTool: Tool & {
       const semantic = compressStructuredSemantic(processed, rewrittenCommand);
       processed = semantic ?? extractStructuredData(processed, rewrittenCommand);
 
-      // Collapse runs of near-identical lines (timestamped/counted spam)
-      // before the line budget, so the budget sees compacted content.
-      processed = collapseRepeatedLines(processed);
+      // Collapse runs of identical lines before the line budget, so the
+      // budget sees compacted content. Exact-match only (digit-mask opt-in
+      // lives on collapseRepetition; off here to avoid eating request IDs).
+      processed = collapseRepetition(processed);
 
       // Apply budget compression
       processed = applyBudget(processed, "bash");

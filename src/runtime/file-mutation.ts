@@ -1,6 +1,10 @@
 import { readFile, writeFile } from "fs/promises";
 import { ensureParentDirectory, resolveMutationTarget } from "./path.js";
 
+// Per-process write queue only. Cross-process MCP writers are not serialized
+// (no flock/fcntl — too easy to deadlock or leave stale locks). Concurrent
+// processes rely on writeIfUnchanged's expected-bytes check; a mismatch throws
+// so the caller re-reads and cave__invalidate's the stale cache.
 const locks = new Map<string, Promise<void>>();
 
 function splitBom(text: string): { bom: boolean; text: string } {
@@ -30,6 +34,7 @@ export function decodeUtf8PreserveBom(content: Uint8Array): { text: string; bom:
 }
 
 async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  // In-process mutex only. Does not lock the file on disk.
   const previous = locks.get(key) ?? Promise.resolve();
   let release!: () => void;
   const next = new Promise<void>((resolve) => {
@@ -66,10 +71,16 @@ export async function writeIfUnchanged(
   expected: Uint8Array,
   content: string,
 ): Promise<{ canonical: string; existed: boolean }> {
+  // Optimistic concurrency: `expected` must be the exact on-disk bytes from
+  // the last read. withLock only orders writers in this process.
   const target = await resolveMutationTarget(filePath);
   return withLock(target.canonical, async () => {
     const current = await readFile(target.canonical);
-    if (!sameBytes(current, expected)) throw new Error("File changed after it was read. Read it again before editing.");
+    if (!sameBytes(current, expected)) {
+      throw new Error(
+        "File changed after it was read. Re-run cave__read (or cave__invalidate) and retry the edit.",
+      );
+    }
     await writeFile(target.canonical, content, "utf-8");
     return { ...target, existed: true };
   });

@@ -15,39 +15,119 @@ import type {
   RtkStats,
   ToolSavings,
 } from "../storage/db.js";
+import { redactSecrets } from "./redact.js";
 
 export type { LifetimeStats, PersistedStats } from "../storage/db.js";
 
 interface CacheEntry {
   hash: string;
   mtime: number;
-  fullContentDelivered: boolean;
+  deliveries: Map<string, number>;
   readCount: number;
 }
 
+export interface FileCacheUpdate {
+  deliveryKey?: string;
+  content?: string | Buffer;
+  hash?: string;
+  mtimeMs?: number;
+  emittedChars?: number;
+}
+
 const DEFAULT_SESSION = "default";
+const DEFAULT_DELIVERY_KEY = "default";
+const MAX_DELIVERIES_PER_FILE = 256;
 
 // Per-session dedup cache: sessionId -> filePath -> entry. Keying by sessionId
 // isolates opencode subagents (which share this MCP process) so a different
 // agent/session always gets fresh content on first read, while same-session
 // re-reads still dedup. When no _meta.sessionID is provided by the client,
 // callers fall back to DEFAULT_SESSION (preserving prior single-session behavior).
+//
+// Content cache is in-memory per process. Parallel MCP processes do not share
+// file bodies (by design — correctness > hit-rate). SQLite under
+// CAVE_TOOLS_DATA_DIR (default ~/.cache/cave-tools) stores aggregate stats only.
 const fileCache = new Map<string, Map<string, CacheEntry>>();
+
+function trackedFileCount(): number {
+  let n = 0;
+  for (const sessionMap of fileCache.values()) n += sessionMap.size;
+  return n;
+}
 
 // Env-based subagent detection (client-agnostic fallback). Ported from lean-ctx
 // is_subagent_context(): when a known subagent env signal is present, force
 // fresh reads so stubs are never returned to a subagent that never saw the
 // content. Computed once per process (env is fixed at spawn).
+// Known signals only — unknown CLAUDE_CODE_* / *SUBAGENT* keys are logged once
+// and ignored (no guessing). TASK_ID-style keys (CURSOR_TASK_ID, CLINE_TASK_ID,
+// TASK_ID, FOO_TASK_ID) count as subagent context.
+const KNOWN_SUBAGENT_KEYS = new Set([
+  "CLINE_TASK_ID",
+  "CLAUDE_CODE_SUBAGENT",
+  "ANTHROPIC_SUBAGENT",
+  "CURSOR_TASK_ID",
+]);
+const TASK_ID_STYLE = /(?:^|_)TASK_ID$/;
+const UNKNOWN_SUBAGENT_CANDIDATE = /(?:SUBAGENT|^CLAUDE_CODE_)/;
+
 let subagentContextCached: boolean | null = null;
+let unknownSubagentEnvLogged = false;
+
+function envNonEmpty(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isKnownSubagentKey(key: string): boolean {
+  return KNOWN_SUBAGENT_KEYS.has(key) || TASK_ID_STYLE.test(key);
+}
+
+function logUnknownSubagentEnvOnce(triggeredKeys: string[]): void {
+  if (unknownSubagentEnvLogged) return;
+  unknownSubagentEnvLogged = true;
+  const triggered = new Set(triggeredKeys);
+  const unknown: string[] = [];
+  for (const key of Object.keys(process.env)) {
+    if (triggered.has(key)) continue;
+    if (!UNKNOWN_SUBAGENT_CANDIDATE.test(key)) continue;
+    if (!envNonEmpty(process.env[key])) continue;
+    unknown.push(key);
+  }
+  if (unknown.length > 0) {
+    console.error(
+      `cave-tools: unknown subagent-like env keys (ignored; not forcing fresh): ${unknown.sort().join(", ")}`,
+    );
+  }
+}
+
+/** Test hook: clear the process-level subagent detection cache. */
+export function resetSubagentContextCache(): void {
+  subagentContextCached = null;
+  unknownSubagentEnvLogged = false;
+}
 
 export function isSubagentContext(): boolean {
   if (subagentContextCached !== null) return subagentContextCached;
+
   const force = process.env.CAVE_TOOLS_FORCE_FRESH;
-  let v = false;
-  if (force === "1" || force === "true") v = true;
-  else if (process.env.CURSOR_TASK_ID && process.env.CURSOR_TASK_ID.length > 0) v = true;
-  subagentContextCached = v;
-  return v;
+  const triggered: string[] = [];
+  let detected = false;
+
+  if (force === "1" || force === "true") {
+    detected = true;
+    triggered.push("CAVE_TOOLS_FORCE_FRESH");
+  }
+
+  for (const key of Object.keys(process.env)) {
+    if (!envNonEmpty(process.env[key])) continue;
+    if (!isKnownSubagentKey(key)) continue;
+    detected = true;
+    triggered.push(key);
+  }
+
+  logUnknownSubagentEnvOnce(triggered);
+  subagentContextCached = detected;
+  return detected;
 }
 
 let cacheHits = 0;
@@ -59,6 +139,8 @@ let rangeEditCount = 0;
 let rtkRewrites = 0;
 let rtkAlreadyWrapped = 0;
 let rtkPassthrough = 0;
+const RTK_TOP_PASSTHROUGH_CAP = 50;
+const rtkTopPassthrough = new Map<string, number>();
 let seqCounter = 0;
 let totalBounces = 0;
 let totalWastedChars = 0;
@@ -86,17 +168,17 @@ const savingsByTool: Record<string, ToolSavings> = {};
 
 const budgets: Record<string, BudgetConfig> = {
   bash: { maxLines: 80, headLines: 40, tailLines: 40 },
-  read: { maxLines: 300, headLines: 150, tailLines: 150 },
+  read: { maxLines: 200, headLines: 100, tailLines: 100 },
   grep: { maxLines: 120, headLines: 60, tailLines: 60 },
   find: { maxLines: 120, headLines: 60, tailLines: 60 },
-  ls: { maxLines: 120, headLines: 60, tailLines: 60 },
+  ls: { maxLines: 60, headLines: 30, tailLines: 30 },
 };
 
 function estimateTokens(charCount: number): number {
   return Math.round(charCount / 4);
 }
 
-function buildStats(): PersistedStats {
+export function buildStats(): PersistedStats {
   const cacheTotal = cacheHits + cacheMisses;
   const toolEntries = Object.values(savingsByTool);
   const rawChars = toolEntries.reduce((sum, tool) => sum + tool.rawChars, 0);
@@ -120,7 +202,7 @@ function buildStats(): PersistedStats {
       misses: cacheMisses,
       total: cacheTotal,
       hitRate: cacheTotal > 0 ? cacheHits / cacheTotal : 0,
-      filesTracked: fileCache.size,
+      filesTracked: trackedFileCount(),
     },
     savings: {
       totalCalls,
@@ -142,12 +224,21 @@ function buildStats(): PersistedStats {
   };
 }
 
-async function persistStats(): Promise<void> {
-  try {
-    upsertSessionStats(buildStats());
-  } catch {
-    // Non-fatal: stats persistence is best-effort.
-  }
+let statsPersistScheduled = false;
+
+function persistStats(): void {
+  // Coalesce bursts into one latest-snapshot transaction. setImmediate alone
+  // deferred each call but still performed one synchronous SQLite write/event.
+  if (statsPersistScheduled) return;
+  statsPersistScheduled = true;
+  setImmediate(() => {
+    statsPersistScheduled = false;
+    try {
+      upsertSessionStats(buildStats());
+    } catch {
+      // Non-fatal: stats persistence is best-effort.
+    }
+  });
 }
 
 export async function getLifetimeStats(): Promise<LifetimeStats> {
@@ -201,10 +292,13 @@ export async function pruneDeadSessions(): Promise<number> {
   return removed;
 }
 
+export function hashContent(content: string | Buffer): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
 export async function getFileHash(filePath: string): Promise<string | null> {
   try {
-    const content = await readFile(filePath, "utf-8");
-    return createHash("sha256").update(content).digest("hex");
+    return hashContent(await readFile(filePath));
   } catch {
     return null;
   }
@@ -213,6 +307,7 @@ export async function getFileHash(filePath: string): Promise<string | null> {
 export async function isFileUnchanged(
   filePath: string,
   sessionId: string = DEFAULT_SESSION,
+  deliveryKey: string = DEFAULT_DELIVERY_KEY,
 ): Promise<boolean> {
   // Env-detected subagent context → never stub (force fresh). Different session
   // → no entry → fresh. Same session re-read + hash match + delivered → stub.
@@ -241,19 +336,13 @@ export async function isFileUnchanged(
     entry.mtime = st.mtimeMs;
   }
 
-  // Only stub when full content was actually delivered to this session for the
-  // current hash — prevents stub-before-deliver edges. Ported from lean-ctx
-  // full_content_delivered flag.
-  if (!entry.fullContentDelivered) return false;
+  // Stub only when this exact representation/range was delivered. A prior
+  // signatures read must not suppress a later full read; likewise new offsets,
+  // limits, and numbered views must be emitted once before they can dedup.
+  const wouldEmit = entry.deliveries.get(deliveryKey);
+  if (wouldEmit === undefined) return false;
 
   cacheHits++;
-  let wouldEmit = 0;
-  try {
-    const content = await readFile(filePath, "utf-8");
-    wouldEmit = budgetedText(content, "read").length;
-  } catch {
-    // best-effort savings estimate
-  }
   dedupSavedChars += Math.max(0, wouldEmit - READ_STUB.length);
   void persistStats();
   return true;
@@ -262,16 +351,28 @@ export async function isFileUnchanged(
 export async function updateFileCache(
   filePath: string,
   sessionId: string = DEFAULT_SESSION,
-  deliveredFull = true,
+  update: FileCacheUpdate = {},
 ): Promise<void> {
-  const hash = await getFileHash(filePath);
-  if (!hash) return;
-  let mtime = 0;
-  try {
-    mtime = (await stat(filePath)).mtimeMs;
-  } catch {
-    // mtime unknown — fast-path will simply re-hash on next read.
+  let content = update.content;
+  let hash = update.hash;
+  let mtime = update.mtimeMs;
+
+  if (!hash) {
+    try {
+      content = content ?? (await readFile(filePath));
+      hash = hashContent(content);
+    } catch {
+      return;
+    }
   }
+  if (mtime === undefined) {
+    try {
+      mtime = (await stat(filePath)).mtimeMs;
+    } catch {
+      mtime = 0;
+    }
+  }
+
   let sessionMap = fileCache.get(sessionId);
   if (!sessionMap) {
     sessionMap = new Map();
@@ -279,19 +380,35 @@ export async function updateFileCache(
   }
   const existing = sessionMap.get(filePath);
   const readCount = (existing?.readCount ?? 0) + 1;
+  const deliveries = existing?.hash === hash ? existing.deliveries : new Map<string, number>();
+  let emittedChars = update.emittedChars;
+  if (emittedChars === undefined && content !== undefined) {
+    const text = typeof content === "string" ? content : content.toString("utf-8");
+    emittedChars = budgetedText(text, "read").length;
+  }
+  const deliveryKey = update.deliveryKey ?? DEFAULT_DELIVERY_KEY;
+  if (!deliveries.has(deliveryKey) && deliveries.size >= MAX_DELIVERIES_PER_FILE) {
+    const oldest = deliveries.keys().next().value;
+    if (oldest !== undefined) deliveries.delete(oldest);
+  }
+  deliveries.set(deliveryKey, emittedChars ?? 0);
   sessionMap.set(filePath, {
     hash,
     mtime,
-    fullContentDelivered: deliveredFull || existing?.fullContentDelivered === true,
+    deliveries,
     readCount,
   });
   cacheMisses++;
   void persistStats();
-  try {
-    registerDbReadPath(filePath, hash);
-  } catch {
-    // Registry persistence is advisory.
-  }
+  const capturedPath = filePath;
+  const capturedHash = hash;
+  setImmediate(() => {
+    try {
+      registerDbReadPath(capturedPath, capturedHash);
+    } catch {
+      // Registry persistence is advisory — never block or fail a read.
+    }
+  });
 }
 
 export function markFullDelivered(
@@ -299,7 +416,9 @@ export function markFullDelivered(
   sessionId: string = DEFAULT_SESSION,
 ): void {
   const entry = fileCache.get(sessionId)?.get(filePath);
-  if (entry) entry.fullContentDelivered = true;
+  if (entry && !entry.deliveries.has(DEFAULT_DELIVERY_KEY)) {
+    entry.deliveries.set(DEFAULT_DELIVERY_KEY, 0);
+  }
 }
 
 // Dynamic stub message: references the last-delivering read #N for this session
@@ -337,10 +456,7 @@ export function getCacheStats(): {
     misses: cacheMisses,
     total,
     hitRate: total > 0 ? cacheHits / total : 0,
-    filesTracked: Array.from(fileCache.values()).reduce(
-      (n, m) => n + m.size,
-      0,
-    ),
+    filesTracked: trackedFileCount(),
   };
 }
 
@@ -350,6 +466,12 @@ export function getSavingsStats(): PersistedStats["savings"] {
 
 export function getRtkStats(): RtkStats {
   return buildStats().rtk;
+}
+
+export function getRtkTopPassthrough(): { prefix: string; count: number }[] {
+  return [...rtkTopPassthrough.entries()]
+    .map(([prefix, count]) => ({ prefix, count }))
+    .sort((a, b) => b.count - a.count || a.prefix.localeCompare(b.prefix));
 }
 
 export function reductionPercent(
@@ -380,6 +502,8 @@ export async function resetStats(): Promise<void> {
   rtkRewrites = 0;
   rtkAlreadyWrapped = 0;
   rtkPassthrough = 0;
+  rtkTopPassthrough.clear();
+  rtkAvailableCache = null;
   seqCounter = 0;
   totalBounces = 0;
   totalWastedChars = 0;
@@ -605,7 +729,28 @@ export function truncateLongOutput(text: string): string {
   return truncateLines(text, GLOBAL_MAX_LINES, GLOBAL_HEAD_LINES, GLOBAL_TAIL_LINES);
 }
 
+/** Same cap as cave__read MAX_BYTES — skip strip/collapse/truncate when already small. */
+export const BUDGET_FAST_PATH_MAX_BYTES = 50 * 1024;
+
+function countLines(text: string): number {
+  let n = 1;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) n++;
+  }
+  return n;
+}
+
+export function fitsBudget(
+  text: string,
+  toolName: string,
+  maxBytes: number = BUDGET_FAST_PATH_MAX_BYTES,
+): boolean {
+  if (Buffer.byteLength(text, "utf8") > maxBytes) return false;
+  return countLines(text) <= getBudget(toolName).maxLines;
+}
+
 export function budgetedText(text: string, toolName: string): string {
+  if (fitsBudget(text, toolName)) return text;
   const budget = getBudget(toolName);
   const stripped = stripAnsi(text);
   const collapsed = collapseBlankLines(stripped);
@@ -731,7 +876,130 @@ export function extractStructuredData(
   return text;
 }
 
+const RTK_REWRITE_TIMEOUT_MS = 3000;
+const RTK_TOKEN_MAX_LEN = 80;
+const ENV_ASSIGN_PREFIX =
+  /^(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:'[^']*'|"[^"]*"|\S*)\s+)/;
+const RTK_TOKEN = /^(?:["'`]rtk(?:\.exe)?["'`]|rtk(?:\.exe)?)(?=\s|$)/i;
+
 let rtkAvailableCache: boolean | null = null;
+
+export function resetRtkAvailabilityCache(): void {
+  rtkAvailableCache = null;
+}
+
+/** Peel exactly one leading `rtk` argv token (optional quotes / ENV=value prefix). */
+export function stripLeadingRtk(command: string): {
+  command: string;
+  stripped: boolean;
+} {
+  let s = command.trim();
+  if (!s) return { command, stripped: false };
+
+  const quoted = /^(["'`])([\s\S]*)\1$/.exec(s);
+  if (quoted) s = quoted[2]!.trim();
+
+  let prefix = "";
+  let rest = s;
+  while (true) {
+    const env = ENV_ASSIGN_PREFIX.exec(rest);
+    if (!env) break;
+    prefix += env[0]!;
+    rest = rest.slice(env[0]!.length);
+  }
+
+  const rtkTok = RTK_TOKEN.exec(rest);
+  if (!rtkTok) return { command, stripped: false };
+
+  const after = rest.slice(rtkTok[0].length).replace(/^\s+/, "");
+  const rebuilt = `${prefix}${after}`.trim();
+  if (!rebuilt) return { command, stripped: false };
+  return { command: rebuilt, stripped: true };
+}
+
+function isPathToken(tok: string): boolean {
+  if (tok.startsWith("~") || tok.startsWith("/") || tok.startsWith("\\")) return true;
+  if (/^[A-Za-z]:[\\/]/.test(tok)) return true;
+  return tok.includes("/") || tok.includes("\\");
+}
+
+function redactPassthroughToken(tok: string): string {
+  const clipped = tok.length > RTK_TOKEN_MAX_LEN ? tok.slice(0, RTK_TOKEN_MAX_LEN) : tok;
+  if (isPathToken(tok)) return "<path>";
+  return redactSecrets(clipped);
+}
+
+function passthroughPrefix(command: string): string {
+  const tokens: string[] = [];
+  for (const part of command.trim().split(/\s+/)) {
+    if (!part) continue;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(part)) continue;
+    tokens.push(redactPassthroughToken(part));
+    if (tokens.length === 2) break;
+  }
+  return tokens.join(" ");
+}
+
+function notePassthrough(command: string): void {
+  rtkPassthrough++;
+  const key = passthroughPrefix(command);
+  if (key) {
+    const prev = rtkTopPassthrough.get(key);
+    if (prev !== undefined) {
+      rtkTopPassthrough.set(key, prev + 1);
+    } else if (rtkTopPassthrough.size < RTK_TOP_PASSTHROUGH_CAP) {
+      rtkTopPassthrough.set(key, 1);
+    } else {
+      let minKey: string | undefined;
+      let min = Infinity;
+      for (const [k, count] of rtkTopPassthrough) {
+        if (count < min) {
+          min = count;
+          minKey = k;
+        }
+      }
+      if (minKey !== undefined) {
+        rtkTopPassthrough.delete(minKey);
+        rtkTopPassthrough.set(key, 1);
+      }
+    }
+    if (process.env.CAVE_TOOLS_DEBUG === "1") {
+      console.error(
+        `[cave-tools] rtk passthrough ${key} n=${rtkTopPassthrough.get(key) ?? 0}`,
+      );
+    }
+  }
+  void persistStats();
+}
+
+function runRtkRewrite(command: string): Promise<{ stdout: string; timedOut: boolean }> {
+  return new Promise((resolve) => {
+    void import("child_process")
+      .then(({ execFile }) => {
+        execFile(
+          "rtk",
+          ["rewrite", command],
+          {
+            encoding: "utf-8",
+            timeout: RTK_REWRITE_TIMEOUT_MS,
+            windowsHide: true,
+          },
+          (err, stdout) => {
+            const out = typeof stdout === "string" ? stdout : "";
+            if (!err) {
+              resolve({ stdout: out, timedOut: false });
+              return;
+            }
+            const code = (err as NodeJS.ErrnoException).code;
+            const timedOut =
+              code === "ETIMEDOUT" || Boolean((err as { killed?: boolean }).killed);
+            resolve({ stdout: timedOut ? "" : out, timedOut });
+          },
+        );
+      })
+      .catch(() => resolve({ stdout: "", timedOut: false }));
+  });
+}
 
 export async function isRtkAvailable(): Promise<boolean> {
   if (rtkAvailableCache !== null) return rtkAvailableCache;
@@ -747,38 +1015,41 @@ export async function isRtkAvailable(): Promise<boolean> {
   return rtkAvailableCache;
 }
 
-export async function rewriteCommandWithRtk(command: string): Promise<string> {
-  if (!(await isRtkAvailable())) {
-    rtkPassthrough++;
-    void persistStats();
-    return command;
-  }
-
-  const { execFile } = await import("child_process");
-  const { promisify } = await import("util");
-  const execFileAsync = promisify(execFile);
-
-  let rewritten: string;
+export async function rewriteCommandWithRtk(
+  command: string,
+  opts?: { incomingAlreadyWrapped?: boolean },
+): Promise<string> {
   try {
-    const result = await execFileAsync("rtk", ["rewrite", command], {
-      encoding: "utf-8",
-      timeout: 3000,
-    });
-    rewritten = result.stdout.trim();
+    const peeled = stripLeadingRtk(command);
+    const toRewrite = peeled.command;
+    const incomingWrapped = Boolean(opts?.incomingAlreadyWrapped) || peeled.stripped;
+
+    if (!(await isRtkAvailable())) {
+      notePassthrough(toRewrite);
+      return toRewrite;
+    }
+
+    const { stdout, timedOut } = await runRtkRewrite(toRewrite);
+    const rewritten = stdout.trim();
+
+    if (timedOut || !rewritten) {
+      notePassthrough(toRewrite);
+      return toRewrite;
+    }
+
+    if (
+      incomingWrapped ||
+      rewritten === toRewrite.trim() ||
+      rewritten === command.trim()
+    ) {
+      rtkAlreadyWrapped++;
+    } else {
+      rtkRewrites++;
+    }
+    void persistStats();
+    return rewritten;
   } catch {
-    rtkPassthrough++;
-    void persistStats();
+    notePassthrough(command);
     return command;
   }
-
-  if (!rewritten) {
-    rtkPassthrough++;
-    void persistStats();
-    return command;
-  }
-
-  if (rewritten === command.trim()) rtkAlreadyWrapped++;
-  else rtkRewrites++;
-  void persistStats();
-  return rewritten;
 }
