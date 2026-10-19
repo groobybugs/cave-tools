@@ -30,7 +30,8 @@
     "install:agents": "node scripts/install-agent-instructions.mjs",
     "remove:agents": "node scripts/remove-agent-instructions.mjs",
     "prepack": "pnpm run build",
-    "measure": "node scripts/measure-overhead.mjs"
+    "measure": "node scripts/measure-overhead.mjs",
+    "usage": "node scripts/analyze-usage.mjs"
   },
   "keywords": [
     "mcp",

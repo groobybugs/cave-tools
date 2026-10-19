@@ -2847,6 +2847,87 @@ process.exit(1);
     console.log("per-turn reminder tests passed\n");
   }
 
+  {
+    console.log("Testing usage analyzer:");
+    const configDir = mkdtempSync(join(tmpdir(), "cave-usage-"));
+    try {
+      const projDir = join(configDir, "projects", "-work-alpha");
+      mkdirSync(join(projDir, "s1", "subagents"), { recursive: true });
+      const usage1 = {
+        input_tokens: 10, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000, output_tokens: 5,
+        cache_creation: { ephemeral_1h_input_tokens: 60, ephemeral_5m_input_tokens: 40 },
+      };
+      const base = { sessionId: "S1", cwd: "/work/alpha" };
+      const lines = [
+        { ...base, type: "assistant", timestamp: "2026-10-01T00:00:00Z",
+          message: { id: "msg_1", usage: usage1, content: [{ type: "tool_use", id: "tu1", name: "mcp__cave-tools__cave__read", input: {} }] } },
+        // Same API response split across a second line: usage must count once.
+        { ...base, type: "assistant", timestamp: "2026-10-01T00:00:01Z",
+          message: { id: "msg_1", usage: usage1, content: [{ type: "tool_use", id: "tu2", name: "Bash", input: {} }] } },
+        { ...base, type: "user", timestamp: "2026-10-01T00:00:02Z",
+          message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: "hello" }] } },
+        { ...base, type: "user", timestamp: "2026-10-01T00:00:03Z",
+          message: { content: [{ type: "tool_result", tool_use_id: "tu2", is_error: true,
+            content: [{ type: "text", text: "abc" }, { type: "image", source: {} }] }] } },
+        "{not json",
+        { ...base, type: "assistant", timestamp: "2026-10-01T00:01:00Z",
+          message: { id: "msg_2", usage: { input_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 2000, output_tokens: 7,
+            cache_creation: { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 } }, content: [{ type: "text", text: "done" }] } },
+      ];
+      writeFileSync(join(projDir, "s1.jsonl"),
+        lines.map((l) => (typeof l === "string" ? l : JSON.stringify(l))).join("\n") + "\n");
+      const sub = { sessionId: "S2", cwd: "/work/beta" };
+      writeFileSync(join(projDir, "s1", "subagents", "agent-a.jsonl"), [
+        { ...sub, type: "assistant", timestamp: "2026-10-03T00:00:00Z",
+          message: { id: "msg_3", usage: { input_tokens: 1, output_tokens: 1 },
+            content: [{ type: "tool_use", id: "tu3", name: "mcp__other__thing", input: {} }] } },
+        { ...sub, type: "user", timestamp: "2026-10-03T00:00:01Z",
+          message: { content: [{ type: "tool_result", tool_use_id: "tu3", content: "xy" }] } },
+      ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+      const runUsage = (...args) => JSON.parse(execFileSync(process.execPath,
+        ["./scripts/analyze-usage.mjs", "--json", ...args],
+        { encoding: "utf8", env: { ...process.env, CLAUDE_CONFIG_DIR: configDir } }));
+
+      const all = runUsage();
+      assert.equal(all.files, 2, "nested subagent transcript found");
+      assert.equal(all.malformed_lines, 1);
+      assert.equal(all.totals.requests, 3, "split message.id counted once");
+      assert.equal(all.totals.input, 31);
+      assert.equal(all.totals.cache_creation, 100);
+      assert.equal(all.totals.cache_creation_1h, 60);
+      assert.equal(all.totals.cache_creation_5m, 40);
+      assert.equal(all.totals.cache_read, 3000);
+      assert.equal(all.totals.output, 13);
+      assert.equal(all.totals.weighted_input, 31 + 1.25 * 40 + 2 * 60 + 0.1 * 3000);
+      assert.equal(all.sessions.find((s) => s.sessionId === "S1").firstRequestContext, 1110);
+      assert.equal(all.fixed_overhead.median_first_request_context, (1110 + 1) / 2);
+      assert.equal(all.tool_result_chars, 10);
+
+      const tool = (r, name) => r.tools.find((t) => t.name === name);
+      const read = tool(all, "cave__read");
+      assert.deepEqual([read.group, read.calls, read.results, read.errors, read.total_chars, read.max_chars],
+        ["cave", 1, 1, 0, 5, 5], "MCP name normalized + string content");
+      const bash = tool(all, "Bash");
+      assert.deepEqual([bash.group, bash.calls, bash.errors, bash.total_chars, bash.images],
+        ["built-in", 1, 1, 3, 1], "array content + image + error");
+      assert.equal(bash.share, 0.3);
+      assert.equal(tool(all, "mcp__other__thing").group, "other-mcp");
+      assert.deepEqual([all.groups.cave.calls, all.groups["built-in"].errors, all.groups["other-mcp"].total_chars], [1, 1, 2]);
+
+      const alpha = runUsage("--project", "alpha");
+      assert.equal(alpha.totals.requests, 2, "--project filters by cwd");
+      assert.equal(tool(alpha, "mcp__other__thing"), undefined);
+      const early = runUsage("--until", "2026-10-02");
+      assert.equal(early.sessions.length, 1, "--until excludes later sessions");
+      const late = runUsage("--since", "2026-10-02");
+      assert.deepEqual(late.sessions.map((s) => s.sessionId), ["S2"], "--since excludes earlier sessions");
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+    console.log("usage analyzer tests passed\n");
+  }
+
   console.log("All tests passed!");
 }
 
