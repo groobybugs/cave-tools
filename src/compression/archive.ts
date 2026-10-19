@@ -1,4 +1,4 @@
-import { readFile, rm, writeFile, mkdir } from "fs/promises";
+import { chmod, readFile, rm, writeFile, mkdir } from "fs/promises";
 import { createHash } from "crypto";
 import { join, resolve } from "path";
 import {
@@ -47,8 +47,13 @@ export async function storeArchive(
 ): Promise<{ id: string; path: string }> {
   const id = archiveId(output);
   const archivedContentPath = contentPath(id);
-  await mkdir(entryDir(id), { recursive: true });
-  await writeFile(archivedContentPath, output, "utf-8");
+  // Archives can hold private file contents (grep) or command output: keep
+  // them owner-only regardless of umask. chmod fixes dirs made before this.
+  await mkdir(entryDir(id), { recursive: true, mode: 0o700 });
+  await chmod(archiveDir(), 0o700);
+  await chmod(entryDir(id), 0o700);
+  await writeFile(archivedContentPath, output, { encoding: "utf-8", mode: 0o600 });
+  await chmod(archivedContentPath, 0o600);
   recordArchive({
     id,
     command,

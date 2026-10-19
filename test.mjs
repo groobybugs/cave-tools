@@ -2997,6 +2997,14 @@ process.exit(1);
       assert.ok(grepHandle, grepped.content[0].text.slice(-300));
       const grepArchive = readFileSync(grepHandle[2], "utf8");
       for (let i = 0; i < 60; i++) assert.match(grepArchive, new RegExp(`needle number ${i} `));
+      if (process.platform !== "win32") {
+        // Archives may hold private file contents: owner-only regardless of umask.
+        const { statSync: modeStat } = await import("node:fs");
+        const { dirname: parentDir } = await import("node:path");
+        assert.equal(modeStat(grepHandle[2]).mode & 0o777, 0o600, "archive file 0600");
+        assert.equal(modeStat(parentDir(grepHandle[2])).mode & 0o777, 0o700, "archive subdir 0700");
+        assert.equal(modeStat(parentDir(parentDir(grepHandle[2]))).mode & 0o777, 0o700, "archive root 0700");
+      }
       rmSync(grepDir, { recursive: true, force: true });
 
       // webfetch: trimmed body archived, redacted on disk.
