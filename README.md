@@ -142,8 +142,8 @@ All tool names use the MCP names exported by the server.
 | `cave__edit`      | Str-replace (fuzzy), line-range (`start_line`/`end_line`/`content`), `delete`, or `insert_before` move. Optional `expected_hash` / `expected_range_checksum`. Multi-file `edits[]`. Auto-invalidates dedup cache. | Cave Tools-specific edit tool.                                      |
 | `cave__write`     | Write a single file (create/overwrite, or `truncate` to empty). Auto-invalidates dedup cache. | Cave Tools-specific write tool.                                     |
 | `cave__apply_patch` | Apply add/update/delete/move patches with verification before any disk write; preserves UTF-8 BOM and invalidates the read dedup cache for changed paths. Write-time failures after verification may leave partial state. | Based on `apply_patch`, with Cave cache integration. |
-| `cave__websearch` | Search current web via Exa/Parallel MCP backends, then redact/archive/budget-compress output. | Based on `websearch`, with Cave compression.                         |
-| `cave__webfetch`  | Fetch a URL and return markdown/text/html (or a base64 image block); output is redacted, archived if large, and budget-compressed. | Based on `webfetch`, with Cave compression.                          |
+| `cave__websearch` | Search current web via Exa/Parallel MCP backends, then redact/budget-compress output (trimmed output archived). | Based on `websearch`, with Cave compression.                         |
+| `cave__webfetch`  | Fetch a URL and return markdown/text/html (or a base64 image block); output is redacted, archived when trimmed, and budget-compressed. | Based on `webfetch`, with Cave compression.                          |
 | `cave__invalidate`| Invalidate the read dedup cache for one or more paths without touching disk.              | Cave Tools-specific cache tool.                                    |
 | `cave__compress`  | Optimize arbitrary text down to fewer tokens (structured extraction + line budgets).     | Cave Tools-specific helper.                                         |
 | `cave__status`    | Show RTK availability, cache stats, and budgets.                                          | Cave Tools-specific helper.                                         |
@@ -171,8 +171,8 @@ Use this instruction block in agent rules:
 - Use `cave__bash` instead of the built-in shell tool for commands. Optimized drop-in replacement: tries RTK command rewriting when `rtk` is available, then structured JSON/XML extraction and output budgets. Max timeout 10min.
 - Use `cave__bash_start` for commands expected to exceed ~2-3min (builds, test suites, installs): runs detached, returns a jobId immediately. Poll with `cave__bash_status` (`wait` up to 60s — returns the moment the job exits); stop with `cave__bash_stop`. Never `sleep`-poll inside `cave__bash`.
 - Use `cave__edit` / `cave__write` for single-file changes and `cave__apply_patch` for multi-file add/update/delete/move patches. For medium+ hunks prefer line-range: `cave__read` with `line_numbers=true`, then `cave__edit` with `start_line`/`end_line`/`content` (+ `expected_hash` from the footer).
-- Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived if large, and budget-compressed.
-- Use `cave__webfetch` to fetch a specific URL and return it as markdown/text/html (or a base64 image block); output is redacted, archived if large, and budget-compressed.
+- Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived when trimmed, and budget-compressed.
+- Use `cave__webfetch` to fetch a specific URL and return it as markdown/text/html (or a base64 image block); output is redacted, archived when trimmed, and budget-compressed.
 - After using any edit/write tool outside Cave Tools, call `cave__invalidate` with the changed file path(s) to refresh the read dedup cache.
 - Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - Use `cave__status` to check RTK availability, cache state, and budget settings when the user asks about savings.

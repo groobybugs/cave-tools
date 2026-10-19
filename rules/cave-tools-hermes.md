@@ -12,7 +12,7 @@ The `cave-tools` plugin blocks `read_file` and `search_files` at `enforce`, so r
 | `search_files` | `cave__grep` / `cave__find` / `cave__ls` | ripgrep-backed, grouped, budgeted |
 | `terminal` | `cave__bash` | structured JSON/XML extraction + line budgets (max 10min) |
 | `write_file`, `patch` | `cave__write`, `cave__edit`, `cave__apply_patch` | keeps the dedup cache coherent |
-| web lookups | `cave__websearch`, `cave__webfetch` | redacted, archived if large, budget-compressed |
+| web lookups | `cave__websearch`, `cave__webfetch` | redacted, archived when trimmed, budget-compressed |
 
 ## Rules
 

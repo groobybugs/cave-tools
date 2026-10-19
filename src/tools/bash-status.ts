@@ -8,6 +8,7 @@ import {
   waitForJob,
 } from "../runtime/jobs.js";
 import { redactSecrets } from "../compression/redact.js";
+import { archiveHandle } from "../compression/archive.js";
 import { applyBudget, getBudget } from "../compression/utils.js";
 import type { JobRecord } from "../storage/db.js";
 
@@ -215,9 +216,10 @@ export const bashStatusTool: Tool & {
 
     const protectedText = shouldRedact ? redactSecrets(rawText) : rawText;
     const text = applyBudget(protectedText, "bash");
+    const handle = await archiveHandle(protectedText, text, `bash_status:${job.jobId}`);
 
     return {
-      content: [{ type: "text", text }],
+      content: [{ type: "text", text: `${text}${handle}` }],
       ...(job.state === "exited" && job.exitCode !== 0 ? { isError: true } : {}),
     };
   },

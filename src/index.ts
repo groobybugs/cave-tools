@@ -25,6 +25,7 @@ import { websearchTool } from "./tools/websearch.js";
 import { webfetchTool } from "./tools/webfetch.js";
 import { isSubagentContext, pruneDeadSessions } from "./compression/utils.js";
 import { pruneJobs } from "./runtime/jobs.js";
+import { cleanupArchives } from "./compression/archive.js";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -181,6 +182,9 @@ export async function startServer(): Promise<void> {
   void isSubagentContext();
   await pruneDeadSessions();
   pruneJobs();
+  // Archive retention (24h). Fire-and-forget: a large first-run backlog must
+  // not delay startup, and failures are ignored.
+  void cleanupArchives().catch(() => {});
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Cave Tools MCP server running on stdio");

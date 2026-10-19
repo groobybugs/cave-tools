@@ -2,7 +2,7 @@ import { createHash } from "crypto";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolResult } from "../types.js";
 import { applyBudget } from "../compression/utils.js";
-import { archiveIfLarge } from "../compression/archive.js";
+import { archiveHandle } from "../compression/archive.js";
 import { redactSecrets } from "../compression/redact.js";
 
 export const NO_RESULTS = "No search results found. Please try a different query.";
@@ -203,10 +203,10 @@ export const websearchTool: Tool & {
 
       let output = text || NO_RESULTS;
       if (input.redact_secrets) output = redactSecrets(output);
-      const archive = await archiveIfLarge(output, `websearch:${provider}:${input.query}`);
+      const full = output;
       output = applyBudget(output, "bash");
-      const archiveNote = archive ? `\n\n[Archived: ${archive.id} - use cave__compress expand ${archive.id}]` : "";
-      return { content: [{ type: "text", text: `${output}${archiveNote}` }] };
+      const handle = await archiveHandle(full, output, `websearch:${provider}:${input.query}`);
+      return { content: [{ type: "text", text: `${output}${handle}` }] };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {

@@ -11,7 +11,10 @@ import {
   readStubFor,
   hashContent,
   fitsBudget,
+  isSubagentContext,
 } from "../compression/utils.js";
+import { getSnapshot, rememberSnapshot } from "../compression/snapshots.js";
+import { unifiedDiff } from "../compression/diff.js";
 import { formatNumberedLine, rangeChecksum } from "./line-range.js";
 
 import { formatSignatures } from "../compression/signatures.js";
@@ -40,6 +43,10 @@ const MAX_PDF_BYTES = 20 * 1024 * 1024;
 // generated blobs) so a single 2 MB line can't blow the token budget.
 const MAX_LINE_LENGTH = 2000;
 const MAX_BYTES = 50 * 1024;
+// Re-read of a changed file returns a unified diff only when it is smaller
+// than this fraction of the full content.
+const DIFF_MAX_RATIO = 0.4;
+const DIFF_HEADER = "[cave: changed since last read in this session — unified diff; no prior copy? re-read with force=true]";
 
 function startsWith(bytes: Uint8Array, prefix: number[]): boolean {
   return prefix.every((value, index) => bytes[index] === value);
@@ -194,6 +201,21 @@ function selectLines(
     truncated: lastReadLine < lines.length || truncatedByBytes,
     truncatedByBytes,
   };
+}
+
+// Snapshot content for later re-read diffs, but only when this read handed the
+// session the entire file verbatim.
+function rememberIfFull(
+  sessionId: string,
+  filePath: string,
+  hash: string,
+  content: string,
+  sel: SelectResult,
+  offset: number,
+  lineNumbers: boolean,
+): void {
+  if (offset !== 1 || lineNumbers || sel.truncated || sel.body !== content) return;
+  rememberSnapshot(sessionId, filePath, hash, content);
 }
 
 function truncationHint(sel: SelectResult): string {
@@ -432,6 +454,41 @@ export const readTool: Tool & {
       };
     }
 
+    // Plain full re-read of a file whose last full content this session
+    // received is snapshotted: answer with a diff when it changed. Checked
+    // before the recently-edited bypass on purpose — a diff is lossless, and
+    // re-reading right after an edit is where it saves the most.
+    if (mode === "full" && offset === 1 && !lineNumbers && !force && !isSubagentContext()) {
+      const prev = getSnapshot(sessionId, filePath);
+      if (prev) {
+        try {
+          const content = await readUtf8Strict(filePath);
+          const contentHash = hashContent(content);
+          if (contentHash !== prev.hash) {
+            const sel = selectLines(content.split("\n"), 1, limit, false);
+            const diff = !sel.truncated && sel.body === content
+              ? unifiedDiff(prev.content, content)
+              : null;
+            if (diff && diff.length < DIFF_MAX_RATIO * content.length) {
+              const text = `${DIFF_HEADER}\n${diff}`;
+              rememberSnapshot(sessionId, filePath, contentHash, content);
+              await updateFileCache(filePath, sessionId, {
+                deliveryKey: textDeliveryKey,
+                content,
+                hash: contentHash,
+                mtimeMs: fileStat?.mtimeMs,
+                emittedChars: text.length,
+              });
+              recordRead(filePath, false, text.length);
+              return { content: [{ type: "text", text }] };
+            }
+          }
+        } catch {
+          // Fall through; the normal path reports read errors.
+        }
+      }
+    }
+
     if (shouldForceFull(filePath)) {
       try {
           const content = await readUtf8Strict(filePath);
@@ -440,6 +497,7 @@ export const readTool: Tool & {
           const sel = selectLines(lines, offset, limit, lineNumbers);
           if (!sel.body && offset !== 1) return { content: [{ type: "text", text: `Offset ${offset} is out of range` }], isError: true };
           const text = sel.body + truncationHint(sel);
+          rememberIfFull(sessionId, filePath, contentHash, content, sel, offset, lineNumbers);
         await updateFileCache(filePath, sessionId, {
           deliveryKey: textDeliveryKey,
           content,
@@ -550,6 +608,7 @@ export const readTool: Tool & {
       outText += truncationHint(sel);
 
       if (skipPipeline) {
+        rememberIfFull(sessionId, filePath, contentHash, content, sel, offset, lineNumbers);
         await updateFileCache(filePath, sessionId, {
           deliveryKey: textDeliveryKey,
           content,

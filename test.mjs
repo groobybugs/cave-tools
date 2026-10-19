@@ -70,12 +70,21 @@ import {
   getCodebookSize,
 } from "./dist/compression/codebook.js";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, unlinkSync, chmodSync, utimesSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, existsSync, unlinkSync, chmodSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter as pathDelimiter } from "node:path";
 import { createServer } from "node:http";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { redactSecrets } from "./dist/compression/redact.js";
+import {
+  getSnapshot,
+  getSnapshotStats,
+  rememberSnapshot,
+  resetSnapshots,
+  MAX_SNAPSHOT_FILE_BYTES,
+  MAX_SNAPSHOT_TOTAL_BYTES,
+} from "./dist/compression/snapshots.js";
 import { listedTools } from "./dist/index.js";
 
 async function test() {
@@ -1950,15 +1959,22 @@ async function test() {
     assert.equal(soft.isError, undefined);
     assert.match(soft.content[0].text, /\[exit: 3\]/);
 
-    // archive threshold: retained output (>50KB) gets archived. Each line is
-    // ~40 chars; 2000 retained lines exceed the 50KB archive threshold.
+    // Trimmed output (2000 identical lines collapse to a few) is archived
+    // behind a handle pointing at the full text on disk.
     const big = await bashTool.handler({
       command: "yes 'abcdefghijklmnopqrstuvwxyz0123456789-abcdefghij' | head -n 2000",
       description: "archive-sized output",
       allowFailure: true,
     });
     assert.equal(big.isError, undefined, big.content[0].text);
-    assert.match(big.content[0].text, /\[Archived:/);
+    const bigHandle = /\[cave: full output (\d+) lines archived → cave__read (\S+) offset\/limit, or cave__grep path=\2\]/.exec(big.content[0].text);
+    assert.ok(bigHandle, big.content[0].text);
+    const bigArchived = readFileSync(bigHandle[2], "utf8");
+    assert.equal(bigArchived.split("\n").length, Number(bigHandle[1]), "handle line count");
+    const bigLines = bigArchived.trimEnd().split("\n");
+    assert.ok(bigLines.length >= 1999, "archive keeps every captured line");
+    assert.ok(bigLines.every((l) => l === "abcdefghijklmnopqrstuvwxyz0123456789-abcdefghij"));
+    assert.ok(bigArchived.length > big.content[0].text.length, "archive holds more than was shown");
   }
   console.log("cave__bash edge case tests passed");
   console.log();
@@ -2926,6 +2942,167 @@ process.exit(1);
       rmSync(configDir, { recursive: true, force: true });
     }
     console.log("usage analyzer tests passed\n");
+  }
+
+  {
+    console.log("Testing recoverable truncation handles:");
+    const handleRe = /\[cave: full output (\d+) lines archived → cave__read (\S+) offset\/limit, or cave__grep path=\2\]/;
+    const prevDataDir = process.env.CAVE_TOOLS_DATA_DIR;
+    const dataDir = mkdtempSync(join(tmpdir(), "cave-handles-"));
+    process.env.CAVE_TOOLS_DATA_DIR = dataDir;
+    const secret = "sk-live-handle123secret456";
+    const noisy = `seq 1 1500; echo 'Authorization: Bearer ${secret}'`;
+    const listFiles = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? listFiles(join(dir, e.name)) : [join(dir, e.name)]);
+    let server;
+    try {
+      // Nothing dropped: no handle.
+      const small = await bashTool.handler({ command: "echo hi", description: "small" });
+      assert.doesNotMatch(small.content[0].text, /\[cave: full output/);
+
+      // Dropped + redaction on: handle present, archive is the redacted full output.
+      const red = await bashTool.handler({ command: noisy, description: "noisy redacted" });
+      const redHandle = handleRe.exec(red.content[0].text);
+      assert.ok(redHandle, red.content[0].text.slice(-400));
+      const redArchive = readFileSync(redHandle[2], "utf8");
+      assert.ok(redArchive.length > red.content[0].text.length);
+      assert.equal(redArchive.split("\n").length, Number(redHandle[1]));
+      assert.match(redArchive, /\[REDACTED:Bearer token\]/);
+      for (const file of listFiles(dataDir)) {
+        assert.ok(!readFileSync(file).includes(secret), `secret on disk in ${file}`);
+      }
+
+      // Redaction off: archive equals the raw output; redacting it gives the redacted archive.
+      const raw = await bashTool.handler({ command: noisy, description: "noisy raw", redact_secrets: false });
+      const rawArchive = readFileSync(handleRe.exec(raw.content[0].text)[2], "utf8");
+      assert.ok(rawArchive.includes(secret));
+      assert.equal(redactSecrets(rawArchive), redArchive, "archive = full redacted output");
+      assert.ok(rawArchive.includes("\n750\n"), "archive keeps dropped lines");
+
+      // The handle path works with cave__read and cave__grep.
+      const viaRead = await readTool.handler({ file_path: redHandle[2], offset: 1480, limit: 20, __sessionId: "handle-read" });
+      assert.match(viaRead.content[0].text, /^1489$/m);
+      const viaGrep = await grepTool.handler({ pattern: "^1499$", path: redHandle[2] });
+      assert.match(viaGrep.content[0].text, /1499/);
+
+      // grep: per-file cap drops lines; archive keeps all of them.
+      const grepDir = mkdtempSync(join(tmpdir(), "cave-handles-grep-"));
+      writeFileSync(join(grepDir, "many.txt"),
+        Array.from({ length: 60 }, (_, i) => `needle number ${i} with some padding text`).join("\n"));
+      const grepped = await grepTool.handler({ pattern: "needle", path: grepDir });
+      const grepHandle = handleRe.exec(grepped.content[0].text);
+      assert.ok(grepHandle, grepped.content[0].text.slice(-300));
+      const grepArchive = readFileSync(grepHandle[2], "utf8");
+      for (let i = 0; i < 60; i++) assert.match(grepArchive, new RegExp(`needle number ${i} `));
+      rmSync(grepDir, { recursive: true, force: true });
+
+      // webfetch: trimmed body archived, redacted on disk.
+      server = createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(`Authorization: Bearer ${secret}\n` + Array.from({ length: 3000 }, (_, i) => `row ${i}`).join("\n"));
+      });
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const fetched = await webfetchTool.handler({ url: `http://127.0.0.1:${server.address().port}/`, format: "text" });
+      const fetchHandle = handleRe.exec(fetched.content[0].text);
+      assert.ok(fetchHandle, fetched.content[0].text.slice(-300));
+      const fetchArchive = readFileSync(fetchHandle[2], "utf8");
+      assert.match(fetchArchive, /row 2999/);
+      assert.ok(!fetchArchive.includes(secret), "webfetch archive redacted");
+    } finally {
+      server?.close();
+      if (prevDataDir === undefined) delete process.env.CAVE_TOOLS_DATA_DIR;
+      else process.env.CAVE_TOOLS_DATA_DIR = prevDataDir;
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+    console.log("handle tests passed\n");
+  }
+
+  {
+    console.log("Testing cave__read re-read diffs:");
+    assert.equal(isSubagentContext(), false, "diff tests need a non-subagent context");
+    const dir = mkdtempSync(join(tmpdir(), "cave-diff-"));
+    const file = join(dir, "notes.txt");
+    const base = Array.from({ length: 100 }, (_, i) => `line ${i} of the original notes file`);
+    const read = (args) => readTool.handler({ file_path: file, ...args });
+    const text = (r) => r.content[0].text;
+    const isDiff = (r) => text(r).startsWith("[cave: changed since last read in this session — unified diff; no prior copy? re-read with force=true]");
+    try {
+      writeFileSync(file, base.join("\n"));
+      const first = await read({ __sessionId: "diff-a" });
+      assert.ok(!isDiff(first), "first read is full");
+      assert.equal(text(first), base.join("\n"));
+
+      // Small change: diff.
+      const v2 = [...base];
+      v2[50] = "line 50 CHANGED";
+      writeFileSync(file, v2.join("\n"));
+      const small = await read({ __sessionId: "diff-a" });
+      assert.ok(isDiff(small), text(small).slice(0, 200));
+      assert.match(text(small), /^-line 50 of the original notes file$/m);
+      assert.match(text(small), /^\+line 50 CHANGED$/m);
+      assert.match(text(small), /^@@ -48,7 \+48,7 @@$/m);
+      assert.ok(text(small).length < 0.4 * v2.join("\n").length);
+      // Unchanged since the diff: stub.
+      assert.match(text(await read({ __sessionId: "diff-a" })), /^<file unchanged/);
+
+      // Other session, first read anywhere: full.
+      const other = await read({ __sessionId: "diff-b" });
+      assert.ok(!isDiff(other));
+      assert.equal(text(other), v2.join("\n"));
+
+      // Small change but line_numbers / force: full.
+      const v3 = [...v2];
+      v3[10] = "line 10 CHANGED";
+      writeFileSync(file, v3.join("\n"));
+      const numbered = await read({ __sessionId: "diff-b", line_numbers: true });
+      assert.ok(!isDiff(numbered));
+      assert.match(text(numbered), /cave_edit_meta/);
+      const forced = await read({ __sessionId: "diff-a", force: true });
+      assert.ok(!isDiff(forced));
+      assert.equal(text(forced), v3.join("\n"));
+
+      // Large change: full content.
+      const v4 = base.map((l) => l.toUpperCase());
+      writeFileSync(file, v4.join("\n"));
+      const large = await read({ __sessionId: "diff-a" });
+      assert.ok(!isDiff(large));
+      assert.equal(text(large), v4.join("\n"));
+
+      // Re-read right after cave__edit (recently-edited bypass) still diffs.
+      await editTool.handler({ file_path: file, old_string: "LINE 70 OF THE ORIGINAL NOTES FILE", new_string: "edited seventy" });
+      const afterEdit = await read({ __sessionId: "diff-a" });
+      assert.ok(isDiff(afterEdit), text(afterEdit).slice(0, 200));
+      assert.match(text(afterEdit), /^\+edited seventy$/m);
+
+      // Files over the snapshot cap are never diffed.
+      const big = join(dir, "big.txt");
+      const bigLines = Array.from({ length: 150 }, (_, i) => `${i}`.padEnd(1900, "x"));
+      writeFileSync(big, bigLines.join("\n"));
+      assert.ok(statSync(big).size > MAX_SNAPSHOT_FILE_BYTES);
+      await readTool.handler({ file_path: big, limit: 1000, __sessionId: "diff-a" });
+      bigLines[3] = "changed";
+      writeFileSync(big, bigLines.join("\n"));
+      const bigAgain = await readTool.handler({ file_path: big, limit: 1000, __sessionId: "diff-a" });
+      assert.ok(!isDiff(bigAgain));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    // LRU total cap.
+    resetSnapshots();
+    const chunk = "y".repeat(200 * 1024);
+    const count = Math.ceil(MAX_SNAPSHOT_TOTAL_BYTES / chunk.length) + 5;
+    for (let i = 0; i < count; i++) rememberSnapshot("cap", `/f${i}`, `h${i}`, chunk);
+    const stats = getSnapshotStats();
+    assert.ok(stats.bytes <= MAX_SNAPSHOT_TOTAL_BYTES, `snapshot bytes ${stats.bytes}`);
+    assert.ok(stats.files < count);
+    assert.equal(getSnapshot("cap", "/f0"), undefined, "oldest evicted");
+    assert.ok(getSnapshot("cap", `/f${count - 1}`), "newest kept");
+    rememberSnapshot("cap", "/huge", "h", "z".repeat(MAX_SNAPSHOT_FILE_BYTES + 1));
+    assert.equal(getSnapshot("cap", "/huge"), undefined, "per-file cap");
+    resetSnapshots();
+    assert.deepEqual(getSnapshotStats(), { files: 0, bytes: 0 });
+    console.log("re-read diff tests passed\n");
   }
 
   console.log("All tests passed!");

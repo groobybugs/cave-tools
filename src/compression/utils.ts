@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import { resetSnapshots } from "./snapshots.js";
 import { readFile, access, stat } from "fs/promises";
 import {
   getLifetimeStats as getDbLifetimeStats,
@@ -492,6 +493,7 @@ export function efficiencyMeter(percent: number, width = 24): string {
 
 export function resetCache(): void {
   fileCache.clear();
+  resetSnapshots();
   void persistStats();
 }
 

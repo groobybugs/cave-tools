@@ -10,7 +10,7 @@ import { collapseRepetition } from "../compression/repetition.js";
 import { compressStructuredSemantic } from "../compression/structured.js";
 import { redactSecrets } from "../compression/redact.js";
 import { classifyCommand } from "../compression/classify.js";
-import { archiveIfLarge } from "../compression/archive.js";
+import { archiveHandle } from "../compression/archive.js";
 import { captureNotice, defaultShell, runCommand } from "../runtime/process.js";
 import { resolveExistingDirectory } from "../runtime/path.js";
 
@@ -22,7 +22,7 @@ export const bashTool: Tool & {
 } = {
   name: "cave__bash",
   description:
-    "Use instead of Bash. Applies RTK rewriting (never prefix rtk yourself), redacts secrets, trims output to a budget, archives large output.",
+    "Use instead of Bash. Applies RTK rewriting (never prefix rtk yourself), redacts secrets, trims output to a budget, archives what it trims.",
   inputSchema: {
     type: "object",
     properties: {
@@ -136,7 +136,8 @@ export const bashTool: Tool & {
         };
       }
 
-      const archive = await archiveIfLarge(processed, command);
+      // Full (already redacted) output, archived behind a handle if trimmed.
+      const full = processed;
 
       if (policy === "verbatim") {
         const lines = processed.split("\n");
@@ -148,14 +149,12 @@ export const bashTool: Tool & {
             ...lines.slice(-250),
           ].join("\n");
         }
-        const archiveNote = archive
-          ? `\n\n[Archived: ${archive.id} — use cave__compress expand ${archive.id}]`
-          : "";
+        const handle = await archiveHandle(full, processed, command);
         return {
           content: [
             {
               type: "text",
-              text: `${processed}${archiveNote}${captureNote}${exitNote}`,
+              text: `${processed}${handle}${captureNote}${exitNote}`,
             },
           ],
           ...markError,
@@ -176,15 +175,13 @@ export const bashTool: Tool & {
       // Apply budget compression
       processed = applyBudget(processed, "bash");
 
-      const archiveNote = archive
-        ? `\n\n[Archived: ${archive.id} — use cave__compress expand ${archive.id}]`
-        : "";
+      const handle = await archiveHandle(full, processed, command);
 
       return {
         content: [
           {
             type: "text",
-            text: `${processed}${archiveNote}${captureNote}${exitNote}`,
+            text: `${processed}${handle}${captureNote}${exitNote}`,
           },
         ],
         ...markError,

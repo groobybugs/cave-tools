@@ -1,6 +1,6 @@
 import { readFile, rm, writeFile, mkdir } from "fs/promises";
 import { createHash } from "crypto";
-import { join } from "path";
+import { join, resolve } from "path";
 import {
   archiveDir,
   archiveStats,
@@ -11,6 +11,8 @@ import {
 
 const ARCHIVE_THRESHOLD = 50_000;
 const ARCHIVE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+// Only archive dropped output when the drop outweighs the handle line itself.
+export const HANDLE_MIN_DROPPED_CHARS = 200;
 
 export interface ArchiveEntry {
   id: string;
@@ -30,11 +32,50 @@ function entryDir(id: string): string {
 }
 
 function contentPath(id: string): string {
-  return join(entryDir(id), `${id}.txt`);
+  return resolve(entryDir(id), `${id}.txt`);
 }
 
 function metaPath(id: string): string {
   return join(entryDir(id), `${id}.meta.json`);
+}
+
+// Write output to the archive store (content-addressed by sha256) and return
+// its id and absolute path. Retention is cleanupArchives().
+export async function storeArchive(
+  output: string,
+  command: string,
+): Promise<{ id: string; path: string }> {
+  const id = archiveId(output);
+  const archivedContentPath = contentPath(id);
+  await mkdir(entryDir(id), { recursive: true });
+  await writeFile(archivedContentPath, output, "utf-8");
+  recordArchive({
+    id,
+    command,
+    sizeChars: output.length,
+    createdAt: Date.now(),
+    contentPath: archivedContentPath,
+  });
+  return { id, path: archivedContentPath };
+}
+
+// When `shown` dropped more than HANDLE_MIN_DROPPED_CHARS of `full`, archive
+// `full` and return a one-line handle (with leading blank line) pointing at
+// it; otherwise "". Callers pass `full` already redacted when redaction is on,
+// so secrets never reach disk. Archive failures never fail the tool call.
+export async function archiveHandle(
+  full: string,
+  shown: string,
+  command: string,
+): Promise<string> {
+  if (full.length - shown.length <= HANDLE_MIN_DROPPED_CHARS) return "";
+  try {
+    const { path } = await storeArchive(full, command);
+    const lines = full.split("\n").length;
+    return `\n\n[cave: full output ${lines} lines archived → cave__read ${path} offset/limit, or cave__grep path=${path}]`;
+  } catch {
+    return "";
+  }
 }
 
 export async function archiveIfLarge(
@@ -43,26 +84,7 @@ export async function archiveIfLarge(
 ): Promise<{ id: string; summary: string } | null> {
   if (output.length < ARCHIVE_THRESHOLD) return null;
 
-  const id = archiveId(output);
-  const dir = entryDir(id);
-  const archivedContentPath = contentPath(id);
-  await mkdir(dir, { recursive: true });
-
-  await writeFile(archivedContentPath, output, "utf-8");
-  const meta: ArchiveEntry = {
-    id,
-    command,
-    sizeChars: output.length,
-    createdAt: Date.now(),
-    contentPath: archivedContentPath,
-  };
-  recordArchive({
-    id: meta.id,
-    command: meta.command,
-    sizeChars: meta.sizeChars,
-    createdAt: meta.createdAt,
-    contentPath: archivedContentPath,
-  });
+  const { id } = await storeArchive(output, command);
 
   const lines = output.split("\n");
   const head = lines.slice(0, 20).join("\n");

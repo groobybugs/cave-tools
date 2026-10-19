@@ -4,6 +4,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolResult } from "../types.js";
 import { applyBudget } from "../compression/utils.js";
 import { collapseRepetition } from "../compression/repetition.js";
+import { archiveHandle } from "../compression/archive.js";
 import { readLineWindow, rgGrep } from "../runtime/ripgrep.js";
 
 const DEFAULT_LIMIT = 100;
@@ -82,7 +83,7 @@ export const grepTool: Tool & {
         ignoreCase,
         literal,
       });
-      const output = await formatMatches(result.matches, cwd, isDirectory ? searchPath : cwd, contextValue, result.truncated, effectiveLimit);
+      const { output, full } = await formatMatches(result.matches, cwd, isDirectory ? searchPath : cwd, contextValue, result.truncated, effectiveLimit);
 
       if (!output) {
         return {
@@ -91,9 +92,10 @@ export const grepTool: Tool & {
       }
 
       const compressed = applyBudget(output, "grep");
+      const handle = await archiveHandle(full, compressed, `grep:${pattern}`);
 
       return {
-        content: [{ type: "text" as const, text: compressed }],
+        content: [{ type: "text" as const, text: `${compressed}${handle}` }],
       };
     } catch (error) {
       return {
@@ -116,9 +118,11 @@ async function formatMatches(
   contextValue: number,
   truncated: boolean,
   effectiveLimit: number,
-): Promise<string> {
-  if (matches.length === 0) return "";
+): Promise<{ output: string; full: string }> {
+  if (matches.length === 0) return { output: "", full: "" };
   const outputLines: string[] = [];
+  // Every line, without the per-file cap or repetition collapse, for the archive.
+  const allLines: string[] = [];
   let linesTruncated = false;
   let currentFile = "";
   let fileLineCount = 0;
@@ -131,6 +135,7 @@ async function formatMatches(
   };
 
   const pushLine = (relative: string, line: string): void => {
+    allLines.push(line);
     if (relative !== currentFile) {
       flushOverflow();
       currentFile = relative;
@@ -170,9 +175,13 @@ async function formatMatches(
   flushOverflow();
 
   let output = collapseRepetition(outputLines.join("\n"));
+  let full = allLines.join("\n");
   const notices: string[] = [];
   if (truncated) notices.push(`${effectiveLimit} matches limit. Use limit=${effectiveLimit * 2} for more, or refine pattern`);
   if (linesTruncated) notices.push("Some lines truncated. Use cave__read to see full lines");
-  if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
-  return output;
+  if (notices.length > 0) {
+    output += `\n\n[${notices.join(". ")}]`;
+    full += `\n\n[${notices.join(". ")}]`;
+  }
+  return { output, full };
 }

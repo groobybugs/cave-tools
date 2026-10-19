@@ -36,8 +36,8 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
 - Use `cave__write` to create/overwrite a single file; `cave__edit` for str-replace **or** line-range edits; `cave__apply_patch` for multi-file add/update/delete/move patches.
 - **Line-range (token-cheap):** `cave__read` with `line_numbers=true` (lines tagged `N:tag|`, footer has `file_hash` + `range_checksum`). Then `cave__edit` with `start_line`/`end_line`/`content` (new body only). Pass `expected_hash` and/or `expected_range_checksum`. `delete:true` removes lines; `insert_before` moves a block; batch `edits[]` may set per-item `file_path`. Insert before N: `end_line=start_line-1`. STRICT (`CAVE_TOOLS_MODE=strict`) requires a hash/checksum proof for range/move. Tiny one-liners may still use `old_string`/`new_string`.
-- Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived if large, and budget-compressed.
-- Use `cave__webfetch` to fetch a specific URL and return markdown/text/html (or a base64 image block); output is redacted, archived if large, and budget-compressed.
+- Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived when trimmed, and budget-compressed.
+- Use `cave__webfetch` to fetch a specific URL and return markdown/text/html (or a base64 image block); output is redacted, archived when trimmed, and budget-compressed.
 - After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next `cave__read` returns fresh content (not a stub).
 - Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - Use `cave__status` to check RTK availability, cache state, savings %, budgets.
