@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { caveToolsDataDir } from "./data-dir.js";
@@ -202,12 +202,37 @@ function emptyLifetime(): LifetimeStats {
   };
 }
 
+// Best-effort: drop permission bits beyond `mode` (the db, job logs and
+// archives hold paths and command output). Never throws; skipped on Windows.
+function tightenMode(target: string, mode: number): void {
+  if (process.platform === "win32") return;
+  try {
+    if ((statSync(target).mode & 0o777 & ~mode) !== 0) chmodSync(target, mode);
+  } catch {
+    // missing or not ours: leave it
+  }
+}
+
 function openDb(): Database.Database {
   if (db) return db;
   const path = dbPath();
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const dataDir = dirname(path);
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  // mkdir's mode only applies on creation; tighten dirs from older installs.
+  for (const dir of [dataDir, jobsDir(), archiveDir()]) tightenMode(dir, 0o700);
+  // Pre-create the db 0600 so SQLite creates -wal/-shm with the same mode.
+  if (process.platform !== "win32" && !existsSync(path)) {
+    try {
+      closeSync(openSync(path, "a", 0o600));
+    } catch {
+      // let SQLite report a real problem
+    }
+  }
+  const sidecars = [path, `${path}-wal`, `${path}-shm`];
+  for (const file of sidecars) tightenMode(file, 0o600);
   db = new Database(path);
   db.pragma("journal_mode = WAL");
+  for (const file of sidecars) tightenMode(file, 0o600);
   db.pragma("synchronous = NORMAL");
   db.pragma("busy_timeout = 5000");
   db.exec(`

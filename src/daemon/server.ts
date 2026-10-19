@@ -7,7 +7,7 @@ import { allTools } from "../tool-list.js";
 import { pruneDeadSessions, releaseClientStats } from "../compression/utils.js";
 import { pruneJobs } from "../runtime/jobs.js";
 import { cleanupArchives } from "../compression/archive.js";
-import { buildId, daemonLogPath, ensureSocketDir, socketPath } from "./paths.js";
+import { buildId, daemonKey, daemonLogPath, ensureSocketDir, socketPath } from "./paths.js";
 
 // Shared daemon: newline-delimited JSON over a unix socket (named pipe on
 // Windows). Each call runs with the client's cwd/env; sessions and stats are
@@ -52,10 +52,13 @@ interface Request {
 }
 
 export async function startDaemon(): Promise<void> {
-  const path = socketPath();
+  // Key and build fixed at startup: a later rebuild gets its own daemon.
+  const key = daemonKey();
+  const build = buildId();
+  const path = socketPath(key);
   const isPipe = process.platform === "win32";
   if (!isPipe) {
-    ensureSocketDir();
+    ensureSocketDir(key);
     if (existsSync(path)) {
       if (await isAlive(path)) {
         log(`already running at ${path}`);
@@ -123,7 +126,7 @@ export async function startDaemon(): Promise<void> {
             clientPid = req.clientPid as number;
             pidConnections.set(clientPid, (pidConnections.get(clientPid) ?? 0) + 1);
           }
-          reply({ id, result: { buildId: buildId(), pid: process.pid } });
+          reply({ id, result: { buildId: build, pid: process.pid } });
           return;
         case "list":
           reply({ id, result: { tools: JSON.parse(JSON.stringify(allTools)) } });
@@ -205,6 +208,6 @@ export async function startDaemon(): Promise<void> {
 
   await new Promise<void>((resolve) => server.listen(path, resolve));
   if (!isPipe) chmodSync(path, 0o600);
-  log(`listening on ${path} (build ${buildId()}, idle ${idleMs()}ms)`);
+  log(`listening on ${path} (build ${build}, idle ${idleMs()}ms)`);
   touchIdle();
 }

@@ -19,11 +19,11 @@ function collectJs(dir: string, out: string[]): void {
   }
 }
 
-let cachedBuildId: string | undefined;
-
-// Package version + name/size/mtime of every compiled .js file.
+// Package version + name/size/mtime of every compiled .js file. Not memoized:
+// a long-lived client must see a rebuild, or it would spawn a new-build daemon
+// and then look for it on the old socket. Clients compute this only on
+// connect attempts (~1 ms); the daemon computes its key once at startup.
 export function buildId(): string {
-  if (cachedBuildId) return cachedBuildId;
   const hash = createHash("sha256");
   try {
     hash.update(JSON.parse(readFileSync(join(distDir, "..", "package.json"), "utf-8")).version ?? "");
@@ -36,8 +36,7 @@ export function buildId(): string {
     const info = statSync(file);
     hash.update(`${file}\0${info.size}\0${info.mtimeMs}\n`);
   }
-  cachedBuildId = hash.digest("hex").slice(0, 16);
-  return cachedBuildId;
+  return hash.digest("hex").slice(0, 16);
 }
 
 function claudeConfigDir(): string {
@@ -54,18 +53,18 @@ export function daemonKey(): string {
 // Unix socket paths are limited to ~107 bytes (sun_path).
 const MAX_SOCKET_PATH = 100;
 
-export function socketDir(): string {
+export function socketDir(key: string = daemonKey()): string {
   const runtime = process.env.XDG_RUNTIME_DIR?.trim();
   const preferred = runtime ? join(runtime, "cave-tools") : join(caveToolsDataDir(), "run");
-  if (join(preferred, `daemon-${daemonKey()}.sock`).length <= MAX_SOCKET_PATH) return preferred;
+  if (join(preferred, `daemon-${key}.sock`).length <= MAX_SOCKET_PATH) return preferred;
   const uid = typeof process.getuid === "function" ? process.getuid() : "user";
   return join(tmpdir().length < 40 ? tmpdir() : "/tmp", `cave-tools-${uid}`);
 }
 
 // Create the socket dir 0700 and refuse one we don't own or that is a symlink
 // (matters for the shared /tmp fallback).
-export function ensureSocketDir(): string {
-  const dir = socketDir();
+export function ensureSocketDir(key: string = daemonKey()): string {
+  const dir = socketDir(key);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const info = lstatSync(dir);
   if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`unsafe socket dir: ${dir}`);
@@ -76,13 +75,13 @@ export function ensureSocketDir(): string {
   return dir;
 }
 
-export function socketPath(): string {
-  if (process.platform === "win32") return `\\\\.\\pipe\\cave-tools-${daemonKey()}`;
-  return join(socketDir(), `daemon-${daemonKey()}.sock`);
+export function socketPath(key: string = daemonKey()): string {
+  if (process.platform === "win32") return `\\\\.\\pipe\\cave-tools-${key}`;
+  return join(socketDir(key), `daemon-${key}.sock`);
 }
 
-export function lockPath(): string {
-  return join(socketDir(), `daemon-${daemonKey()}.lock`);
+export function lockPath(key: string = daemonKey()): string {
+  return join(socketDir(key), `daemon-${key}.lock`);
 }
 
 export function daemonLogPath(): string {

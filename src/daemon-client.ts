@@ -3,7 +3,7 @@ import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } fr
 import net from "net";
 import { homedir } from "os";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
-import { cliEntryPath, daemonLogPath, ensureSocketDir, lockPath, socketPath } from "./daemon/paths.js";
+import { cliEntryPath, daemonKey, daemonLogPath, ensureSocketDir, lockPath, socketPath } from "./daemon/paths.js";
 
 // Thin client for the shared daemon (CAVE_TOOLS_DAEMON=1). Imports no tool
 // code: callers fall back to in-process dispatch only when a request was
@@ -55,8 +55,8 @@ function tryConnect(path: string): Promise<net.Socket | null> {
 
 // O_EXCL lock so concurrent clients spawn one daemon. A lock older than
 // STALE_LOCK_MS (crashed spawner) is broken.
-function acquireLock(): boolean {
-  const file = lockPath();
+function acquireLock(key: string): boolean {
+  const file = lockPath(key);
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const fd = openSync(file, "wx", 0o600);
@@ -76,10 +76,10 @@ function acquireLock(): boolean {
   return false;
 }
 
-function releaseLock(): void {
+function releaseLock(key: string): void {
   try {
-    const owner = readFileSync(lockPath(), "utf-8").split(" ")[0];
-    if (owner === String(process.pid)) unlinkSync(lockPath());
+    const owner = readFileSync(lockPath(key), "utf-8").split(" ")[0];
+    if (owner === String(process.pid)) unlinkSync(lockPath(key));
   } catch {
     // already gone
   }
@@ -181,18 +181,20 @@ export class DaemonClient {
   }
 
   private async connectOrSpawn(): Promise<net.Socket | null> {
+    // Recomputed per attempt so a rebuild while this client lives is seen.
+    const key = daemonKey();
     // Verify the socket dir (ours, 0700, not a symlink) BEFORE connecting: each
     // call carries the full env, and the /tmp fallback dir could be pre-created
     // by another user with their own socket in it.
     try {
-      if (process.platform !== "win32") ensureSocketDir();
+      if (process.platform !== "win32") ensureSocketDir(key);
     } catch {
       return null;
     }
-    const path = socketPath();
+    const path = socketPath(key);
     let socket = await tryConnect(path);
     if (!socket) {
-      const owner = acquireLock();
+      const owner = acquireLock(key);
       try {
         if (owner) spawnDaemon();
         const deadline = Date.now() + SPAWN_WAIT_MS;
@@ -201,7 +203,7 @@ export class DaemonClient {
           socket = await tryConnect(path);
         }
       } finally {
-        if (owner) releaseLock();
+        if (owner) releaseLock(key);
       }
       if (!socket) return null;
     }

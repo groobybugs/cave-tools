@@ -3499,6 +3499,7 @@ process.exit(1);
   {
     console.log("Testing review fixes (CLI quoting, daemon stats/PATH/session):");
     const { joinCommandArgs, UsageError: CliUsageError } = await import("./dist/cli-tools.js");
+    const { DaemonClient } = await import("./dist/daemon-client.js");
     const cliPath = join(process.cwd(), "dist", "cli.js");
     const root = mkdtempSync("/tmp/ctr-");
     const baseEnv = {
@@ -3579,20 +3580,37 @@ process.exit(1);
       // Without the daemon, --session can't carry over between processes.
       assert.match(cli(["read", target, "--session", "s1"]).stdout, /^session content/);
       // MCP-style clients stay per connection even with the same session id.
-      // (Fresh process: an earlier test bumps a dist mtime, which changes the
-      // build id this process has cached.)
-      const mcpStyle = spawnSync(process.execPath, ["--input-type=module", "-e", `
-        const { DaemonClient } = await import(${JSON.stringify(join(process.cwd(), "dist", "daemon-client.js"))});
-        const ctx = { sessionId: "s1", cwd: ${JSON.stringify(root)}, env: process.env };
-        const out = [];
-        for (const c of [new DaemonClient(), new DaemonClient()]) {
-          out.push((await c.call("cave__read", { file_path: ${JSON.stringify(target)} }, ctx)).result.content[0].text);
-          c.close();
-        }
-        console.log(JSON.stringify(out));`], { encoding: "utf8", env: baseEnv });
-      const [first, second] = JSON.parse(mcpStyle.stdout);
-      assert.match(first, /^session content/);
-      assert.match(second, /^session content/, "MCP clients not shared by session id");
+      const ctx = { sessionId: "s1", cwd: root, env: baseEnv };
+      for (const client of [new DaemonClient(), new DaemonClient()]) {
+        const outcome = await client.call("cave__read", { file_path: target }, ctx);
+        assert.ok(outcome.sent);
+        assert.match(outcome.result.content[0].text, /^session content/, "MCP clients not shared by session id");
+        client.close();
+      }
+
+      // A client that outlives a rebuild finds the new-build daemon it spawns.
+      const longLived = new DaemonClient();
+      assert.ok((await longLived.call("cave__bash", { command: "echo before", description: "x" }, ctx)).sent);
+      const oldPid = Number(/running pid (\d+)/.exec(daemonCli(["daemon", "status"]).stdout)[1]);
+      const touched = join(process.cwd(), "dist", "profile.js");
+      const before = statSync(touched);
+      utimesSync(touched, before.atime, new Date(before.mtimeMs + 7000));
+      let newPid;
+      try {
+        process.kill(oldPid, "SIGKILL");
+        await sleepMs(200);
+        const started = Date.now();
+        const after = await longLived.call("cave__bash", { command: "echo after-rebuild", description: "x" }, ctx);
+        assert.ok(after.sent, "reconnected to the new-build daemon, no fallback");
+        assert.match(after.result.content[0].text, /after-rebuild/);
+        assert.ok(Date.now() - started < 5000, "no 30s fallback");
+        newPid = Number(/running pid (\d+)/.exec(daemonCli(["daemon", "status"]).stdout)[1]);
+        assert.notEqual(newPid, oldPid);
+      } finally {
+        longLived.close();
+        if (newPid) daemonCli(["daemon", "stop"]);
+        utimesSync(touched, before.atime, before.mtime);
+      }
     } finally {
       daemonCli(["daemon", "stop"]);
       for (const [key, value] of Object.entries(savedEnv)) {
@@ -3602,6 +3620,43 @@ process.exit(1);
       rmSync(root, { recursive: true, force: true });
     }
     console.log("review fix tests passed\n");
+  }
+
+  {
+    console.log("Testing data-dir permission hardening:");
+    const root = mkdtempSync(join(tmpdir(), "cave-modes-"));
+    const runIn = (dataDir) => {
+      const r = spawnSync("/bin/sh", ["-c", 'umask 022; exec "$0" "$@"', process.execPath,
+        join(process.cwd(), "dist", "cli.js"), "bash", "seq", "1", "300"],
+        { encoding: "utf8", cwd: root, env: { ...process.env, CAVE_TOOLS_DATA_DIR: dataDir, CAVE_TOOLS_DAEMON: "0" } });
+      assert.equal(r.status, 0, r.stderr);
+    };
+    const mode = (p) => statSync(p).mode & 0o777;
+    try {
+      // Fresh data dir under umask 022.
+      const fresh = join(root, "fresh");
+      runIn(fresh);
+      assert.equal(mode(fresh), 0o700);
+      for (const f of ["cave-tools.db", "cave-tools.db-wal", "cave-tools.db-shm"]) {
+        assert.equal(mode(join(fresh, f)), 0o600, f);
+      }
+      // Pre-existing loose dirs and db get tightened.
+      const old = join(root, "old");
+      for (const d of [old, join(old, "jobs"), join(old, "archives")]) {
+        mkdirSync(d);
+        chmodSync(d, 0o755);
+      }
+      writeFileSync(join(old, "cave-tools.db"), "");
+      chmodSync(join(old, "cave-tools.db"), 0o644);
+      runIn(old);
+      for (const d of [old, join(old, "jobs"), join(old, "archives")]) assert.equal(mode(d), 0o700, d);
+      for (const f of ["cave-tools.db", "cave-tools.db-wal", "cave-tools.db-shm"]) {
+        assert.equal(mode(join(old, f)), 0o600, f);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    console.log("permission hardening tests passed\n");
   }
 
   console.log("All tests passed!");
