@@ -89,13 +89,14 @@ export async function callTool(
   partial: Partial<CallContext> & { sessionId: string },
 ): Promise<CallToolResult> {
   const ctx: CallContext = {
-    sessionId: partial.sessionId,
+    ...partial,
     cwd: partial.cwd ?? process.cwd(),
     env: partial.env ?? process.env,
     clientId: partial.clientId ?? "local",
   };
   const tool = await loadTool(name);
-  const sessionId = ctx.clientId === "local" ? ctx.sessionId : `${ctx.clientId}:${ctx.sessionId}`;
+  const namespace = ctx.sessionNamespace ?? ctx.clientId;
+  const sessionId = namespace === "local" ? ctx.sessionId : `${namespace}:${ctx.sessionId}`;
   const normalized = normalizePaths(name, args, ctx.cwd);
   const toolArgs = SESSION_TOOLS.has(name)
     ? { ...(normalized ?? {}), __sessionId: sessionId }

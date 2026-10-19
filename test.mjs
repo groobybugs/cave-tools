@@ -3496,6 +3496,114 @@ process.exit(1);
     console.log("shared daemon tests passed\n");
   }
 
+  {
+    console.log("Testing review fixes (CLI quoting, daemon stats/PATH/session):");
+    const { joinCommandArgs, UsageError: CliUsageError } = await import("./dist/cli-tools.js");
+    const cliPath = join(process.cwd(), "dist", "cli.js");
+    const root = mkdtempSync("/tmp/ctr-");
+    const baseEnv = {
+      ...process.env,
+      CAVE_TOOLS_DATA_DIR: join(root, "data"),
+      XDG_RUNTIME_DIR: join(root, "run"),
+      CAVE_TOOLS_DAEMON_IDLE_MS: "1500",
+    };
+    mkdirSync(join(root, "run"));
+    const cli = (args, opts = {}) => spawnSync(process.execPath, [cliPath, ...args], {
+      encoding: "utf8", cwd: opts.cwd ?? root, env: { ...baseEnv, ...(opts.env ?? {}) },
+    });
+    const daemonCli = (args, opts = {}) => cli(args, { ...opts, env: { CAVE_TOOLS_DAEMON: "1", ...(opts.env ?? {}) } });
+    const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const savedEnv = {};
+    for (const key of ["CAVE_TOOLS_DATA_DIR", "XDG_RUNTIME_DIR", "CAVE_TOOLS_DAEMON_IDLE_MS"]) {
+      savedEnv[key] = process.env[key];
+      process.env[key] = baseEnv[key];
+    }
+    try {
+      // 1. Shell quoting: one arg verbatim, several args keep their boundaries.
+      let r = cli(["bash", "echo", "literal; echo injected"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, "literal; echo injected\n", "no injected second command");
+      r = cli(["bash", "printf", "%s|", "it's", "a b"]);
+      assert.equal(r.stdout.trim(), "it's|a b|");
+      r = cli(["bash", "git", "--version"]);
+      assert.match(r.stdout, /git version/);
+      r = cli(["bash", "echo abc | tr a-c x-z"]);
+      assert.equal(r.stdout.trim(), "xyz", "single string keeps shell syntax");
+      assert.equal(joinCommandArgs(["git", "log", "--oneline", "-n", "3"]), "git log --oneline -n 3");
+      assert.equal(joinCommandArgs(["echo", "it's", ""]), "echo 'it'\\''s' ''");
+      assert.throws(() => joinCommandArgs(["dir", "x"], "win32"), (e) => e instanceof CliUsageError);
+      assert.match(cli(["help", "bash"]).stdout, /One argument runs verbatim as shell/);
+
+      // 3. Stats rows per client pid; a daemon-served CLI call writes no empty row over it.
+      const readRows = () => JSON.parse(spawnSync(process.execPath, ["--input-type=module", "-e",
+        `const u = await import(${JSON.stringify(join(process.cwd(), "dist", "compression", "utils.js"))});` +
+        `console.log(JSON.stringify(u.listSessionStats(true).map((s) => ({ pid: s.pid, calls: s.savings.totalCalls }))))`],
+        { encoding: "utf8", env: baseEnv }).stdout);
+      const s1 = daemonCli(["bash", "seq", "1", "300"]);
+      const s2 = daemonCli(["bash", "seq", "1", "300"]);
+      assert.equal(s1.status, 0, s1.stderr);
+      await sleepMs(400);
+      const rows = readRows();
+      const daemonPid = Number(/running pid (\d+)/.exec(daemonCli(["daemon", "status"]).stdout)[1]);
+      for (const child of [s1, s2]) {
+        const row = rows.find((x) => x.pid === child.pid);
+        assert.ok(row, `row for client pid ${child.pid}: ${JSON.stringify(rows)}`);
+        assert.ok(row.calls >= 1, "client row has the daemon's accounting, not an empty local flush");
+      }
+      const daemonRow = rows.find((x) => x.pid === daemonPid);
+      assert.ok(!daemonRow || daemonRow.calls === 0, "nothing accounted under the daemon pid");
+
+      // 4. rg/fd resolved from each client's PATH.
+      const findDir = join(root, "find-target");
+      mkdirSync(findDir);
+      const shim = (label) => {
+        const dir = join(root, `shim-${label}`);
+        mkdirSync(dir);
+        writeFileSync(join(dir, "fd"), `#!/bin/sh\necho fake-${label}.txt\nexit 0\n`);
+        chmodSync(join(dir, "fd"), 0o755);
+        return dir;
+      };
+      const pathA = `${shim("A")}${pathDelimiter}${process.env.PATH}`;
+      const pathB = `${shim("B")}${pathDelimiter}${process.env.PATH}`;
+      assert.match(daemonCli(["find", "*", findDir], { env: { PATH: pathA } }).stdout, /fake-A\.txt/);
+      assert.match(daemonCli(["find", "*", findDir], { env: { PATH: pathB } }).stdout, /fake-B\.txt/);
+      assert.match(daemonCli(["find", "*", findDir], { env: { PATH: pathA } }).stdout, /fake-A\.txt/, "cache keyed by PATH");
+
+      // 5. Explicit CLI --session shares read state across processes via the daemon.
+      const target = join(root, "session.txt");
+      writeFileSync(target, "session content\n");
+      assert.match(daemonCli(["read", target, "--session", "s1"]).stdout, /^session content/);
+      assert.match(daemonCli(["read", target, "--session", "s1"]).stdout, /^<file unchanged/, "same --session: stub");
+      assert.match(daemonCli(["read", target, "--session", "s2"]).stdout, /^session content/, "other session isolated");
+      assert.match(daemonCli(["read", target]).stdout, /^session content/, "no --session: fresh");
+      // Without the daemon, --session can't carry over between processes.
+      assert.match(cli(["read", target, "--session", "s1"]).stdout, /^session content/);
+      // MCP-style clients stay per connection even with the same session id.
+      // (Fresh process: an earlier test bumps a dist mtime, which changes the
+      // build id this process has cached.)
+      const mcpStyle = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        const { DaemonClient } = await import(${JSON.stringify(join(process.cwd(), "dist", "daemon-client.js"))});
+        const ctx = { sessionId: "s1", cwd: ${JSON.stringify(root)}, env: process.env };
+        const out = [];
+        for (const c of [new DaemonClient(), new DaemonClient()]) {
+          out.push((await c.call("cave__read", { file_path: ${JSON.stringify(target)} }, ctx)).result.content[0].text);
+          c.close();
+        }
+        console.log(JSON.stringify(out));`], { encoding: "utf8", env: baseEnv });
+      const [first, second] = JSON.parse(mcpStyle.stdout);
+      assert.match(first, /^session content/);
+      assert.match(second, /^session content/, "MCP clients not shared by session id");
+    } finally {
+      daemonCli(["daemon", "stop"]);
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+    console.log("review fix tests passed\n");
+  }
+
   console.log("All tests passed!");
 }
 

@@ -3,6 +3,7 @@ import path from "path";
 import { readFile, readdir } from "fs/promises";
 import { toPosixPath } from "./path.js";
 import { resolveFd, resolveRg } from "./bins.js";
+import { getEnv } from "./context.js";
 
 const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_LINE_LENGTH = 2000;
@@ -35,7 +36,7 @@ function globToRegExp(pattern: string): RegExp {
 
 function spawnBin(command: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string; code: number | null; error?: Error }> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const child = spawn(command, args, { cwd, env: getEnv(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf-8")));

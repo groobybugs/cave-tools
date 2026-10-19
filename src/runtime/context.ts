@@ -11,6 +11,9 @@ export interface CallContext {
   clientId: string;
   // Daemon only: the client process, which owns this call's stats row.
   clientPid?: number;
+  // Daemon only: session-key namespace when not per connection (explicit CLI
+  // --session uses "cli" so separate CLI processes share read state).
+  sessionNamespace?: string;
 }
 
 const storage = new AsyncLocalStorage<CallContext>();

@@ -113,6 +113,10 @@ export class DaemonClient {
   private retryAfter = 0;
   readonly clientId = `${process.pid}-${Math.random().toString(16).slice(2, 10)}`;
 
+  // kind "cli" + explicitSession asks the daemon to key sessions as
+  // cli:<sessionId> (shared across CLI processes) instead of per connection.
+  constructor(private readonly hello: { kind?: string; explicitSession?: boolean } = {}) {}
+
   private attach(socket: net.Socket): void {
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => {
@@ -167,7 +171,7 @@ export class DaemonClient {
   private async handshake(socket: net.Socket): Promise<net.Socket | null> {
     this.attach(socket);
     try {
-      const reply = await this.request(socket, "hello", { clientPid: process.pid, clientId: this.clientId }, HELLO_TIMEOUT_MS);
+      const reply = await this.request(socket, "hello", { clientPid: process.pid, clientId: this.clientId, ...this.hello }, HELLO_TIMEOUT_MS);
       if (reply.error) throw new Error(reply.error);
       return socket;
     } catch {
@@ -257,7 +261,7 @@ export class DaemonClient {
 
 let shared: DaemonClient | undefined;
 
-export function getDaemonClient(): DaemonClient {
-  shared ??= new DaemonClient();
+export function getDaemonClient(hello?: { kind?: string; explicitSession?: boolean }): DaemonClient {
+  shared ??= new DaemonClient(hello);
   return shared;
 }

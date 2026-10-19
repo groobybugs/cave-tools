@@ -5,6 +5,7 @@ import { access, chmod, copyFile, mkdir, mkdtemp, readdir, rename, rm, writeFile
 import { homedir, tmpdir } from "os";
 import path from "path";
 import { constants } from "fs";
+import { getEnv } from "./context.js";
 
 export const RG_VERSION = "15.1.0";
 export const FD_VERSION = "10.3.0";
@@ -126,8 +127,9 @@ async function isExecutable(filePath: string): Promise<boolean> {
   }
 }
 
+// PATH comes from the caller (daemon clients each bring their own).
 export function whichOnPath(names: string[]): string | null {
-  const pathEnv = process.env.PATH || "";
+  const pathEnv = getEnv().PATH || "";
   const dirs = pathEnv.split(path.delimiter).filter(Boolean);
   const winExts = process.platform === "win32" ? ["", ".exe", ".cmd"] : [""];
   for (const name of names) {
@@ -273,17 +275,24 @@ async function resolveTool(tool: SearchBin, userPath: string | null, log?: (mess
   }
 }
 
-let pending: Promise<BinResolution> | null = null;
+// Resolutions cached per caller PATH, so each daemon client finds the rg/fd
+// its own PATH would; the downloaded copy in binDir() is the shared fallback.
+const MAX_CACHED_PATHS = 32;
+const pending = new Map<string, Promise<BinResolution>>();
 
 export async function ensureBins(options: EnsureBinsOptions = {}): Promise<BinResolution> {
-  if (!pending) {
-    pending = (async () => {
+  const key = getEnv().PATH || "";
+  let resolution = pending.get(key);
+  if (!resolution) {
+    if (pending.size >= MAX_CACHED_PATHS) pending.clear();
+    resolution = (async () => {
       const rg = await resolveTool("rg", whichUserRg(), options.log);
       const fd = await resolveTool("fd", whichUserFd(), options.log);
       return { rg, fd };
     })();
+    pending.set(key, resolution);
   }
-  return pending;
+  return resolution;
 }
 
 export async function resolveRg(log?: (message: string) => void): Promise<string | null> {
@@ -295,5 +304,5 @@ export async function resolveFd(log?: (message: string) => void): Promise<string
 }
 
 export function resetBinsCache(): void {
-  pending = null;
+  pending.clear();
 }

@@ -23,13 +23,26 @@ export interface ParsedToolArgs {
   help: boolean;
 }
 
-// For these, everything after the first positional is the command line.
+// For these, everything after the first positional is the command line: one
+// positional is used verbatim (the way to pass shell syntax), several are
+// quoted individually so argument boundaries survive (see joinCommandArgs).
 const COMMAND_TOOLS = new Set(["cave__bash", "cave__bash_start"]);
 const DEFAULT_CLI_DESCRIPTION = "cave-tools CLI";
 
 function schemaOf(tool: ToolDefinition): { props: Record<string, PropSchema>; required: string[] } {
   const schema = tool.inputSchema as { properties?: Record<string, PropSchema>; required?: string[] };
   return { props: schema.properties ?? {}, required: schema.required ?? [] };
+}
+
+const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+// Join several CLI args into one shell command without letting the shell
+// re-split or interpret them: each unsafe arg is POSIX single-quoted.
+export function joinCommandArgs(argv: string[], platform: string = process.platform): string {
+  if (platform === "win32") {
+    throw new UsageError('on Windows pass the command as one quoted string, e.g. "dir | findstr x"');
+  }
+  return argv.map((arg) => (SHELL_SAFE.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`)).join(" ");
 }
 
 function parseBoolean(flag: string, value: string): boolean {
@@ -140,7 +153,7 @@ export async function parseToolArgs(
   if (isCommandTool) {
     if (positionals.length > 0) {
       if (args.command !== undefined) throw new UsageError("give the command either positionally or with --command");
-      args.command = await resolve(positionals.join(" "));
+      args.command = positionals.length === 1 ? await resolve(positionals[0]) : joinCommandArgs(positionals);
     }
     if (args.description === undefined) args.description = DEFAULT_CLI_DESCRIPTION;
   } else {
@@ -196,8 +209,10 @@ export function toolHelp(tool: ToolDefinition): string {
     "",
     ...rows,
     "",
-    "Positionals fill required params, then optional ones, in the order above.",
-    "A value of - reads that param from stdin. --session <id> reuses a dedup session.",
+    COMMAND_TOOLS.has(tool.name)
+      ? 'One argument runs verbatim as shell (e.g. "ls | wc -l"); several arguments are each quoted, so shell syntax inside them stays literal.'
+      : "Positionals fill required params, then optional ones, in the order above.",
+    "A value of - reads that param from stdin. --session <id> reuses read state across calls (needs CAVE_TOOLS_DAEMON=1).",
   ].join("\n");
 }
 
@@ -268,19 +283,28 @@ export async function runToolCommand(short: string | undefined, argv: string[]):
   }
   const sessionId = parsed.sessionId ?? `cli-${process.pid}-${randomBytes(4).toString("hex")}`;
   let result: CallToolResult;
+  // Only a call this process ran itself has local stats worth writing; a
+  // daemon-served call is accounted in the daemon under this client's pid.
+  let ranLocally = false;
   try {
     let outcome: CallOutcome = { sent: false };
     if (daemonEnabled()) {
-      outcome = await getDaemonClient().call(name, parsed.args, { sessionId, cwd: process.cwd(), env: process.env });
+      outcome = await getDaemonClient({ kind: "cli", explicitSession: parsed.sessionId !== undefined })
+        .call(name, parsed.args, { sessionId, cwd: process.cwd(), env: process.env });
     }
     // In-process unless the daemon actually received the call.
-    result = outcome.sent ? outcome.result : await callTool(name, parsed.args, { sessionId });
+    if (outcome.sent) {
+      result = outcome.result;
+    } else {
+      ranLocally = true;
+      result = await callTool(name, parsed.args, { sessionId });
+    }
   } catch (error) {
-    flushStats();
+    if (ranLocally) flushStats();
     finish(process.stderr, `cave-tools ${short}: ${error instanceof Error ? error.message : String(error)}`, 1);
     return;
   }
-  flushStats();
+  if (ranLocally) flushStats();
   if (result.isError) finish(process.stderr, formatResult(result), 1);
   else finish(process.stdout, formatResult(result), 0);
 }

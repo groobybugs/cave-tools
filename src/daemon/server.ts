@@ -44,6 +44,8 @@ interface Request {
   id?: number;
   method?: string;
   clientPid?: number;
+  kind?: string;
+  explicitSession?: boolean;
   tool?: string;
   args?: Record<string, unknown>;
   ctx?: { sessionId?: string; cwd?: string; env?: NodeJS.ProcessEnv };
@@ -103,6 +105,8 @@ export async function startDaemon(): Promise<void> {
     // Assigned here, never taken from the client, so namespacing can't be spoofed.
     const clientId = `c${randomBytes(6).toString("hex")}`;
     let clientPid: number | undefined;
+    // Explicit CLI --session opt-in (same-uid trust): stable cli:<id> keys.
+    let sessionNamespace: string | undefined;
     let buffer = "";
     socket.setEncoding("utf8");
 
@@ -114,6 +118,7 @@ export async function startDaemon(): Promise<void> {
       const { id } = req;
       switch (req.method) {
         case "hello":
+          if (req.kind === "cli" && req.explicitSession === true) sessionNamespace = "cli";
           if (Number.isInteger(req.clientPid) && clientPid === undefined) {
             clientPid = req.clientPid as number;
             pidConnections.set(clientPid, (pidConnections.get(clientPid) ?? 0) + 1);
@@ -141,6 +146,7 @@ export async function startDaemon(): Promise<void> {
               env: req.ctx.env ?? {},
               clientId,
               clientPid,
+              sessionNamespace,
             });
             reply({ id, result });
           } catch (error) {

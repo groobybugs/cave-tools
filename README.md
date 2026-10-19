@@ -166,14 +166,15 @@ Every tool also runs straight from the shell, without MCP:
 ```bash
 cave-tools read package.json --limit 20
 cave-tools grep TODO src --glob '*.ts'
-cave-tools bash git status            # everything after the first word is the command
+cave-tools bash git status            # several args: each is quoted, boundaries kept
+cave-tools bash "ls | wc -l"          # one arg: run verbatim, so pipes/; work
 cat patch.txt | cave-tools apply_patch -   # `-` reads that param from stdin
 cave-tools help grep                  # params generated from the tool schema
 ```
 
 - Positionals fill required params, then optional ones, in schema order. Flags accept `--line_numbers` or `--line-numbers`; booleans take `--flag`, `--flag=false`; arrays/objects take JSON.
 - Output goes to stdout. Tool errors go to stderr with exit 1; usage errors exit 2.
-- Each call gets a fresh session (no dedup stubs or diffs) unless you pass `--session <id>`.
+- Each call gets a fresh session (no dedup stubs or diffs). `--session <id>` reuses read state across separate CLI calls only with the daemon on (`CAVE_TOOLS_DAEMON=1`); without it each process starts empty.
 - `cave-tools status` stays the savings report; the `cave__status` tool runs as `cave-tools tool status`. `cave-tools tool <name> ...` works for every tool.
 
 ### Daemon (opt-in)
