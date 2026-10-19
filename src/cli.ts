@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { startServer } from "./index.js";
 import {
   getAllBudgets,
   pruneDeadSessions,
@@ -19,6 +18,8 @@ import {
 } from "fs";
 import { homedir } from "os";
 import { join, basename } from "path";
+import { isToolName } from "./dispatch.js";
+import { redactSecrets } from "./compression/redact.js";
 import {
   fetchRtkGainSummary,
   renderStatusCli,
@@ -291,7 +292,8 @@ function writeIfMissing(file: string, content: string): "created" | "exists" {
 const args = process.argv.slice(2);
 
 if (args[0] === "mcp" || args.length === 0) {
-  startServer().catch((error) => {
+  // Lazy: the server pulls in the MCP SDK and every tool module.
+  import("./index.js").then(({ startServer }) => startServer()).catch((error) => {
     console.error("Fatal error:", error);
     process.exit(1);
   });
@@ -403,7 +405,7 @@ if (args[0] === "mcp" || args.length === 0) {
   }
   for (const job of jobs) {
     const secs = Math.round(((job.endedAt ?? Date.now()) - job.startedAt) / 1000);
-    const cmd = job.command.replace(/\s+/g, " ").trim();
+    const cmd = redactSecrets(job.command).replace(/\s+/g, " ").trim();
     const short = cmd.length > 80 ? `${cmd.slice(0, 77)}...` : cmd;
     const state =
       job.state === "exited"
@@ -425,7 +427,14 @@ if (args[0] === "mcp" || args.length === 0) {
     console.log(`fd: ${result.fd ?? "(missing)"}`);
     process.exit(result.rg ? 0 : 1);
   })();
+} else if (args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
+  void import("./cli-tools.js").then(({ runHelpCommand }) => runHelpCommand(args[1]));
+} else if (args[0] === "tool") {
+  // Explicit form; the only way to reach the status tool, since `status` is the savings report above.
+  void import("./cli-tools.js").then(({ runToolCommand }) => runToolCommand(args[1], args.slice(2)));
+} else if (isToolName(`cave__${args[0]}`)) {
+  void import("./cli-tools.js").then(({ runToolCommand }) => runToolCommand(args[0], args.slice(1)));
 } else {
-  console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]|jobs [kill <id> [signal]|log <id> [lines]]|bins]");
-  process.exit(1);
+  console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]|jobs [kill <id> [signal]|log <id> [lines]]|bins|help [tool]|<tool> [args...]|tool <tool> [args...]]");
+  process.exit(2);
 }

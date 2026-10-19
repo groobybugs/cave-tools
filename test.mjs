@@ -75,7 +75,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join, delimiter as pathDelimiter } from "node:path";
 import { createServer } from "node:http";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { redactSecrets } from "./dist/compression/redact.js";
 import {
@@ -3183,6 +3183,129 @@ process.exit(1);
     await configureTool.handler({ action: "set_budget", tool_name: "web", max_lines: 120, head_lines: 60, tail_lines: 60, max_chars: 8000 });
     assert.deepEqual(getAllBudgets().web, { maxLines: 120, headLines: 60, tailLines: 60, maxChars: 8000 });
     console.log("char-cap budget tests passed\n");
+  }
+
+  {
+    console.log("Testing CLI tool commands:");
+    const { parseToolArgs, UsageError, formatResult } = await import("./dist/cli-tools.js");
+    const { loadTool, callTool, TOOL_NAMES } = await import("./dist/dispatch.js");
+    assert.equal(TOOL_NAMES.length, 17);
+    const noStdin = async () => { throw new Error("stdin not expected"); };
+    const parse = async (tool, argv, stdin = noStdin) => parseToolArgs(await loadTool(`cave__${tool}`), argv, stdin);
+
+    // Positionals fill required, then optional, in schema order; coercion by type.
+    let p = await parse("read", ["/x/file.ts", "--line-numbers", "--limit", "20", "--force=false"]);
+    assert.deepEqual(p.args, { file_path: "/x/file.ts", line_numbers: true, limit: 20, force: false });
+    p = await parse("grep", ["needle", "src", "--ignoreCase", "--context=2"]);
+    assert.deepEqual(p.args, { pattern: "needle", path: "src", ignoreCase: true, context: 2 });
+    p = await parse("ls", ["."]);
+    assert.deepEqual(p.args, { path: "." });
+    p = await parse("edit", ["/f", "old", "new", "--replace_all", "true"]);
+    assert.deepEqual(p.args, { file_path: "/f", old_string: "old", new_string: "new", replace_all: true });
+    p = await parse("invalidate", ["/a", "/b"]);
+    assert.deepEqual(p.args, { file_paths: ["/a", "/b"] });
+    p = await parse("invalidate", ["--file_paths", '["/a"]']);
+    assert.deepEqual(p.args, { file_paths: ["/a"] });
+    p = await parse("edit", ["--edits", '[{"start_line":1}]', "--file-path", "/f"]);
+    assert.deepEqual(p.args, { edits: [{ start_line: 1 }], file_path: "/f" });
+    // bash: everything after the first positional is the command; description defaulted.
+    p = await parse("bash", ["--timeout", "5000", "git", "log", "--oneline", "-n", "3"]);
+    assert.deepEqual(p.args, { timeout: 5000, command: "git log --oneline -n 3", description: "cave-tools CLI" });
+    p = await parse("read", ["/f", "--session", "abc"]);
+    assert.equal(p.sessionId, "abc");
+    // stdin "-".
+    p = await parse("write", ["/f", "-"], async () => "from stdin");
+    assert.deepEqual(p.args, { file_path: "/f", content: "from stdin" });
+    p = await parse("compress", ["--text", "-"], async () => "piped");
+    assert.equal(p.args.text, "piped");
+    // Usage errors.
+    for (const [tool, argv, msg] of [
+      ["read", [], /missing required: file_path/],
+      ["read", ["/f", "--bogus", "1"], /unknown flag --bogus/],
+      ["read", ["/f", "--limit", "abc"], /expects a number/],
+      ["read", ["/f", "--force=maybe"], /expects true or false/],
+      ["read", ["/f", "--limit"], /needs a value/],
+      ["status", ["extra"], /unexpected argument/],
+      ["edit", ["--edits", "nope"], /JSON array/],
+    ]) {
+      await assert.rejects(parse(tool, argv), (e) => e instanceof UsageError && msg.test(e.message), `${tool} ${argv}`);
+    }
+    await assert.rejects(parse("edit", ["/f", "-", "-"], async () => "x"), /only one value/);
+    assert.equal(formatResult({ content: [{ type: "image", data: Buffer.from("abcd").toString("base64"), mimeType: "image/png" }] }),
+      "[image image/png 4 B]");
+
+    // End to end through dist/cli.js.
+    const dir = mkdtempSync(join(tmpdir(), "cave-cli-"));
+    const cli = (args, input) => spawnSync(process.execPath, [join(process.cwd(), "dist", "cli.js"), ...args],
+      { cwd: dir, input, encoding: "utf8", env: { ...process.env, CAVE_TOOLS_DATA_DIR: join(dir, "data") } });
+    try {
+      let r = cli(["write", join(dir, "a.txt"), "-"], "alpha\nbeta\n");
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(readFileSync(join(dir, "a.txt"), "utf8"), "alpha\nbeta\n");
+      r = cli(["read", "a.txt"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /^alpha\nbeta/);
+      r = cli(["bash", "echo", "cli-bash-ok"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /cli-bash-ok/);
+      r = cli(["read", "missing.txt"]);
+      assert.equal(r.status, 1, "tool error exits 1");
+      assert.match(r.stderr, /File not found/);
+      assert.equal(r.stdout, "");
+      r = cli(["read", "--bogus"]);
+      assert.equal(r.status, 2, "bad flag exits 2");
+      assert.match(r.stderr, /usage: cave-tools read <file_path>/);
+      r = cli(["no-such-tool"]);
+      assert.equal(r.status, 2, "unknown tool exits 2");
+      r = cli(["help", "grep"]);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /usage: cave-tools grep <pattern>/);
+      assert.match(r.stdout, /--limit\s+number — Max matches \(default 100\)/);
+      r = cli(["grep", "--help"]);
+      assert.match(r.stdout, /usage: cave-tools grep/);
+      r = cli(["help"]);
+      assert.match(r.stdout, /apply_patch/);
+      assert.match(r.stdout, /cave-tools tool status/);
+      r = cli(["tool", "status"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /Cave Tools Status/);
+
+      // Shared dispatch: MCP tools/call and CLI return the same text.
+      const target = join(dir, "same.txt");
+      writeFileSync(target, "same text\nfor both paths\n");
+      const viaCli = cli(["read", target]).stdout;
+      const viaMcp = await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [join(process.cwd(), "dist", "cli.js"), "mcp"],
+          { cwd: dir, stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, CAVE_TOOLS_DATA_DIR: join(dir, "data") } });
+        let buf = "";
+        const timer = setTimeout(() => { child.kill(); reject(new Error("mcp timeout")); }, 15000);
+        child.stdout.on("data", (chunk) => {
+          buf += chunk;
+          for (const line of buf.split("\n").slice(0, -1)) {
+            const msg = JSON.parse(line);
+            if (msg.id === 1) {
+              child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+              child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",
+                params: { name: "cave__read", arguments: { file_path: target } } }) + "\n");
+            } else if (msg.id === 2) {
+              clearTimeout(timer);
+              child.kill();
+              resolve(msg.result.content[0].text);
+            }
+          }
+          buf = buf.slice(buf.lastIndexOf("\n") + 1);
+        });
+        child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize",
+          params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } } }) + "\n");
+      });
+      // The CLI adds a trailing newline only when the text lacks one.
+      assert.equal(viaCli, viaMcp.endsWith("\n") ? viaMcp : `${viaMcp}\n`, "CLI and MCP share dispatch output");
+      const direct = await callTool("cave__read", { file_path: target }, { sessionId: "dispatch-direct" });
+      assert.equal(direct.content[0].text, viaMcp);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    console.log("CLI tool command tests passed\n");
   }
 
   console.log("All tests passed!");

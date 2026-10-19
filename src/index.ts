@@ -2,7 +2,6 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
-  type CallToolResult,
   ListToolsRequestSchema,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
@@ -23,6 +22,7 @@ import { editTool } from "./tools/edit.js";
 import { applyPatchTool } from "./tools/apply-patch.js";
 import { websearchTool } from "./tools/websearch.js";
 import { webfetchTool } from "./tools/webfetch.js";
+import { callTool } from "./dispatch.js";
 import { isSubagentContext, pruneDeadSessions } from "./compression/utils.js";
 import { pruneJobs } from "./runtime/jobs.js";
 import { cleanupArchives } from "./compression/archive.js";
@@ -89,92 +89,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // mcp/catalog.ts patch). Claude Code and other clients typically omit it,
   // so we fall back to "default". Subagent isolation for those clients is
   // env-based: isSubagentContext() forces fresh reads (never stub).
-  const requestSessionId = String(
+  const sessionId = String(
     (request.params as { _meta?: { sessionID?: unknown } })._meta?.sessionID ?? "default",
   );
-
-  switch (name) {
-    case "cave__read": {
-      // Per-session cache key (opencode _meta.sessionID). Clients that omit it
-      // share DEFAULT_SESSION; env subagent detection still forces fresh reads.
-      const meta = (request.params as { _meta?: { sessionID?: unknown } })
-        ?._meta;
-      const sessionId = String(meta?.sessionID ?? "default");
-      return readTool.handler({
-        ...(args as Record<string, unknown>),
-        __sessionId: sessionId,
-      }) as Promise<CallToolResult>;
-    }
-    case "cave__bash":
-      return bashTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__bash_start":
-      return bashStartTool.handler({
-        ...(args as Record<string, unknown>),
-        __sessionId: requestSessionId,
-      }) as Promise<CallToolResult>;
-    case "cave__bash_status":
-      return bashStatusTool.handler({
-        ...(args as Record<string, unknown>),
-        __sessionId: requestSessionId,
-      }) as Promise<CallToolResult>;
-    case "cave__bash_stop":
-      return bashStopTool.handler({
-        ...(args as Record<string, unknown>),
-        __sessionId: requestSessionId,
-      }) as Promise<CallToolResult>;
-    case "cave__write":
-      return writeTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__invalidate":
-      return invalidateTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__edit":
-      return editTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__apply_patch":
-      return applyPatchTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__websearch":
-      return websearchTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__webfetch":
-      return webfetchTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__compress":
-      return compressTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__status":
-      return statusTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__configure":
-      return configureTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__grep":
-      return grepTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__find":
-      return findTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    case "cave__ls":
-      return lsTool.handler(
-        args as Record<string, unknown>,
-      ) as Promise<CallToolResult>;
-    default:
-      throw new Error(`Unknown tool: ${name}`);
-  }
+  return callTool(name, args as Record<string, unknown> | undefined, { sessionId });
 });
 
 export async function startServer(): Promise<void> {

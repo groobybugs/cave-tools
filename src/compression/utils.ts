@@ -75,6 +75,11 @@ const UNKNOWN_SUBAGENT_CANDIDATE = /(?:SUBAGENT|^CLAUDE_CODE_)/;
 let subagentContextCached: boolean | null = null;
 let unknownSubagentEnvLogged = false;
 
+/** CLI tool calls: stderr lands in the agent's Bash output, so skip the diagnostic. */
+export function suppressSubagentEnvLog(): void {
+  unknownSubagentEnvLogged = true;
+}
+
 function envNonEmpty(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
 }
@@ -243,6 +248,16 @@ function persistStats(): void {
       // Non-fatal: stats persistence is best-effort.
     }
   });
+}
+
+// Write the stats snapshot now. Short-lived callers (the CLI) use this before
+// exiting, since persistStats() defers the write to setImmediate.
+export function flushStats(): void {
+  try {
+    upsertSessionStats(buildStats());
+  } catch {
+    // Non-fatal: stats persistence is best-effort.
+  }
 }
 
 export async function getLifetimeStats(): Promise<LifetimeStats> {
