@@ -17,6 +17,7 @@ import type {
   ToolSavings,
 } from "../storage/db.js";
 import { redactSecrets } from "./redact.js";
+import { getClientId, getContext, getEnv } from "../runtime/context.js";
 
 export type { LifetimeStats, PersistedStats } from "../storage/db.js";
 
@@ -72,7 +73,8 @@ const KNOWN_SUBAGENT_KEYS = new Set([
 const TASK_ID_STYLE = /(?:^|_)TASK_ID$/;
 const UNKNOWN_SUBAGENT_CANDIDATE = /(?:SUBAGENT|^CLAUDE_CODE_)/;
 
-let subagentContextCached: boolean | null = null;
+// Keyed by clientId: each daemon client has its own env.
+const subagentContextCache = new Map<string, boolean>();
 let unknownSubagentEnvLogged = false;
 
 /** CLI tool calls: stderr lands in the agent's Bash output, so skip the diagnostic. */
@@ -88,15 +90,15 @@ function isKnownSubagentKey(key: string): boolean {
   return KNOWN_SUBAGENT_KEYS.has(key) || TASK_ID_STYLE.test(key);
 }
 
-function logUnknownSubagentEnvOnce(triggeredKeys: string[]): void {
+function logUnknownSubagentEnvOnce(triggeredKeys: string[], env: NodeJS.ProcessEnv): void {
   if (unknownSubagentEnvLogged) return;
   unknownSubagentEnvLogged = true;
   const triggered = new Set(triggeredKeys);
   const unknown: string[] = [];
-  for (const key of Object.keys(process.env)) {
+  for (const key of Object.keys(env)) {
     if (triggered.has(key)) continue;
     if (!UNKNOWN_SUBAGENT_CANDIDATE.test(key)) continue;
-    if (!envNonEmpty(process.env[key])) continue;
+    if (!envNonEmpty(env[key])) continue;
     unknown.push(key);
   }
   if (unknown.length > 0) {
@@ -106,16 +108,19 @@ function logUnknownSubagentEnvOnce(triggeredKeys: string[]): void {
   }
 }
 
-/** Test hook: clear the process-level subagent detection cache. */
+/** Test hook: clear the subagent detection cache. */
 export function resetSubagentContextCache(): void {
-  subagentContextCached = null;
+  subagentContextCache.clear();
   unknownSubagentEnvLogged = false;
 }
 
 export function isSubagentContext(): boolean {
-  if (subagentContextCached !== null) return subagentContextCached;
+  const clientId = getClientId();
+  const cached = subagentContextCache.get(clientId);
+  if (cached !== undefined) return cached;
 
-  const force = process.env.CAVE_TOOLS_FORCE_FRESH;
+  const env = getEnv();
+  const force = env.CAVE_TOOLS_FORCE_FRESH;
   const triggered: string[] = [];
   let detected = false;
 
@@ -124,40 +129,93 @@ export function isSubagentContext(): boolean {
     triggered.push("CAVE_TOOLS_FORCE_FRESH");
   }
 
-  for (const key of Object.keys(process.env)) {
-    if (!envNonEmpty(process.env[key])) continue;
+  for (const key of Object.keys(env)) {
+    if (!envNonEmpty(env[key])) continue;
     if (!isKnownSubagentKey(key)) continue;
     detected = true;
     triggered.push(key);
   }
 
-  logUnknownSubagentEnvOnce(triggered);
-  subagentContextCached = detected;
+  logUnknownSubagentEnvOnce(triggered, env);
+  subagentContextCache.set(clientId, detected);
   return detected;
 }
 
-let cacheHits = 0;
-let cacheMisses = 0;
-let dedupSavedChars = 0;
-/** Output chars avoided by line-range/move edits (no old_string echo). */
-let rangeEchoSavedChars = 0;
-let rangeEditCount = 0;
-let rtkRewrites = 0;
-let rtkAlreadyWrapped = 0;
-let rtkPassthrough = 0;
 const RTK_TOP_PASSTHROUGH_CAP = 50;
-const rtkTopPassthrough = new Map<string, number>();
 let seqCounter = 0;
-let totalBounces = 0;
-let totalWastedChars = 0;
-const sessionStart = Date.now();
-const sessionPid = process.pid;
+
+// Session stats live in a bucket per stats row. In-process that is this
+// process; in the daemon each client process (ctx.clientPid) gets its own
+// bucket and row, so stats never merge across clients.
+interface StatsBucket {
+  pid: number;
+  sessionStart: number;
+  cacheHits: number;
+  cacheMisses: number;
+  dedupSavedChars: number;
+  /** Output chars avoided by line-range/move edits (no old_string echo). */
+  rangeEchoSavedChars: number;
+  rangeEditCount: number;
+  rtkRewrites: number;
+  rtkAlreadyWrapped: number;
+  rtkPassthrough: number;
+  rtkTopPassthrough: Map<string, number>;
+  totalBounces: number;
+  totalWastedChars: number;
+  perExtension: Map<string, BounceStats>;
+  savingsByTool: Record<string, ToolSavings>;
+}
+
+function newBucket(pid: number): StatsBucket {
+  return {
+    pid,
+    sessionStart: Date.now(),
+    cacheHits: 0,
+    cacheMisses: 0,
+    dedupSavedChars: 0,
+    rangeEchoSavedChars: 0,
+    rangeEditCount: 0,
+    rtkRewrites: 0,
+    rtkAlreadyWrapped: 0,
+    rtkPassthrough: 0,
+    rtkTopPassthrough: new Map(),
+    totalBounces: 0,
+    totalWastedChars: 0,
+    perExtension: new Map(),
+    savingsByTool: {},
+  };
+}
+
+const localBucket = newBucket(process.pid);
+const clientBuckets = new Map<number, StatsBucket>();
+
+function statsBucket(): StatsBucket {
+  const pid = getContext()?.clientPid;
+  if (pid === undefined) return localBucket;
+  let bucket = clientBuckets.get(pid);
+  if (!bucket) {
+    bucket = newBucket(pid);
+    clientBuckets.set(pid, bucket);
+  }
+  return bucket;
+}
+
+/** Daemon: drop a disconnected client's bucket after its row is written. */
+export function releaseClientStats(pid: number): void {
+  const bucket = clientBuckets.get(pid);
+  if (!bucket) return;
+  try {
+    upsertSessionStats(buildStats(bucket));
+  } catch {
+    // best-effort
+  }
+  clientBuckets.delete(pid);
+}
 const READ_STUB = "<file unchanged since last read>";
 
 export { READ_STUB };
 
 const recentReads = new Map<string, BounceEvent[]>();
-const perExtension = new Map<string, BounceStats>();
 const recentlyEdited = new Map<string, number>();
 
 const BOUNCE_WINDOW = 5;
@@ -170,7 +228,6 @@ interface BounceEvent {
   charsSent: number;
 }
 
-const savingsByTool: Record<string, ToolSavings> = {};
 
 // Trimmed bash/grep/web output is recoverable through the archive handle, so
 // these stay tight. "web" covers cave__webfetch and cave__websearch.
@@ -187,9 +244,9 @@ function estimateTokens(charCount: number): number {
   return Math.round(charCount / 4);
 }
 
-export function buildStats(): PersistedStats {
-  const cacheTotal = cacheHits + cacheMisses;
-  const toolEntries = Object.values(savingsByTool);
+export function buildStats(b: StatsBucket = statsBucket()): PersistedStats {
+  const cacheTotal = b.cacheHits + b.cacheMisses;
+  const toolEntries = Object.values(b.savingsByTool);
   const rawChars = toolEntries.reduce((sum, tool) => sum + tool.rawChars, 0);
   const compressedChars = toolEntries.reduce(
     (sum, tool) => sum + tool.compressedChars,
@@ -199,18 +256,18 @@ export function buildStats(): PersistedStats {
     (sum, tool) => sum + tool.savedChars,
     0,
   );
-  const savedChars = compressionSavedChars + dedupSavedChars;
+  const savedChars = compressionSavedChars + b.dedupSavedChars;
   const totalCalls = toolEntries.reduce((sum, tool) => sum + tool.calls, 0);
 
   return {
-    pid: sessionPid,
-    sessionStart,
+    pid: b.pid,
+    sessionStart: b.sessionStart,
     updatedAt: Date.now(),
     cache: {
-      hits: cacheHits,
-      misses: cacheMisses,
+      hits: b.cacheHits,
+      misses: b.cacheMisses,
       total: cacheTotal,
-      hitRate: cacheTotal > 0 ? cacheHits / cacheTotal : 0,
+      hitRate: cacheTotal > 0 ? b.cacheHits / cacheTotal : 0,
       filesTracked: trackedFileCount(),
     },
     savings: {
@@ -218,15 +275,15 @@ export function buildStats(): PersistedStats {
       rawChars,
       compressedChars,
       compressionSavedChars,
-      dedupSavedChars,
+      dedupSavedChars: b.dedupSavedChars,
       savedChars,
       estimatedTokensSaved: estimateTokens(savedChars),
-      byTool: savingsByTool,
+      byTool: b.savingsByTool,
     },
     rtk: {
-      rewrites: rtkRewrites,
-      alreadyWrapped: rtkAlreadyWrapped,
-      passthrough: rtkPassthrough,
+      rewrites: b.rtkRewrites,
+      alreadyWrapped: b.rtkAlreadyWrapped,
+      passthrough: b.rtkPassthrough,
     },
     budgets: getAllBudgets(),
     bounces: getBounceStats(),
@@ -235,17 +292,25 @@ export function buildStats(): PersistedStats {
 
 let statsPersistScheduled = false;
 
+const dirtyBuckets = new Set<StatsBucket>();
+
 function persistStats(): void {
-  // Coalesce bursts into one latest-snapshot transaction. setImmediate alone
-  // deferred each call but still performed one synchronous SQLite write/event.
+  // Coalesce bursts into one latest-snapshot transaction per bucket.
+  // setImmediate alone deferred each call but still performed one synchronous
+  // SQLite write/event.
+  dirtyBuckets.add(statsBucket());
   if (statsPersistScheduled) return;
   statsPersistScheduled = true;
   setImmediate(() => {
     statsPersistScheduled = false;
-    try {
-      upsertSessionStats(buildStats());
-    } catch {
-      // Non-fatal: stats persistence is best-effort.
+    const buckets = [...dirtyBuckets];
+    dirtyBuckets.clear();
+    for (const bucket of buckets) {
+      try {
+        upsertSessionStats(buildStats(bucket));
+      } catch {
+        // Non-fatal: stats persistence is best-effort.
+      }
     }
   });
 }
@@ -254,7 +319,7 @@ function persistStats(): void {
 // exiting, since persistStats() defers the write to setImmediate.
 export function flushStats(): void {
   try {
-    upsertSessionStats(buildStats());
+    upsertSessionStats(buildStats(localBucket));
   } catch {
     // Non-fatal: stats persistence is best-effort.
   }
@@ -296,7 +361,7 @@ export async function pruneDeadSessions(): Promise<number> {
   let removed = 0;
   for (const session of listSessionStats(false)) {
     const pid = session.pid;
-    if (!Number.isFinite(pid) || pid === sessionPid) continue;
+    if (!Number.isFinite(pid) || pid === process.pid) continue;
     let alive: boolean;
     try {
       process.kill(pid, 0);
@@ -361,8 +426,8 @@ export async function isFileUnchanged(
   const wouldEmit = entry.deliveries.get(deliveryKey);
   if (wouldEmit === undefined) return false;
 
-  cacheHits++;
-  dedupSavedChars += Math.max(0, wouldEmit - READ_STUB.length);
+  statsBucket().cacheHits++;
+  statsBucket().dedupSavedChars += Math.max(0, wouldEmit - READ_STUB.length);
   void persistStats();
   return true;
 }
@@ -417,7 +482,7 @@ export async function updateFileCache(
     deliveries,
     readCount,
   });
-  cacheMisses++;
+  statsBucket().cacheMisses++;
   void persistStats();
   const capturedPath = filePath;
   const capturedHash = hash;
@@ -469,12 +534,12 @@ export function getCacheStats(): {
   hitRate: number;
   filesTracked: number;
 } {
-  const total = cacheHits + cacheMisses;
+  const total = statsBucket().cacheHits + statsBucket().cacheMisses;
   return {
-    hits: cacheHits,
-    misses: cacheMisses,
+    hits: statsBucket().cacheHits,
+    misses: statsBucket().cacheMisses,
     total,
-    hitRate: total > 0 ? cacheHits / total : 0,
+    hitRate: total > 0 ? statsBucket().cacheHits / total : 0,
     filesTracked: trackedFileCount(),
   };
 }
@@ -488,7 +553,7 @@ export function getRtkStats(): RtkStats {
 }
 
 export function getRtkTopPassthrough(): { prefix: string; count: number }[] {
-  return [...rtkTopPassthrough.entries()]
+  return [...statsBucket().rtkTopPassthrough.entries()]
     .map(([prefix, count]) => ({ prefix, count }))
     .sort((a, b) => b.count - a.count || a.prefix.localeCompare(b.prefix));
 }
@@ -516,21 +581,21 @@ export function resetCache(): void {
 }
 
 export async function resetStats(): Promise<void> {
-  cacheHits = 0;
-  cacheMisses = 0;
-  dedupSavedChars = 0;
-  rtkRewrites = 0;
-  rtkAlreadyWrapped = 0;
-  rtkPassthrough = 0;
-  rtkTopPassthrough.clear();
+  statsBucket().cacheHits = 0;
+  statsBucket().cacheMisses = 0;
+  statsBucket().dedupSavedChars = 0;
+  statsBucket().rtkRewrites = 0;
+  statsBucket().rtkAlreadyWrapped = 0;
+  statsBucket().rtkPassthrough = 0;
+  statsBucket().rtkTopPassthrough.clear();
   rtkAvailableCache = null;
   seqCounter = 0;
-  totalBounces = 0;
-  totalWastedChars = 0;
+  statsBucket().totalBounces = 0;
+  statsBucket().totalWastedChars = 0;
   recentReads.clear();
-  perExtension.clear();
+  statsBucket().perExtension.clear();
   recentlyEdited.clear();
-  for (const key of Object.keys(savingsByTool)) delete savingsByTool[key];
+  for (const key of Object.keys(statsBucket().savingsByTool)) delete statsBucket().savingsByTool[key];
   void persistStats();
 }
 
@@ -550,19 +615,19 @@ export function recordRead(
   if (!wasCompressed && events.length > 0) {
     const last = events[events.length - 1];
     if (last.wasCompressed && seqCounter - last.seq <= BOUNCE_WINDOW) {
-      totalBounces++;
-      totalWastedChars += last.charsSent;
+      statsBucket().totalBounces++;
+      statsBucket().totalWastedChars += last.charsSent;
 
       const ext = extensionOf(filePath);
       if (ext) {
-        const stats = perExtension.get(ext) ?? {
+        const stats = statsBucket().perExtension.get(ext) ?? {
           totalReads: 0,
           bounces: 0,
           wastedChars: 0,
         };
         stats.bounces++;
         stats.wastedChars += last.charsSent;
-        perExtension.set(ext, stats);
+        statsBucket().perExtension.set(ext, stats);
       }
     }
   }
@@ -573,13 +638,13 @@ export function recordRead(
 
   const ext = extensionOf(filePath);
   if (ext) {
-    const stats = perExtension.get(ext) ?? {
+    const stats = statsBucket().perExtension.get(ext) ?? {
       totalReads: 0,
       bounces: 0,
       wastedChars: 0,
     };
     stats.totalReads++;
-    perExtension.set(ext, stats);
+    statsBucket().perExtension.set(ext, stats);
   }
 
   void persistStats();
@@ -593,8 +658,8 @@ export function recordEdit(filePath: string): void {
 
 /** Count chars of old span not re-emitted by the model (range/move edits). */
 export function recordRangeEchoSaved(chars: number): void {
-  if (chars > 0) rangeEchoSavedChars += chars;
-  rangeEditCount++;
+  if (chars > 0) statsBucket().rangeEchoSavedChars += chars;
+  statsBucket().rangeEditCount++;
   void persistStats();
 }
 
@@ -604,9 +669,9 @@ export function getRangeEditStats(): {
   estimatedTokensSaved: number;
 } {
   return {
-    edits: rangeEditCount,
-    echoSavedChars: rangeEchoSavedChars,
-    estimatedTokensSaved: estimateTokens(rangeEchoSavedChars),
+    edits: statsBucket().rangeEditCount,
+    echoSavedChars: statsBucket().rangeEchoSavedChars,
+    estimatedTokensSaved: estimateTokens(statsBucket().rangeEchoSavedChars),
   };
 }
 
@@ -619,7 +684,7 @@ export function shouldForceFull(filePath: string): boolean {
   const ext = extensionOf(filePath);
   if (!ext) return false;
 
-  const stats = perExtension.get(ext);
+  const stats = statsBucket().perExtension.get(ext);
   if (!stats || stats.totalReads < 3) return false;
 
   return stats.bounces / stats.totalReads >= BOUNCE_RATE_THRESHOLD;
@@ -631,12 +696,12 @@ export function getBounceStats(): {
   byExtension: Record<string, BounceStats>;
 } {
   const byExtension: Record<string, BounceStats> = {};
-  for (const [ext, stats] of perExtension) {
+  for (const [ext, stats] of statsBucket().perExtension) {
     byExtension[ext] = { ...stats };
   }
   return {
-    totalBounces,
-    totalWastedChars,
+    totalBounces: statsBucket().totalBounces,
+    totalWastedChars: statsBucket().totalWastedChars,
     byExtension,
   };
 }
@@ -831,7 +896,7 @@ export function budgetedText(text: string, toolName: string): string {
 export function applyBudget(text: string, toolName: string): string {
   const rawLength = text.length;
   const result = budgetedText(text, toolName);
-  const tool = savingsByTool[toolName] || {
+  const tool = statsBucket().savingsByTool[toolName] || {
     calls: 0,
     rawChars: 0,
     compressedChars: 0,
@@ -841,7 +906,7 @@ export function applyBudget(text: string, toolName: string): string {
   tool.rawChars += rawLength;
   tool.compressedChars += result.length;
   tool.savedChars += Math.max(0, rawLength - result.length);
-  savingsByTool[toolName] = tool;
+  statsBucket().savingsByTool[toolName] = tool;
   void persistStats();
   return result;
 }
@@ -1004,31 +1069,31 @@ function passthroughPrefix(command: string): string {
 }
 
 function notePassthrough(command: string): void {
-  rtkPassthrough++;
+  statsBucket().rtkPassthrough++;
   const key = passthroughPrefix(command);
   if (key) {
-    const prev = rtkTopPassthrough.get(key);
+    const prev = statsBucket().rtkTopPassthrough.get(key);
     if (prev !== undefined) {
-      rtkTopPassthrough.set(key, prev + 1);
-    } else if (rtkTopPassthrough.size < RTK_TOP_PASSTHROUGH_CAP) {
-      rtkTopPassthrough.set(key, 1);
+      statsBucket().rtkTopPassthrough.set(key, prev + 1);
+    } else if (statsBucket().rtkTopPassthrough.size < RTK_TOP_PASSTHROUGH_CAP) {
+      statsBucket().rtkTopPassthrough.set(key, 1);
     } else {
       let minKey: string | undefined;
       let min = Infinity;
-      for (const [k, count] of rtkTopPassthrough) {
+      for (const [k, count] of statsBucket().rtkTopPassthrough) {
         if (count < min) {
           min = count;
           minKey = k;
         }
       }
       if (minKey !== undefined) {
-        rtkTopPassthrough.delete(minKey);
-        rtkTopPassthrough.set(key, 1);
+        statsBucket().rtkTopPassthrough.delete(minKey);
+        statsBucket().rtkTopPassthrough.set(key, 1);
       }
     }
-    if (process.env.CAVE_TOOLS_DEBUG === "1") {
+    if (getEnv().CAVE_TOOLS_DEBUG === "1") {
       console.error(
-        `[cave-tools] rtk passthrough ${key} n=${rtkTopPassthrough.get(key) ?? 0}`,
+        `[cave-tools] rtk passthrough ${key} n=${statsBucket().rtkTopPassthrough.get(key) ?? 0}`,
       );
     }
   }
@@ -1046,6 +1111,7 @@ function runRtkRewrite(command: string): Promise<{ stdout: string; timedOut: boo
             encoding: "utf-8",
             timeout: RTK_REWRITE_TIMEOUT_MS,
             windowsHide: true,
+            env: getEnv(),
           },
           (err, stdout) => {
             const out = typeof stdout === "string" ? stdout : "";
@@ -1105,9 +1171,9 @@ export async function rewriteCommandWithRtk(
       rewritten === toRewrite.trim() ||
       rewritten === command.trim()
     ) {
-      rtkAlreadyWrapped++;
+      statsBucket().rtkAlreadyWrapped++;
     } else {
-      rtkRewrites++;
+      statsBucket().rtkRewrites++;
     }
     void persistStats();
     return rewritten;

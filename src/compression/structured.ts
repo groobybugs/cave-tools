@@ -3,6 +3,8 @@
 // long strings, and strips XML namespace boilerplate. Gated behind a flag so
 // the existing whitespace-only extractStructuredData remains the safe fallback.
 
+import { getEnv } from "../runtime/context.js";
+
 type OutputFormat = "json" | "xml" | "text";
 
 // Keywords commonly associated with specific JSON keys in CLI output. When
@@ -18,19 +20,18 @@ const COMMAND_KEY_HINTS: Record<string, string[]> = {
   "aws ": ["Arn", "Name", "Status", "State", "Id"],
 };
 
-// Module-level toggle. CAVE_TOOLS_STRUCTURED_COMPRESSION=off forces the
-// fallback path; everything else (including unset) leaves it enabled. Exposed
-// via setStructuredCompression / isStructuredCompressionEnabled so tests and
+// CAVE_TOOLS_STRUCTURED_COMPRESSION=off (read per call from the caller's env)
+// forces the fallback path; everything else (including unset) leaves it
+// enabled. setStructuredCompression overrides the env at runtime so tests and
 // future config tools can flip it without restarting.
-let structuredCompressionEnabled =
-  process.env.CAVE_TOOLS_STRUCTURED_COMPRESSION !== "off";
+let structuredCompressionOverride: boolean | null = null;
 
 export function isStructuredCompressionEnabled(): boolean {
-  return structuredCompressionEnabled;
+  return structuredCompressionOverride ?? getEnv().CAVE_TOOLS_STRUCTURED_COMPRESSION !== "off";
 }
 
 export function setStructuredCompression(enabled: boolean): void {
-  structuredCompressionEnabled = enabled;
+  structuredCompressionOverride = enabled;
 }
 
 // Detect JSON / XML / text. Only triggers on outputs > 50 lines to avoid
@@ -557,7 +558,7 @@ export function compressStructuredSemantic(
   text: string,
   commandHint?: string,
 ): string | null {
-  if (!structuredCompressionEnabled) return null;
+  if (!isStructuredCompressionEnabled()) return null;
 
   const format = detectOutputFormat(text);
   switch (format) {

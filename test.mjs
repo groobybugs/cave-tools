@@ -86,7 +86,7 @@ import {
   MAX_SNAPSHOT_FILE_BYTES,
   MAX_SNAPSHOT_TOTAL_BYTES,
 } from "./dist/compression/snapshots.js";
-import { listedTools } from "./dist/index.js";
+import { listedTools } from "./dist/tool-list.js";
 
 async function test() {
   console.log("Testing Cave Tools...\n");
@@ -3306,6 +3306,186 @@ process.exit(1);
       rmSync(dir, { recursive: true, force: true });
     }
     console.log("CLI tool command tests passed\n");
+  }
+
+  {
+    console.log("Testing shared daemon:");
+    const { DaemonClient, CONNECTION_LOST_TEXT } = await import("./dist/daemon-client.js");
+    const paths = await import("./dist/daemon/paths.js");
+    const { statSync: fsStat, utimesSync: fsUtimes } = await import("node:fs");
+    const root = mkdtempSync("/tmp/ctd-");
+    const saved = {};
+    const setEnv = (vars) => {
+      for (const [key, value] of Object.entries(vars)) {
+        if (!(key in saved)) saved[key] = process.env[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    };
+    const daemonEnv = {
+      CAVE_TOOLS_DATA_DIR: join(root, "data"),
+      XDG_RUNTIME_DIR: join(root, "run"),
+      CAVE_TOOLS_DAEMON_IDLE_MS: "1500",
+    };
+    mkdirSync(join(root, "run"));
+    setEnv(daemonEnv);
+    const cliPath = join(process.cwd(), "dist", "cli.js");
+    const cli = (args, opts = {}) => spawnSync(process.execPath, [cliPath, ...args], {
+      encoding: "utf8",
+      cwd: opts.cwd ?? root,
+      input: opts.input,
+      env: { ...process.env, CAVE_TOOLS_DAEMON: "1", ...(opts.env ?? {}) },
+    });
+    const daemonPid = () => {
+      const r = cli(["daemon", "status"]);
+      return r.status === 0 ? Number(/running pid (\d+)/.exec(r.stdout)[1]) : null;
+    };
+    const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const logText = () => (existsSync(join(root, "data", "daemon.log")) ? readFileSync(join(root, "data", "daemon.log"), "utf8") : "");
+    const waitGone = async (ms) => {
+      const end = Date.now() + ms;
+      while (Date.now() < end && existsSync(paths.socketPath())) await sleepMs(100);
+    };
+    try {
+      // Concurrent first calls spawn exactly one daemon (lock).
+      const spawned = await Promise.all([1, 2, 3, 4].map((i) => new Promise((resolve) => {
+        const child = spawn(process.execPath, [cliPath, "bash", `echo concurrent-${i}`], {
+          cwd: root, env: { ...process.env, CAVE_TOOLS_DAEMON: "1" } });
+        let out = "";
+        child.stdout.on("data", (c) => (out += c));
+        child.on("close", (code) => resolve({ code, out }));
+      })));
+      spawned.forEach((r, i) => {
+        assert.equal(r.code, 0);
+        assert.match(r.out, new RegExp(`concurrent-${i + 1}`));
+      });
+      assert.equal((logText().match(/listening on/g) ?? []).length, 1, logText());
+      const pid = daemonPid();
+      assert.ok(pid, "daemon running");
+
+      // Socket dir 0700, socket 0600.
+      assert.equal(fsStat(paths.socketDir()).mode & 0o777, 0o700);
+      assert.equal(fsStat(paths.socketPath()).mode & 0o777, 0o600);
+
+      // env isolation.
+      const one = cli(["bash", "echo FOO=$FOO"], { env: { FOO: "one" } });
+      const two = cli(["bash", "echo FOO=$FOO"], { env: { FOO: "two" } });
+      assert.match(one.stdout, /FOO=one/);
+      assert.match(two.stdout, /FOO=two/);
+      assert.equal(daemonPid(), pid, "same daemon served both");
+
+      // cwd isolation: relative read/ls.
+      const dirA = join(root, "a");
+      const dirB = join(root, "b");
+      mkdirSync(dirA);
+      mkdirSync(dirB);
+      writeFileSync(join(dirA, "f.txt"), "from A\n");
+      writeFileSync(join(dirB, "f.txt"), "from B\n");
+      writeFileSync(join(dirB, "only-b.txt"), "");
+      assert.match(cli(["read", "f.txt"], { cwd: dirA }).stdout, /from A/);
+      assert.match(cli(["read", "f.txt"], { cwd: dirB }).stdout, /from B/);
+      assert.doesNotMatch(cli(["ls", "."], { cwd: dirA }).stdout, /only-b/);
+      assert.match(cli(["ls", "."], { cwd: dirB }).stdout, /only-b/);
+
+      // CLI via daemon = in-process.
+      const viaDaemon = cli(["read", join(dirA, "f.txt")]);
+      const inProc = cli(["read", join(dirA, "f.txt")], { env: { CAVE_TOOLS_DAEMON: "0" } });
+      assert.equal(viaDaemon.stdout, inProc.stdout);
+      assert.equal(viaDaemon.status, inProc.status);
+
+      // Session isolation: A's stub/diff never served to B (same path + sessionId).
+      const shared = join(root, "shared.txt");
+      writeFileSync(shared, Array.from({ length: 50 }, (_, i) => `row ${i}`).join("\n"));
+      const ctx = { sessionId: "same", cwd: root, env: process.env };
+      const clientA = new DaemonClient();
+      const clientB = new DaemonClient();
+      const text = (o) => (assert.ok(o.sent), o.result.content[0].text);
+      assert.match(text(await clientA.call("cave__read", { file_path: shared }, ctx)), /^row 0/);
+      assert.match(text(await clientA.call("cave__read", { file_path: shared }, ctx)), /^<file unchanged/);
+      assert.match(text(await clientB.call("cave__read", { file_path: shared }, ctx)), /^row 0/, "B not stubbed by A");
+      writeFileSync(shared, Array.from({ length: 50 }, (_, i) => (i === 7 ? "changed" : `row ${i}`)).join("\n"));
+      assert.match(text(await clientA.call("cave__read", { file_path: shared }, ctx)), /^\[cave: changed since last read/);
+      const fresh = new DaemonClient();
+      assert.match(text(await fresh.call("cave__read", { file_path: shared }, ctx)), /^row 0/, "new client gets full");
+
+      // No double execution: daemon dies mid-call, client reports lost connection.
+      const marker = join(root, "marker.txt");
+      const killer = new DaemonClient();
+      const pending = killer.call("cave__bash", { command: `echo ran >> ${marker}; sleep 2`, description: "slow" }, ctx);
+      await sleepMs(500);
+      process.kill(daemonPid(), "SIGKILL");
+      const lost = await pending;
+      assert.ok(lost.sent, "call was sent");
+      assert.equal(lost.result.isError, true);
+      assert.equal(lost.result.content[0].text, CONNECTION_LOST_TEXT);
+      await sleepMs(2500);
+      assert.equal(readFileSync(marker, "utf8").trim().split("\n").length, 1, "marker written once");
+      for (const c of [clientA, clientB, fresh, killer]) c.close();
+
+      // Next call after the crash reconnects (stale socket replaced).
+      assert.match(cli(["bash", "echo after-crash"]).stdout, /after-crash/);
+
+      // Idle exit removes the socket.
+      await waitGone(6000);
+      assert.equal(existsSync(paths.socketPath()), false, "socket removed after idle");
+      assert.match(logText(), /shutting down: idle/);
+
+      // Different data dir => different socket; build change => different socket.
+      const keyOf = (env) => spawnSync(process.execPath, ["--input-type=module", "-e",
+        `const p = await import(${JSON.stringify(join(process.cwd(), "dist", "daemon", "paths.js"))}); console.log(p.socketPath())`],
+        { encoding: "utf8", env: { ...process.env, ...env } }).stdout.trim();
+      const base = keyOf({});
+      assert.notEqual(keyOf({ CAVE_TOOLS_DATA_DIR: join(root, "other-data") }), base);
+      const touched = join(process.cwd(), "dist", "profile.js");
+      const before = fsStat(touched);
+      fsUtimes(touched, before.atime, new Date(before.mtimeMs + 5000));
+      try {
+        assert.notEqual(keyOf({}), base, "build change gives new socket");
+      } finally {
+        // Best-effort restore (utimes drops sub-ms precision; a new build id is harmless).
+        fsUtimes(touched, before.atime, before.mtime);
+      }
+
+      // Fallback when the daemon can't start: socket dir is a file.
+      const blocked = join(root, "blocked");
+      writeFileSync(blocked, "");
+      const fb = cli(["bash", "echo fallback-ok"], { env: { XDG_RUNTIME_DIR: blocked } });
+      assert.equal(fb.status, 0, fb.stderr);
+      assert.match(fb.stdout, /fallback-ok/);
+      setEnv({ XDG_RUNTIME_DIR: blocked });
+      const noDaemon = new DaemonClient();
+      assert.deepEqual(await noDaemon.call("cave__bash", { command: "echo x", description: "x" }, ctx), { sent: false });
+
+      // Unsafe socket dir (symlink) with a listener inside: the client must
+      // not connect (it would hand over its env) and must fall back.
+      const { createServer } = await import("node:net");
+      const { symlinkSync } = await import("node:fs");
+      const trapRun = join(root, "trap-run");
+      const trapTarget = join(root, "trap-target");
+      mkdirSync(trapRun);
+      mkdirSync(trapTarget, { mode: 0o700 });
+      symlinkSync(trapTarget, join(trapRun, "cave-tools"));
+      setEnv({ XDG_RUNTIME_DIR: trapRun });
+      let trapped = 0;
+      const trap = createServer((conn) => { trapped++; conn.destroy(); });
+      await new Promise((resolve) => trap.listen(paths.socketPath(), resolve));
+      try {
+        const victim = new DaemonClient();
+        assert.deepEqual(await victim.call("cave__bash", { command: "echo x", description: "x" }, ctx), { sent: false });
+        assert.equal(trapped, 0, "client connected through a symlinked socket dir");
+      } finally {
+        await new Promise((resolve) => trap.close(resolve));
+      }
+      setEnv({ XDG_RUNTIME_DIR: daemonEnv.XDG_RUNTIME_DIR });
+    } finally {
+      cli(["daemon", "stop"]);
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+    console.log("shared daemon tests passed\n");
   }
 
   console.log("All tests passed!");

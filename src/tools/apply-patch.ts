@@ -5,6 +5,7 @@ import type { ToolResult } from "../types.js";
 import { invalidateFileCache, recordEdit } from "../compression/utils.js";
 import { ensureParentDirectory, resolveMutationTarget, toPosixPath } from "../runtime/path.js";
 import { decodeUtf8PreserveBom, joinBom, lockedWrite, sameBytes, writeIfUnchanged } from "../runtime/file-mutation.js";
+import { getCwd } from "../runtime/context.js";
 
 interface UpdateFileChunk {
   old_lines: string[];
@@ -681,7 +682,7 @@ async function applyPlannedChanges(changes: PlannedChange[]): Promise<void> {
     if (change.type === "add") {
       await lockedWrite(change.target, change.content);
       invalidateFileCache(change.target);
-      invalidateFileCache(change.path);
+      invalidateFileCache(path.resolve(getCwd(), change.path));
       recordEdit(change.target);
       continue;
     }
@@ -689,7 +690,7 @@ async function applyPlannedChanges(changes: PlannedChange[]): Promise<void> {
     if (change.type === "delete") {
       await rm(change.target);
       invalidateFileCache(change.target);
-      invalidateFileCache(change.path);
+      invalidateFileCache(path.resolve(getCwd(), change.path));
       continue;
     }
 
@@ -699,7 +700,7 @@ async function applyPlannedChanges(changes: PlannedChange[]): Promise<void> {
     if (change.type === "update") {
       await writeIfUnchanged(change.target, change.sourceBytes, payload);
       invalidateFileCache(change.target);
-      invalidateFileCache(change.path);
+      invalidateFileCache(path.resolve(getCwd(), change.path));
       recordEdit(change.target);
       continue;
     }
@@ -715,15 +716,15 @@ async function applyPlannedChanges(changes: PlannedChange[]): Promise<void> {
     await lockedWrite(change.moveTarget, payload);
     await rm(change.target);
     invalidateFileCache(change.target);
-    invalidateFileCache(change.path);
+    invalidateFileCache(path.resolve(getCwd(), change.path));
     invalidateFileCache(change.moveTarget);
-    invalidateFileCache(change.movePath);
+    invalidateFileCache(path.resolve(getCwd(), change.movePath));
     recordEdit(change.moveTarget);
   }
 }
 
 function relativize(absolute: string): string {
-  const rel = path.relative(process.cwd(), absolute);
+  const rel = path.relative(getCwd(), absolute);
   return rel && !rel.startsWith("..") ? toPosixPath(rel) : toPosixPath(absolute);
 }
 

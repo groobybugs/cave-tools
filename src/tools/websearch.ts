@@ -3,6 +3,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolResult } from "../types.js";
 import { applyBudget } from "../compression/utils.js";
 import { archiveHandle } from "../compression/archive.js";
+import { getEnv } from "../runtime/context.js";
 import { redactSecrets } from "../compression/redact.js";
 
 export const NO_RESULTS = "No search results found. Please try a different query.";
@@ -32,11 +33,11 @@ function checksum(value: string): string {
 }
 
 function truthy(name: string): boolean {
-  return ["1", "true", "yes", "on"].includes(String(process.env[name] || "").toLowerCase());
+  return ["1", "true", "yes", "on"].includes(String(getEnv()[name] || "").toLowerCase());
 }
 
 function envProvider(): Provider | undefined {
-  const value = process.env.CAVE_TOOLS_WEBSEARCH_PROVIDER || process.env.OPENCODE_WEBSEARCH_PROVIDER;
+  const value = getEnv().CAVE_TOOLS_WEBSEARCH_PROVIDER || getEnv().OPENCODE_WEBSEARCH_PROVIDER;
   return value === "exa" || value === "parallel" ? value : undefined;
 }
 
@@ -174,7 +175,7 @@ export const websearchTool: Tool & {
     try {
       const text = provider === "exa"
         ? await callMcp(
-            exaUrl(process.env.EXA_API_KEY),
+            exaUrl(getEnv().EXA_API_KEY),
             "web_search_exa",
             {
               query: input.query,
@@ -196,7 +197,7 @@ export const websearchTool: Tool & {
             },
             {
               "User-Agent": "cave-tools",
-              ...(process.env.PARALLEL_API_KEY ? { Authorization: `Bearer ${process.env.PARALLEL_API_KEY}` } : {}),
+              ...(getEnv().PARALLEL_API_KEY ? { Authorization: `Bearer ${getEnv().PARALLEL_API_KEY}` } : {}),
             },
             input.timeout!,
           );

@@ -4,6 +4,7 @@ import { applyBudget } from "../compression/utils.js";
 import type { ToolResult } from "../types.js";
 import { rgFiles } from "../runtime/ripgrep.js";
 import { resolveExistingDirectory } from "../runtime/path.js";
+import { getCwd } from "../runtime/context.js";
 
 const DEFAULT_LIMIT = 1000;
 
@@ -46,7 +47,7 @@ export const findTool: Tool & {
       searchPath = await resolveExistingDirectory(args.path ? String(args.path) : ".");
     } catch (error) {
       return {
-        content: [{ type: "text", text: `Path not found or not a directory: ${path.resolve(args.path ? String(args.path) : ".")}` }],
+        content: [{ type: "text", text: `Path not found or not a directory: ${path.resolve(getCwd(), args.path ? String(args.path) : ".")}` }],
         isError: true,
       };
     }

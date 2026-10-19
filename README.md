@@ -176,6 +176,16 @@ cave-tools help grep                  # params generated from the tool schema
 - Each call gets a fresh session (no dedup stubs or diffs) unless you pass `--session <id>`.
 - `cave-tools status` stays the savings report; the `cave__status` tool runs as `cave-tools tool status`. `cave-tools tool <name> ...` works for every tool.
 
+### Daemon (opt-in)
+
+Set `CAVE_TOOLS_DAEMON=1` (in the MCP server's env and/or your shell) to run every tool call in one shared background process instead of in each MCP server or CLI process. Unset or `0` keeps today's in-process behavior.
+
+- The first call spawns `cave-tools daemon start` detached; later calls reuse it. If it can't be reached before a call is sent, the call runs in-process instead. If the connection drops after a call was sent, the call returns `daemon connection lost; command may or may not have run` and is never re-run.
+- Socket: `$XDG_RUNTIME_DIR/cave-tools/daemon-<key>.sock` (else `<data dir>/run/`, or a private `/tmp/cave-tools-<uid>/` when the path would be too long), directory `0700`, socket `0600`; a named pipe on Windows. `<key>` covers the build and the data/config dirs, so a rebuild or another `CAVE_TOOLS_DATA_DIR` gets its own daemon.
+- The daemon exits after `CAVE_TOOLS_DAEMON_IDLE_MS` (default 10 min) with no clients and no running calls, and removes its socket. Log: `<data dir>/daemon.log`.
+- Per client: each call runs with the caller's cwd and environment (PATH, tokens, `CAVE_TOOLS_MODE`, …); relative paths resolve against the caller's cwd; read stubs, re-read diffs and job listings are namespaced per connection; stats get one row per client process.
+- `cave-tools daemon status` / `cave-tools daemon stop`.
+
 ## Usage Guidance For Agents
 
 Use this instruction block in agent rules:

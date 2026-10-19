@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import { getEnv } from "../runtime/context.js";
 
 export function detectEol(content: string): "\r\n" | "\n" {
   return content.includes("\r\n") ? "\r\n" : "\n";
@@ -225,7 +226,7 @@ export function verifyRangeChecksum(
 
 /** Active cave-tools intensity from env (off|hint|enforce|strict). Default enforce. */
 export function activeEditMode(): "off" | "hint" | "enforce" | "strict" {
-  const raw = (process.env.CAVE_TOOLS_MODE || "enforce").toLowerCase().trim();
+  const raw = (getEnv().CAVE_TOOLS_MODE || "enforce").toLowerCase().trim();
   if (raw === "off" || raw === "hint" || raw === "enforce" || raw === "strict") return raw;
   return "enforce";
 }

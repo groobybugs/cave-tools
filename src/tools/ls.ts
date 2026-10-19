@@ -4,6 +4,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { applyBudget } from "../compression/utils.js";
 import type { ToolResult } from "../types.js";
 import { containsPath, resolveExistingDirectory } from "../runtime/path.js";
+import { getCwd } from "../runtime/context.js";
 
 const DEFAULT_LIMIT = 500;
 
@@ -32,7 +33,7 @@ export const lsTool: Tool & {
     },
   },
   handler: async (args) => {
-    const requested = path.resolve(args.path ? String(args.path) : ".");
+    const requested = path.resolve(getCwd(), args.path ? String(args.path) : ".");
     const limit = Math.max(1, Number(args.limit) || DEFAULT_LIMIT);
     const offset = Math.max(1, Number(args.offset) || 1);
 

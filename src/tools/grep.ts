@@ -6,6 +6,7 @@ import { applyBudget } from "../compression/utils.js";
 import { collapseRepetition } from "../compression/repetition.js";
 import { archiveHandle } from "../compression/archive.js";
 import { readLineWindow, rgGrep } from "../runtime/ripgrep.js";
+import { getCwd } from "../runtime/context.js";
 
 const DEFAULT_LIMIT = 100;
 const PER_FILE_LINE_CAP = 10;
@@ -58,7 +59,7 @@ export const grepTool: Tool & {
     const effectiveLimit = Math.max(1, (args.limit as number) ?? DEFAULT_LIMIT);
 
     try {
-      const searchPath = path.resolve(searchDir);
+      const searchPath = path.resolve(getCwd(), searchDir);
       let isDirectory: boolean;
       try {
         const s = await stat(searchPath);

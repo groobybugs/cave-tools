@@ -5,27 +5,8 @@ import {
   ListToolsRequestSchema,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { readTool } from "./tools/read.js";
-import { bashTool } from "./tools/bash.js";
-import { bashStartTool } from "./tools/bash-start.js";
-import { bashStatusTool } from "./tools/bash-status.js";
-import { bashStopTool } from "./tools/bash-stop.js";
-import { writeTool } from "./tools/write.js";
-import { invalidateTool } from "./tools/invalidate.js";
-import { compressTool } from "./tools/compress.js";
-import { statusTool } from "./tools/status.js";
-import { configureTool } from "./tools/configure.js";
-import { grepTool } from "./tools/grep.js";
-import { findTool } from "./tools/find.js";
-import { lsTool } from "./tools/ls.js";
-import { editTool } from "./tools/edit.js";
-import { applyPatchTool } from "./tools/apply-patch.js";
-import { websearchTool } from "./tools/websearch.js";
-import { webfetchTool } from "./tools/webfetch.js";
-import { callTool } from "./dispatch.js";
-import { isSubagentContext, pruneDeadSessions } from "./compression/utils.js";
-import { pruneJobs } from "./runtime/jobs.js";
-import { cleanupArchives } from "./compression/archive.js";
+import { filterByProfile } from "./profile.js";
+import { daemonEnabled, getDaemonClient } from "./daemon-client.js";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -47,39 +28,15 @@ const server = new Server(
   },
 );
 
-const tools: Tool[] = [
-  readTool,
-  bashTool,
-  bashStartTool,
-  bashStatusTool,
-  bashStopTool,
-  grepTool,
-  findTool,
-  lsTool,
-  writeTool,
-  invalidateTool,
-  editTool,
-  applyPatchTool,
-  websearchTool,
-  webfetchTool,
-  compressTool,
-  statusTool,
-  configureTool,
-];
-
-// CAVE_TOOLS_PROFILE=standard (default) hides rarely used tools from
-// tools/list to cut per-session schema tokens. The server still dispatches
-// them by name, but clients only expose listed tools, so agents need
-// CAVE_TOOLS_PROFILE=full to use them.
-const STANDARD_HIDDEN = new Set(["cave__configure", "cave__compress", "cave__status"]);
-
-export function listedTools(profile = process.env.CAVE_TOOLS_PROFILE): Tool[] {
-  if ((profile ?? "").trim().toLowerCase() === "full") return tools;
-  return tools.filter((tool) => !STANDARD_HIDDEN.has(tool.name));
+// Tool modules and dispatch load lazily: with CAVE_TOOLS_DAEMON=1 this
+// process is a thin client and only loads them when falling back.
+async function localTools(): Promise<Tool[]> {
+  return (await import("./tool-list.js")).allTools;
 }
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: listedTools() };
+  const tools = (daemonEnabled() ? await getDaemonClient().list() : null) ?? (await localTools());
+  return { tools: filterByProfile(tools) };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -92,17 +49,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const sessionId = String(
     (request.params as { _meta?: { sessionID?: unknown } })._meta?.sessionID ?? "default",
   );
-  return callTool(name, args as Record<string, unknown> | undefined, { sessionId });
+  const toolArgs = args as Record<string, unknown> | undefined;
+  if (daemonEnabled()) {
+    const outcome = await getDaemonClient().call(name, toolArgs, {
+      sessionId,
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    if (outcome.sent) return outcome.result;
+  }
+  const { callTool } = await import("./dispatch.js");
+  return callTool(name, toolArgs, { sessionId });
 });
 
 export async function startServer(): Promise<void> {
-  // Probe env once so unknown Claude Code / subagent keys log at boot.
-  void isSubagentContext();
-  await pruneDeadSessions();
-  pruneJobs();
-  // Archive retention (24h). Fire-and-forget: a large first-run backlog must
-  // not delay startup, and failures are ignored.
-  void cleanupArchives().catch(() => {});
+  // With the daemon, housekeeping runs there; this process stays thin.
+  if (!daemonEnabled()) {
+    const { isSubagentContext, pruneDeadSessions } = await import("./compression/utils.js");
+    const { pruneJobs } = await import("./runtime/jobs.js");
+    const { cleanupArchives } = await import("./compression/archive.js");
+    // Probe env once so unknown Claude Code / subagent keys log at boot.
+    void isSubagentContext();
+    await pruneDeadSessions();
+    pruneJobs();
+    // Archive retention (24h). Fire-and-forget: a large first-run backlog must
+    // not delay startup, and failures are ignored.
+    void cleanupArchives().catch(() => {});
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Cave Tools MCP server running on stdio");

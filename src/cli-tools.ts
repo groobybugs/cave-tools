@@ -2,6 +2,7 @@ import { randomBytes } from "crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { callTool, isToolName, loadTool, TOOL_NAMES, type ToolDefinition } from "./dispatch.js";
 import { flushStats, suppressSubagentEnvLog } from "./compression/utils.js";
+import { daemonEnabled, getDaemonClient, type CallOutcome } from "./daemon-client.js";
 
 // `cave-tools <tool> [positional...] [--prop value...]`: runs one MCP tool
 // in-process. Flags come from the tool's inputSchema.
@@ -268,7 +269,12 @@ export async function runToolCommand(short: string | undefined, argv: string[]):
   const sessionId = parsed.sessionId ?? `cli-${process.pid}-${randomBytes(4).toString("hex")}`;
   let result: CallToolResult;
   try {
-    result = await callTool(name, parsed.args, { sessionId });
+    let outcome: CallOutcome = { sent: false };
+    if (daemonEnabled()) {
+      outcome = await getDaemonClient().call(name, parsed.args, { sessionId, cwd: process.cwd(), env: process.env });
+    }
+    // In-process unless the daemon actually received the call.
+    result = outcome.sent ? outcome.result : await callTool(name, parsed.args, { sessionId });
   } catch (error) {
     flushStats();
     finish(process.stderr, `cave-tools ${short}: ${error instanceof Error ? error.message : String(error)}`, 1);

@@ -3,6 +3,8 @@
 // that should be treated as a match for `find`. The driver tries replacers in
 // order (exact first, fuzziest last) and uses the first usable candidate.
 
+import { getEnv } from "../runtime/context.js";
+
 type Replacer = (content: string, find: string) => Generator<string>;
 
 // Similarity thresholds for block anchor fallback matching (from opencode)
@@ -498,7 +500,7 @@ export function findReplacement(
   }
 
   // Tier 4 (cave extension): legacy fuzzy chain.
-  if (process.env.CAVE_TOOLS_FUZZY_EDIT === "0") {
+  if (getEnv().CAVE_TOOLS_FUZZY_EDIT === "0") {
     return { error: "not-found: Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings. Re-read the file and provide the full exact oldString." };
   }
 

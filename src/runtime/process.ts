@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { getEnv } from "./context.js";
 
 export interface RunCommandOptions {
   cwd?: string;
@@ -24,7 +25,7 @@ export interface RunCommandResult {
 }
 
 export const defaultShell = (): string =>
-  process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/sh";
+  process.platform === "win32" ? (getEnv().COMSPEC ?? "cmd.exe") : "/bin/sh";
 
 export function compactOutput(stdout: string, stderr: string): string {
   if (stdout && stderr) return `${stdout}\n\nstderr:\n${stderr}`;
@@ -159,7 +160,7 @@ export function startDurableBackgroundCommand(
     ],
     {
       cwd: options.cwd,
-      env: process.env,
+      env: getEnv(),
       stdio: "ignore",
       detached,
       windowsHide: process.platform === "win32",
@@ -200,7 +201,7 @@ export function startBackgroundCommand(
   const proc = spawn(command, [], {
     shell: options.shell ?? defaultShell(),
     cwd: options.cwd,
-    env: process.env,
+    env: getEnv(),
     stdio: ["ignore", options.logFd, options.logFd],
     detached,
     windowsHide: process.platform === "win32",
@@ -233,7 +234,7 @@ export function runCommand(command: string, options: RunCommandOptions): Promise
     const proc = spawn(command, [], {
       shell: options.shell ?? defaultShell(),
       cwd: options.cwd,
-      env: process.env,
+      env: getEnv(),
       stdio: ["ignore", "pipe", "pipe"],
       detached,
       windowsHide: process.platform === "win32",

@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
+import { caveToolsDataDir } from "./data-dir.js";
 
 export interface ToolSavings {
   calls: number;
@@ -149,13 +150,7 @@ interface ArchiveRow {
   content_path: string;
 }
 
-export function caveToolsDataDir(): string {
-  // Override with CAVE_TOOLS_DATA_DIR. This directory holds SQLite stats,
-  // archives, and jobs — not the in-memory file-content cache. Parallel MCP
-  // processes share stats here but never share read-body cache (correctness).
-  const override = process.env.CAVE_TOOLS_DATA_DIR?.trim();
-  return override || join(homedir(), ".cache", "cave-tools");
-}
+export { caveToolsDataDir };
 
 export function sessionsDir(): string {
   return join(caveToolsDataDir(), "sessions");
