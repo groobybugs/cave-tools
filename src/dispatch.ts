@@ -2,6 +2,7 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import path from "path";
 import type { ToolResult } from "./types.js";
 import { runWithContext, type CallContext } from "./runtime/context.js";
+import { observeToolCall, setKnownToolNames } from "./runtime/tool-errors.js";
 
 export type { CallContext } from "./runtime/context.js";
 
@@ -36,6 +37,11 @@ const loaders: Record<string, () => Promise<ToolDefinition>> = {
 const SESSION_TOOLS = new Set(["cave__read", "cave__bash_start", "cave__bash_status", "cave__bash_stop"]);
 
 export const TOOL_NAMES = Object.keys(loaders);
+
+// Fixed allowlist for the error log: raw caller-supplied tool names are
+// never persisted (they could be secrets); unknown names log as
+// "unknown_tool".
+setKnownToolNames(TOOL_NAMES);
 
 export function isToolName(name: string): boolean {
   return Object.prototype.hasOwnProperty.call(loaders, name);
@@ -94,12 +100,59 @@ export async function callTool(
     env: partial.env ?? process.env,
     clientId: partial.clientId ?? "local",
   };
-  const tool = await loadTool(name);
+  const startedAt = Date.now();
   const namespace = ctx.sessionNamespace ?? ctx.clientId;
   const sessionId = namespace === "local" ? ctx.sessionId : `${namespace}:${ctx.sessionId}`;
+  let tool: ToolDefinition;
+  try {
+    tool = await loadTool(name);
+  } catch (error) {
+    // Unknown tool: no handler ran. Observe with the same caller context
+    // (env + namespaced session id) as normal failures, so a daemon
+    // client's CAVE_TOOLS_ERROR_LOG=0 is honored here too. Throw unchanged.
+    runWithContext({ ...ctx, sessionId }, () =>
+      observeToolCall({ tool: name, args, schemaProps: [], sessionId, startedAt, env: ctx.env, thrown: error }),
+    );
+    throw error;
+  }
   const normalized = normalizePaths(name, args, ctx.cwd);
   const toolArgs = SESSION_TOOLS.has(name)
     ? { ...(normalized ?? {}), __sessionId: sessionId }
     : (normalized as Record<string, unknown>);
-  return runWithContext({ ...ctx, sessionId }, () => tool.handler(toolArgs)) as Promise<CallToolResult>;
+  const schemaProps =
+    tool.inputSchema !== null &&
+    typeof tool.inputSchema === "object" &&
+    (tool.inputSchema as { properties?: unknown }).properties !== null &&
+    typeof (tool.inputSchema as { properties?: unknown }).properties === "object"
+      ? Object.keys((tool.inputSchema as { properties: Record<string, unknown> }).properties)
+      : [];
+  // observeToolCall is best-effort and never mutates results: soft (returned
+  // isError) and thrown outcomes are logged, successes are ignored, and
+  // both result and throw behavior stay exactly as before.
+  return runWithContext({ ...ctx, sessionId }, async () => {
+    try {
+      const result = (await tool.handler(toolArgs)) as CallToolResult;
+      observeToolCall({
+        tool: name,
+        args: toolArgs,
+        schemaProps,
+        sessionId,
+        startedAt,
+        env: ctx.env,
+        result,
+      });
+      return result;
+    } catch (error) {
+      observeToolCall({
+        tool: name,
+        args: toolArgs,
+        schemaProps,
+        sessionId,
+        startedAt,
+        env: ctx.env,
+        thrown: error,
+      });
+      throw error;
+    }
+  });
 }

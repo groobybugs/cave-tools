@@ -15,7 +15,7 @@ import {
 } from "../compression/utils.js";
 import { getSnapshot, rememberSnapshot } from "../compression/snapshots.js";
 import { unifiedDiff } from "../compression/diff.js";
-import { formatNumberedLine, rangeChecksum } from "./line-range.js";
+import { formatNumberedLine, rangeChecksum, toLfLines } from "./line-range.js";
 
 import { formatSignatures } from "../compression/signatures.js";
 import { aggressiveCompress } from "../compression/aggressive.js";
@@ -73,13 +73,19 @@ async function sniffImageMime(filePath: string, ext: string): Promise<string | u
   }
 }
 
-async function readUtf8Strict(filePath: string): Promise<string> {
+async function readUtf8StrictSnapshot(
+  filePath: string,
+): Promise<{ content: string; contentHash: string }> {
   const bytes = await readFile(filePath);
+  let content: string;
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
     throw new Error(`File is not valid UTF-8: ${filePath}`);
   }
+  // Hash the original bytes (BOM included) so the numbered-read footer agrees
+  // with cave__edit's expected_hash, which hashes loaded file bytes.
+  return { content, contentHash: hashContent(bytes) };
 }
 
 // Extensions that are always binary; reject before attempting a utf-8 decode.
@@ -342,11 +348,11 @@ export const readTool: Tool & {
 
         // SVG: send as text (it's just XML), keeps the image route for raster only.
         if (ext === ".svg") {
-          const svg = await readUtf8Strict(filePath);
+          const { content: svg, contentHash: svgHash } = await readUtf8StrictSnapshot(filePath);
           await updateFileCache(filePath, sessionId, {
             deliveryKey: mediaDeliveryKey,
             content: svg,
-            hash: hashContent(svg),
+            hash: svgHash,
             mtimeMs: imageStat.mtimeMs,
             emittedChars: svg.length,
           });
@@ -462,8 +468,7 @@ export const readTool: Tool & {
       const prev = getSnapshot(sessionId, filePath);
       if (prev) {
         try {
-          const content = await readUtf8Strict(filePath);
-          const contentHash = hashContent(content);
+          const { content, contentHash } = await readUtf8StrictSnapshot(filePath);
           if (contentHash !== prev.hash) {
             const sel = selectLines(content.split("\n"), 1, limit, false);
             const diff = !sel.truncated && sel.body === content
@@ -491,8 +496,7 @@ export const readTool: Tool & {
 
     if (shouldForceFull(filePath)) {
       try {
-          const content = await readUtf8Strict(filePath);
-          const contentHash = hashContent(content);
+          const { content, contentHash } = await readUtf8StrictSnapshot(filePath);
           const lines = content.split("\n");
           const sel = selectLines(lines, offset, limit, lineNumbers);
           if (!sel.body && offset !== 1) return { content: [{ type: "text", text: `Offset ${offset} is out of range` }], isError: true };
@@ -533,8 +537,7 @@ export const readTool: Tool & {
     }
 
     try {
-      const content = await readUtf8Strict(filePath);
-      const contentHash = hashContent(content);
+      const { content, contentHash } = await readUtf8StrictSnapshot(filePath);
 
       if (mode === "aggressive") {
         const compressedContent = aggressiveCompress(content, ext);
@@ -590,7 +593,7 @@ export const readTool: Tool & {
         const first = Math.max(1, offset);
         const last = sel.lastReadLine;
         const windowCs =
-          last >= first ? rangeChecksum(lines, first, last) : "";
+          last >= first ? rangeChecksum(toLfLines(content), first, last) : "";
         outText +=
           `\n--- cave_edit_meta ---\n` +
           `path: ${filePath}\n` +

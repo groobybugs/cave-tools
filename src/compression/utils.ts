@@ -18,6 +18,7 @@ import type {
 } from "../storage/db.js";
 import { redactSecrets } from "./redact.js";
 import { getClientId, getContext, getEnv } from "../runtime/context.js";
+import { registerReadPathCompat } from "../runtime/read-registry.js";
 
 export type { LifetimeStats, PersistedStats } from "../storage/db.js";
 
@@ -426,6 +427,12 @@ export async function isFileUnchanged(
   const wouldEmit = entry.deliveries.get(deliveryKey);
   if (wouldEmit === undefined) return false;
 
+  // updateFileCache publishes the in-memory entry before its compatibility
+  // registry append resolves. A concurrent read can therefore reach this
+  // cache-hit stub while that append is still pending; await the same
+  // coalesced append so the strict-guard barrier also covers stubs.
+  await registerReadPathCompat(filePath);
+
   statsBucket().cacheHits++;
   statsBucket().dedupSavedChars += Math.max(0, wouldEmit - READ_STUB.length);
   void persistStats();
@@ -486,6 +493,11 @@ export async function updateFileCache(
   void persistStats();
   const capturedPath = filePath;
   const capturedHash = hash;
+  // Strict-mode built-in guards (OpenCode/Claude/Hermes) still authorize from
+  // the flat text registry. Await that append so a successful read is a
+  // deterministic barrier for an immediately following built-in edit/write.
+  // Advisory: registerReadPathCompat never rejects.
+  await registerReadPathCompat(capturedPath);
   setImmediate(() => {
     try {
       registerDbReadPath(capturedPath, capturedHash);

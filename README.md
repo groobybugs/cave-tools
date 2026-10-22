@@ -177,6 +177,58 @@ cave-tools help grep                  # params generated from the tool schema
 - Each call gets a fresh session (no dedup stubs or diffs). `--session <id>` reuses read state across separate CLI calls only with the daemon on (`CAVE_TOOLS_DAEMON=1`); without it each process starts empty.
 - `cave-tools status` stays the savings report; the `cave__status` tool runs as `cave-tools tool status`. `cave-tools tool <name> ...` works for every tool.
 
+### Error diagnostics (`cave-tools errors`)
+
+Tool calls that return `isError` or throw are recorded in a local,
+best-effort error log at the shared dispatch layer. Successful calls are
+never recorded, logging never changes tool results or throws, and there is
+no guarantee every failure is durably recorded (a busy or unwritable store
+only drops records).
+
+```bash
+cave-tools errors              # recent errors + counts by code and tool
+cave-tools errors --limit 50   # up to 50 recent records (max 500)
+```
+
+- Location: `tool_errors` table in `<data dir>/cave-tools.db` (data dir
+  `0700`, db file pre-created `0600`, existing files tightened without
+  following symlinks; symlinked or non-regular db paths refuse logging.
+  `<data dir>` defaults to `~/.cache/cave-tools`, override with
+  `CAVE_TOOLS_DATA_DIR`).
+- Stored per event: timestamp, event id, tool name (fixed allowlist —
+  anything else stores as `unknown_tool`), outcome (`soft` for a returned
+  `isError`, `thrown` for a handler throw), a stable finite reason code
+  (`invalid_args`, `not_found`, `unreadable`, `stale_hash`, `stale_range`,
+  `stale_write`, `not_unique`, `overlap`, `conflict`, `exec_failed`,
+  `upstream`, `internal`, `unknown`), `elapsedMs`, mode (finite
+  `off|hint|enforce|strict`, else `default` — never guessed), operation
+  shape, batch index (parsed from anchored `edits[N]` prefixes only),
+  hashed session/file correlation (truncated SHA-256, not reversible),
+  allowlisted argument keys plus their JS types/counts only, and the
+  allowlisted thrown error kind.
+- Never stored: raw error messages, stacks, prompts, tool result bodies,
+  file contents (`old_string`/`new_string`/`content`/`patchText`),
+  commands, env values, full paths, arbitrary unknown argument key
+  strings, or raw caller-supplied tool/mode strings. Reason codes are
+  classified transiently from anchored fixed prefixes first (so content
+  windows embedded later in a message cannot change the code); anything
+  else is `unknown`. Agent attribution is never guessed: `unknown` unless
+  the supported coarse subagent signal fires.
+- Retention: 7 days and 5000 rows max, enforced on successful flush. The
+  in-memory queue is bounded (256, oldest dropped first) with one batch
+  (≤50 rows) per `setImmediate` turn, no timers, no retry spin, and zero
+  lock wait. Only bounded in-memory work runs on the call path; SQLite
+  I/O happens on later event-loop turns, so expect a small best-effort
+  delay (and possible loss under lock or shutdown), never a stall. The
+  CLI exit funnel flushes explicitly, so short-lived `cave-tools` calls
+  still persist their last failure.
+- Disable policy (OR): a call is dropped when the caller env disables
+  logging (per-client override, so a daemon client's
+  `CAVE_TOOLS_ERROR_LOG=0` always wins for that client) or when the
+  process env disables it at flush time. A record gated-in at event time
+  may still be dropped if the process disables before flush; a disabled
+  call is never recorded.
+
 ### Daemon (opt-in)
 
 Set `CAVE_TOOLS_DAEMON=1` (in the MCP server's env and/or your shell) to run every tool call in one shared background process instead of in each MCP server or CLI process. Unset or `0` keeps today's in-process behavior.
@@ -556,6 +608,16 @@ Invalidate cache after edits:
 ```json
 { "file_paths": ["/absolute/path/to/file.ts"] }
 ```
+
+## Testing
+
+```bash
+pnpm test                  # build once, then test.mjs + all dedicated regression scripts
+pnpm test:reliability      # build once, then only the dedicated regression scripts
+node scripts/run-tests.mjs --list
+```
+
+Both commands build the project once before the runner. Integration scripts require fresh `dist/`, so standalone runs must build first; they fail on missing or stale output instead of testing old code. Pure helper scripts compile their isolated owned closure instead. `scripts/run-tests.mjs` runs children sequentially and gives every child its own `CAVE_TOOLS_DATA_DIR` and `CLAUDE_CONFIG_DIR` inside one private `mkdtemp` root (`/tmp/opencode` on Linux, system temp elsewhere). It also sets `CAVE_TOOLS_DAEMON=0` and removes only that root on exit, so tests never write to a live cache, logs, jobs, or `~/.claude` read registry. A missing listed script or any child failure stops the run and propagates the exit code.
 
 ## Requirements
 

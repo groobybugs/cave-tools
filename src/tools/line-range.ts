@@ -15,6 +15,65 @@ export function fromLfLines(lines: string[], eol: "\r\n" | "\n"): string {
   return eol === "\r\n" ? body.replace(/\n/g, "\r\n") : body;
 }
 
+type LineEol = "" | "\n" | "\r\n";
+
+/** One line of content plus its own terminator ("" = file-final, no newline). */
+interface LineSeg {
+  text: string;
+  eol: LineEol;
+}
+
+/**
+ * Split content into per-line segments keeping each line's terminator.
+ * Line count is identical to toLfLines(content).length: lone \r counts as a
+ * line break (normalized to "\n"), matching toLfLines.
+ */
+function parseLineSegs(content: string): LineSeg[] {
+  const segs: LineSeg[] = [];
+  const re = /[^\r\n]*(?:\r\n|\n|\r|$)/g;
+  for (;;) {
+    const m = re.exec(content);
+    if (m === null) break;
+    const raw = m[0];
+    if (raw.length === 0) {
+      // Empty tail match: real only as the terminal sentinel of a file that
+      // ends with a line break (or for empty content itself).
+      if (segs.length === 0 || segs[segs.length - 1].eol !== "") {
+        segs.push({ text: "", eol: "" });
+      }
+      break;
+    }
+    if (raw.endsWith("\r\n")) segs.push({ text: raw.slice(0, -2), eol: "\r\n" });
+    else if (raw.endsWith("\n") || raw.endsWith("\r")) segs.push({ text: raw.slice(0, -1), eol: "\n" });
+    else segs.push({ text: raw, eol: "" });
+  }
+  return segs;
+}
+
+/** File fallback EOL: majority of present terminators; ties/empty -> "\n". */
+function dominantEol(segs: LineSeg[]): "\n" | "\r\n" {
+  let crlf = 0;
+  let lf = 0;
+  for (const s of segs) {
+    if (s.eol === "\r\n") crlf++;
+    else if (s.eol === "\n") lf++;
+  }
+  return crlf > lf ? "\r\n" : "\n";
+}
+
+function renderSegs(segs: LineSeg[]): string {
+  let out = "";
+  for (const s of segs) out += s.text + s.eol;
+  return out;
+}
+
+/** Split replacement text into LF lines (same semantics as before: a trailing
+ * newline yields a trailing "" entry, i.e. an extra empty line). */
+function splitReplacementLines(replacement: string): string[] {
+  const adapted = replacement.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  return adapted.length === 0 ? [] : adapted.split("\n");
+}
+
 /** Short stable tag for one line (trueline-style fingerprint). */
 export function lineTag(line: string): string {
   return createHash("sha1").update(line, "utf8").digest("hex").slice(0, 2);
@@ -64,7 +123,14 @@ export function formatNumberedWindow(
 /**
  * Replace inclusive 1-based lines [startLine, endLine] with replacement.
  * Insert before N: startLine=N, endLine=N-1.
- * Append after last: startLine=lineCount+1, endLine=lineCount.
+ * Append after last: startLine=lineCount+1, endLine=lineCount. On a file that
+ * ends with a newline, lineCount includes the terminal empty sentinel and
+ * lineCount+1 folds to insert-before-sentinel, so the final newline is kept.
+ * Only touched lines change: every other line keeps its exact bytes and
+ * terminator (no whole-file EOL normalization). Replacement lines take the
+ * terminator of the region line they replace (position-wise; extras take the
+ * region's last line ending, inserts take the following line's ending),
+ * falling back to the file's dominant EOL.
  */
 export function applyRangeEdit(
   content: string,
@@ -81,9 +147,8 @@ export function applyRangeEdit(
     return { ok: false, error: `start_line must be >= 1 (got ${startLine})` };
   }
 
-  const eol = detectEol(content);
-  const lines = toLfLines(content);
-  const lineCount = lines.length;
+  const segs = parseLineSegs(content);
+  const lineCount = segs.length;
   const isInsert = endLine === startLine - 1;
 
   if (isInsert) {
@@ -114,18 +179,61 @@ export function applyRangeEdit(
     }
   }
 
-  const adapted = replacement.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const newLines = adapted.length === 0 ? [] : adapted.split("\n");
+  // Append at lineCount+1 on a trailing-newline file targets the terminal
+  // empty sentinel (not content): fold to insert-before-sentinel so the
+  // result keeps its final newline instead of gaining a blank line.
+  let s = startLine;
+  let e = endLine;
+  if (
+    isInsert &&
+    s === lineCount + 1 &&
+    lineCount >= 1 &&
+    segs[lineCount - 1].text === "" &&
+    segs[lineCount - 1].eol === ""
+  ) {
+    s = lineCount;
+    e = lineCount - 1;
+  }
+  const ins = e === s - 1;
 
-  const replacedSlice = isInsert ? [] : lines.slice(startLine - 1, endLine);
-  const replacedChars = replacedSlice.join("\n").length;
+  const newTexts = splitReplacementLines(replacement);
 
-  const before = lines.slice(0, startLine - 1);
-  const after = isInsert ? lines.slice(startLine - 1) : lines.slice(endLine);
-  const next = before.concat(newLines, after);
+  const region = ins ? [] : segs.slice(s - 1, e);
+  const replacedChars = region
+    .map((r) => r.text)
+    .join("\n").length;
+
+  const fallback = dominantEol(segs);
+  const following = ins ? segs[s - 1] : undefined;
+  const newSegs: LineSeg[] = newTexts.map((t, i) => {
+    let le: LineEol;
+    if (ins) {
+      le = following && following.eol !== "" ? following.eol : fallback;
+    } else if (i < region.length) {
+      le = region[i].eol !== "" ? region[i].eol : fallback;
+    } else {
+      const last = region[region.length - 1];
+      le = last.eol !== "" ? last.eol : fallback;
+    }
+    return { text: t, eol: le };
+  });
+
+  const before = segs.slice(0, s - 1);
+  const after = ins ? segs.slice(s - 1) : segs.slice(e);
+  const next = before.concat(newSegs, after);
+  // Preserve the file-final newline state when the op consumed the original
+  // final segment (append/replace/delete through end of file).
+  if (after.length === 0 && next.length > 0) {
+    next[next.length - 1].eol = segs[segs.length - 1].eol;
+  }
+  // A former file-final line that is now followed by more lines takes the
+  // file fallback EOL (untouched lines already carry their own terminators).
+  for (let i = 0; i + 1 < next.length; i++) {
+    if (next[i].eol === "") next[i].eol = fallback;
+  }
   return {
     ok: true,
-    content: fromLfLines(next, eol),
+    content: renderSegs(next),
     lineCount,
     replacedChars,
   };
@@ -135,6 +243,10 @@ export function applyRangeEdit(
  * Move inclusive lines [startLine, endLine] to insert before insertBefore
  * (1-based). insertBefore may equal lineCount+1 to move to end.
  * Computed on original line numbers (cut first, then insert).
+ * The terminal empty sentinel of a trailing-newline file is not movable
+ * content: ranges including it are rejected, and insert_before lineCount+1
+ * folds to end-of-content so the final newline survives. The moved block
+ * carries its original terminators; untouched lines keep exact bytes.
  */
 export function applyMoveLines(
   content: string,
@@ -151,9 +263,8 @@ export function applyMoveLines(
     return { ok: false, error: "move requires end_line >= start_line >= 1" };
   }
 
-  const eol = detectEol(content);
-  const lines = toLfLines(content);
-  const lineCount = lines.length;
+  const segs = parseLineSegs(content);
+  const lineCount = segs.length;
   const blockLen = endLine - startLine + 1;
 
   if (endLine > lineCount) {
@@ -173,19 +284,48 @@ export function applyMoveLines(
     };
   }
 
-  const block = lines.slice(startLine - 1, endLine);
-  const movedChars = block.join("\n").length;
-  const without = lines.slice(0, startLine - 1).concat(lines.slice(endLine));
+  // The terminal empty sentinel is the trailing newline, not content:
+  // folding it into the block (or landing on it) silently corrupts the
+  // final newline, so reject it with a clear error instead.
+  const hasSentinel =
+    lineCount >= 1 &&
+    segs[lineCount - 1].text === "" &&
+    segs[lineCount - 1].eol === "";
+  if (hasSentinel && endLine === lineCount) {
+    return {
+      ok: false,
+      error: `cannot move line ${lineCount}: it is the trailing newline, not content (move lines 1..${lineCount - 1})`,
+    };
+  }
 
-  // Destination index into `without` (1-based insert-before).
-  let dest = insertBefore;
+  // Work on real content lines; the sentinel (if any) is re-attached after.
+  const w = hasSentinel ? segs.slice(0, lineCount - 1) : segs.slice();
+  const block = w.slice(startLine - 1, endLine).map((s) => ({ ...s }));
+  const movedChars = block
+    .map((b) => b.text)
+    .join("\n").length;
+  const without = w.slice(0, startLine - 1).concat(w.slice(endLine));
+
+  // Destination index into `without` (1-based insert-before). insert_before
+  // lineCount+1 on a trailing-newline file means end-of-content: the
+  // sentinel is not addressable, so clamp to it.
+  const dest0 = hasSentinel ? Math.min(insertBefore, w.length + 1) : insertBefore;
+  let dest = dest0;
   if (insertBefore > endLine) {
-    dest = insertBefore - blockLen;
+    dest = dest0 - blockLen;
   }
   // insertBefore <= startLine: dest stays insertBefore
 
-  const next = without.slice(0, dest - 1).concat(block, without.slice(dest - 1));
-  return { ok: true, content: fromLfLines(next, eol), movedChars };
+  const fallback = dominantEol(segs);
+  const nextW = without.slice(0, dest - 1).concat(block, without.slice(dest - 1));
+  const next = hasSentinel ? nextW.concat([{ text: "", eol: "" }]) : nextW;
+  for (let i = 0; i + 1 < next.length; i++) {
+    if (next[i].eol === "") next[i].eol = fallback;
+  }
+  if (!hasSentinel && next.length > 0) {
+    next[next.length - 1].eol = "";
+  }
+  return { ok: true, content: renderSegs(next), movedChars };
 }
 
 export function verifyRangeChecksum(

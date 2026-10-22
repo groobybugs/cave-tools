@@ -442,6 +442,10 @@ if (args[0] === "mcp" || args.length === 0) {
     console.error("Usage: cave-tools daemon [start|stop|status]");
     process.exit(2);
   }
+} else if (args[0] === "errors") {
+  void import("./runtime/tool-errors-cli.js").then(({ runErrorsCommand }) =>
+    runErrorsCommand(args.slice(1)).then((code) => process.exit(code)),
+  );
 } else if (args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
   void import("./cli-tools.js").then(({ runHelpCommand }) => runHelpCommand(args[1]));
 } else if (args[0] === "tool") {
@@ -450,6 +454,6 @@ if (args[0] === "mcp" || args.length === 0) {
 } else if (isToolName(`cave__${args[0]}`)) {
   void import("./cli-tools.js").then(({ runToolCommand }) => runToolCommand(args[0], args.slice(1)));
 } else {
-  console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]|jobs [kill <id> [signal]|log <id> [lines]]|bins|daemon [start|stop|status]|help [tool]|<tool> [args...]|tool <tool> [args...]]");
+    console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]|errors [--limit N]|jobs [kill <id> [signal]|log <id> [lines]]|bins|daemon [start|stop|status]|help [tool]|<tool> [args...]|tool <tool> [args...]]");
   process.exit(2);
 }

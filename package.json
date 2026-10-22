@@ -1,6 +1,6 @@
 {
   "name": "@groobybugs/cave-tools",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "A caveman needs their tools. Token-optimized MCP server providing drop-in replacements for any agent.",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,7 +24,8 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "check": "tsc --noEmit",
-    "test": "pnpm run build && node test.mjs",
+    "test": "pnpm run build && node scripts/run-tests.mjs",
+    "test:reliability": "pnpm run build && node scripts/run-tests.mjs --reliability-only",
     "start": "node dist/cli.js",
     "mcp": "node dist/cli.js mcp",
     "install:agents": "node scripts/install-agent-instructions.mjs",

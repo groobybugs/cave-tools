@@ -1,9 +1,18 @@
-// Fuzzy edit matching, ported from opencode's edit tool replacer chain.
-// Each replacer is a generator that yields candidate substrings of `content`
-// that should be treated as a match for `find`. The driver tries replacers in
-// order (exact first, fuzziest last) and uses the first usable candidate.
+// Cave edit matching: upstream tiers (exact/unicode/trailing, LF-view + EOL)
+// live in ./edit-match.js (ported from OpenCode v2.1.2 plugin/edit.ts); this
+// file keeps the legacy fuzzy replacer chain as a Cave extension fallback plus
+// the findReplacement adapter used by edit.ts. Each replacer below yields
+// candidate substrings of `content` treated as a match for `find`.
 
 import { getEnv } from "../runtime/context.js";
+import {
+  computeEdit,
+  findOccurrences,
+  lineEnding,
+  matchView,
+  withRegionEndings,
+  type EditResult,
+} from "./edit-match.js";
 
 type Replacer = (content: string, find: string) => Generator<string>;
 
@@ -350,85 +359,11 @@ const REPLACERS: Replacer[] = [
   MultiOccurrenceReplacer,
 ];
 
-// ── Upstream tiers (ported from opencode 2.0 plugin/edit.ts) ────────────────
-// opencode 2.0 narrowed matching to exact + two strict fallbacks below. They
-// run first so match priority matches upstream exactly.
-
-interface SpanMatch {
-  start: number;
-  end: number;
-}
-
-// Unicode-punctuation normalization. Every replacement maps one char to one
-// char, so normalized offsets index the original string directly.
-function normalizeForMatch(value: string): string {
-  return value
-    .replace(/[‘’‚‛]/g, "'")
-    .replace(/[“”„‟]/g, '"')
-    .replace(/[‐‑‒–—―−]/g, "-")
-    .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
-}
-
-function findOccurrences(content: string, search: string): SpanMatch[] {
-  const result: SpanMatch[] = [];
-  if (search.length === 0) return result;
-  let offset = 0;
-  while (true) {
-    const at = content.indexOf(search, offset);
-    if (at === -1) break;
-    result.push({ start: at, end: at + search.length });
-    offset = at + search.length;
-  }
-  return result;
-}
-
-// Sliding line window comparing trimEnd-favicon-normalized lines. Tolerates
-// trailing-whitespace drift (and \r\n vs \n) but nothing else.
-function findLineOccurrences(content: string, search: string): SpanMatch[] {
-  const trailingNewline = search.endsWith("\n");
-  const expected = search.split("\n");
-  if (trailingNewline) expected.pop();
-  if (expected.length === 0) return [];
-  const lines: Array<{ start: number; end: number; text: string; contentEnd: number; newline: boolean }> = [];
-  for (const match of content.matchAll(/[^\n]*(?:\n|$)/g)) {
-    if (match[0] === "") continue;
-    const start = match.index ?? 0;
-    const newline = match[0].endsWith("\n");
-    const text = newline ? match[0].slice(0, -1) : match[0];
-    lines.push({
-      start,
-      end: start + match[0].length,
-      text,
-      contentEnd: start + text.length - (text.endsWith("\r") ? 1 : 0),
-      newline,
-    });
-  }
-  const candidates: SpanMatch[] = [];
-  for (let index = 0; index < lines.length; index++) {
-    const actual = lines.slice(index, index + expected.length);
-    if (actual.length !== expected.length) continue;
-    let allMatch = true;
-    for (let lineIndex = 0; lineIndex < actual.length; lineIndex++) {
-      if (
-        normalizeForMatch(actual[lineIndex]!.text.trimEnd()) !==
-        normalizeForMatch(expected[lineIndex]!.trimEnd())
-      ) {
-        allMatch = false;
-        break;
-      }
-    }
-    if (!allMatch) continue;
-    const last = actual[actual.length - 1]!;
-    if (trailingNewline && !last.newline) continue;
-    candidates.push({ start: actual[0]!.start, end: trailingNewline ? last.end : last.contentEnd });
-  }
-  const deduped: SpanMatch[] = [];
-  for (const candidate of candidates) {
-    if (deduped.some((kept) => kept.end > candidate.start && kept.start < candidate.end)) continue;
-    deduped.push(candidate);
-  }
-  return deduped;
-}
+// ── Upstream tiers ──────────────────────────────────────────────────────────
+// Exact / unicode-normalized / trailing-whitespace tiers live in
+// ./edit-match.js — the single canonical port of OpenCode v2.1.2
+// packages/core/src/tool/plugin/edit.ts (LF-view matching, unconditional
+// unicode tier, region-aware EOL). Imported above; do not duplicate here.
 
 // Guard against a short `find` matching a wildly larger span (e.g. a single
 // normalized line collapsing onto a giant region).
@@ -452,12 +387,16 @@ export interface MatchResult {
 // when a fuzzy replacer matched). For replace_all the caller replaces every
 // occurrence of `search`; otherwise uniqueness is enforced here.
 //
-// Match priority mirrors opencode 2.0: exact → unicode-normalized exact →
-// trailing-whitespace-tolerant line window. The first non-empty tier wins; a
-// multi-match tier without replace_all is an immediate uniqueness error (no
-// fall-through to fuzzier tiers). When no tier matches, the legacy fuzzy
-// replacers run as a final cave-extension fallback — set
+// Tiers 1-3 (exact → unicode-normalized → trailing-whitespace line window)
+// run on the LF view with source-offset mapping via matchView from
+// ./edit-match.js — the canonical OpenCode v2.1.2 port. The first non-empty
+// tier wins; a multi-match tier without replace_all is an immediate uniqueness
+// error (no fall-through to fuzzier tiers). When no tier matches, the legacy
+// fuzzy replacers run as a final cave-extension fallback — set
 // CAVE_TOOLS_FUZZY_EDIT=0 to disable them for strict upstream parity.
+// NOTE: this adapter cannot apply the endingsOnly raw-byte branch (it has no
+// newString); the complete API computeEditResult below handles that. For
+// CRLF/mixed files the spans here are still correct source offsets.
 export function findReplacement(
   content: string,
   find: string,
@@ -466,40 +405,24 @@ export function findReplacement(
   if (find.length === 0) {
     return { error: "not-found: old_string cannot be empty." };
   }
-  // Tier 1: exact occurrences.
-  const exact = findOccurrences(content, find);
-  if (exact.length > 0) {
-    if (replaceAll || exact.length === 1) {
-      const m = exact[0]!;
-      return { search: content.slice(m.start, m.end), index: m.start };
-    }
-    return { error: "non-unique", nonUnique: true };
-  }
-
-  // Tier 2: unicode-normalized exact. Normalization is length-preserving, so
-  // normalized offsets index the original content directly.
-  if (find.length > 0 && normalizeForMatch(find) !== find) {
-    const unicode = findOccurrences(normalizeForMatch(content), normalizeForMatch(find));
-    if (unicode.length > 0) {
-      if (replaceAll || unicode.length === 1) {
-        const m = unicode[0]!;
-        return { search: content.slice(m.start, m.end), index: m.start };
-      }
-      return { error: "non-unique", nonUnique: true };
-    }
-  }
-
-  // Tier 3: trailing-whitespace-tolerant line window.
-  const lined = findLineOccurrences(content, find);
-  if (lined.length > 0) {
-    if (replaceAll || lined.length === 1) {
-      const m = lined[0]!;
+  // Tiers 1-3 via the canonical LF-view matcher (matches carry source offsets).
+  // findReplacement takes no newString, so the replacement half is unused here.
+  const spans = matchView(content, find, find).matches;
+  if (spans.length > 0) {
+    if (replaceAll || spans.length === 1) {
+      const m = spans[0]!;
       return { search: content.slice(m.start, m.end), index: m.start };
     }
     return { error: "non-unique", nonUnique: true };
   }
 
   // Tier 4 (cave extension): legacy fuzzy chain.
+  return findFuzzyCandidate(content, find, replaceAll);
+}
+
+// Legacy fuzzy replacer chain (Cave extension — not upstream OpenCode).
+// Honors CAVE_TOOLS_FUZZY_EDIT=0 for strict upstream parity.
+function findFuzzyCandidate(content: string, find: string, replaceAll: boolean): MatchResult {
   if (getEnv().CAVE_TOOLS_FUZZY_EDIT === "0") {
     return { error: "not-found: Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings. Re-read the file and provide the full exact oldString." };
   }
@@ -524,4 +447,100 @@ export function findReplacement(
 
   if (nonUniqueSeen) return { error: "non-unique", nonUnique: true };
   return { error: "not-found: Could not find oldString in the file. It must match exactly (or via fuzzy match), including whitespace, indentation, and line endings. Re-read the file and provide the full exact oldString." };
+}
+
+export type { EditResult } from "./edit-match.js";
+
+/**
+ * Complete edit computation for future edit.ts handler integration.
+ *
+ * Pure upstream OpenCode v2.1.2 semantics first (computeEdit: LF-view tiers,
+ * unconditional unicode tier, per-span region-aware EOL replacements,
+ * endingsOnly raw branch, computed-unchanged reject). Only a pure *not-found*
+ * (zero upstream spans) falls through to the legacy fuzzy chain — and only
+ * when CAVE_TOOLS_FUZZY_EDIT is not "0". Ambiguity, identical/empty, and
+ * unchanged rejects are final and never fuzzy-retried. Fuzzy hits are marked
+ * with `fuzzy: true` so callers (and tests) can tell extension from upstream.
+ */
+export function computeEditResult(
+  source: string,
+  oldString: string,
+  newString: string,
+  replaceAll: boolean,
+): EditResult & { fuzzy?: boolean } {
+  const pure = computeEdit(source, oldString, newString, replaceAll);
+  if (pure.ok) return { ...pure, fuzzy: false };
+  // Final rejects: ambiguity carries spans; identical/empty/unchanged and the
+  // endingsOnly raw miss never fall through to fuzzy.
+  if (pure.replacements > 0 || pure.endingsOnly) return pure;
+  if ("nonUnique" in pure && pure.nonUnique) return pure;
+  if (oldString === "" || oldString === newString) return pure;
+  if (getEnv().CAVE_TOOLS_FUZZY_EDIT === "0") return pure;
+  const fb = findFuzzyCandidate(source, oldString, replaceAll);
+  if ("nonUnique" in fb && fb.nonUnique) {
+    // Zero upstream spans but ambiguous legacy-fuzzy candidates: keep the
+    // historical non-unique semantics (not not-found). Upstream ambiguity and
+    // no-op rejects above never reach here (intentional no fall-through).
+    return {
+      ok: false,
+      error:
+        "old_string is not unique (2+ matches). Add more surrounding context or set replace_all.",
+      nonUnique: true,
+      matches: [],
+      replacements: 0,
+      endingsOnly: false,
+      fuzzy: true,
+    };
+  }
+  if (fb.error || fb.search === undefined || fb.index === undefined) return pure;
+  const spans = findOccurrences(source, fb.search);
+  if (spans.length === 0) return pure;
+  if (spans.length > 1 && replaceAll !== true) {
+    return {
+      ok: false,
+      error: `Found ${spans.length} matches for oldString, but expected exactly one. Add more surrounding context to make oldString unique, or set replaceAll to true to replace every occurrence.`,
+      nonUnique: true,
+      matches: spans,
+      replacements: spans.length,
+      endingsOnly: false,
+      fuzzy: true,
+    };
+  }
+  // Per-span region-aware EOL (same rule as upstream): each fuzzy span keeps
+  // its own region endings instead of sharing the first span's bytes.
+  const fileEnding = lineEnding(source, "\n");
+  const replacementView = newString.replaceAll("\r\n", "\n");
+  const targets = replaceAll ? spans : spans.slice(0, 1);
+  const applied = targets.map((m) => {
+    const region = source.slice(m.start, m.end);
+    return {
+      start: m.start,
+      end: m.end,
+      replacement: withRegionEndings(region, replacementView, lineEnding(region, fileEnding)),
+    };
+  });
+  let updated = source;
+  for (const item of applied.slice().reverse()) {
+    updated = updated.slice(0, item.start) + item.replacement + updated.slice(item.end);
+  }
+  if (updated === source) {
+    return {
+      ok: false,
+      error:
+        "No changes to apply: the edit leaves the file unchanged. Line endings follow the file; to change them, write \\r explicitly in oldString or newString.",
+      matches: spans,
+      replacements: spans.length,
+      endingsOnly: false,
+      fuzzy: true,
+    };
+  }
+  return {
+    ok: true,
+    matches: spans,
+    applied,
+    replacements: spans.length,
+    updated,
+    endingsOnly: false,
+    fuzzy: true,
+  };
 }

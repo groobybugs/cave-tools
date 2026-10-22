@@ -2,6 +2,7 @@ import { randomBytes } from "crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { callTool, isToolName, loadTool, TOOL_NAMES, type ToolDefinition } from "./dispatch.js";
 import { flushStats, suppressSubagentEnvLog } from "./compression/utils.js";
+import { flushToolErrorQueue } from "./runtime/tool-errors.js";
 import { daemonEnabled, getDaemonClient, type CallOutcome } from "./daemon-client.js";
 
 // `cave-tools <tool> [positional...] [--prop value...]`: runs one MCP tool
@@ -256,6 +257,10 @@ function readAllStdin(): Promise<string> {
 }
 
 function finish(stream: NodeJS.WriteStream, text: string, code: number): void {
+  // Controlled CLI exit funnel: persist the last tool failure best-effort
+  // before the stream-drain exit. Bounded and never throws; MCP/daemon
+  // paths never call finish (they rely on scheduled setImmediate flushes).
+  flushToolErrorQueue();
   const out = text.endsWith("\n") || text === "" ? text : `${text}\n`;
   stream.write(out, () => process.exit(code));
 }

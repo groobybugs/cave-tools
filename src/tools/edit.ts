@@ -2,19 +2,21 @@ import { readFile } from "fs/promises";
 import type { ToolResult } from "../types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
-  getFileHash,
+  hashContent,
   invalidateFileCache,
   recordEdit,
   recordRangeEchoSaved,
 } from "../compression/utils.js";
-import { findReplacement } from "./replacers.js";
+import { computeEditResult } from "./replacers.js";
+import type { EditApplied } from "./edit-match.js";
 import {
   activeEditMode,
   applyMoveLines,
   applyRangeEdit,
   verifyRangeChecksum,
 } from "./line-range.js";
-import { decodeUtf8PreserveBom, joinBom, writeIfUnchanged } from "../runtime/file-mutation.js";
+import { decodeUtf8PreserveBom, joinBom, withFileLocks, writeIfUnchanged } from "../runtime/file-mutation.js";
+import { resolveMutationTarget } from "../runtime/path.js";
 
 // Re-export for tests / external callers
 export {
@@ -23,16 +25,6 @@ export {
   rangeChecksum,
   lineTag,
 } from "./line-range.js";
-
-// Adapt new_string line endings to match the matched span's style so an edit
-// against a CRLF file doesn't inject lone LFs (and vice-versa).
-function adaptLineEndings(search: string, newString: string): string {
-  const searchCRLF = search.includes("\r\n");
-  const newCRLF = newString.includes("\r\n");
-  if (searchCRLF && !newCRLF) return newString.replace(/\n/g, "\r\n");
-  if (!searchCRLF && newCRLF) return newString.replace(/\r\n/g, "\n");
-  return newString;
-}
 
 function findClosestLineHint(content: string, oldStr: string): string {
   const firstLine = (oldStr.split("\n")[0] || "").trim();
@@ -88,12 +80,6 @@ interface MoveEdit {
   expected_range_checksum?: string;
 }
 
-interface MatchedEdit {
-  matchIndex: number;
-  matchLength: number;
-  new_string: string;
-}
-
 function isMoveShape(edit: Record<string, unknown>): boolean {
   return (
     edit.insert_before !== undefined &&
@@ -116,10 +102,10 @@ function isStrShape(edit: Record<string, unknown>): boolean {
   return typeof edit.old_string === "string" && edit.old_string.length > 0;
 }
 
-async function checkExpectedHash(
-  filePath: string,
+function checkExpectedHash(
   expected: unknown,
-): Promise<ToolResult | null> {
+  sourceBytes: Buffer,
+): ToolResult | null {
   if (expected === undefined || expected === null) return null;
   const want = String(expected).trim().toLowerCase();
   if (want === "") return null;
@@ -129,10 +115,9 @@ async function checkExpectedHash(
   if (!/^[0-9a-f]+$/.test(want)) {
     return err("expected_hash must be hexadecimal");
   }
-  const actual = await getFileHash(filePath);
-  if (!actual) {
-    return err(`could not hash file for expected_hash check: ${filePath}`);
-  }
+  // Hash the exact bytes that were loaded for this edit (BOM included), so the
+  // numbered-read footer and the edit check agree without a second file read.
+  const actual = hashContent(sourceBytes);
   const actualLc = actual.toLowerCase();
   if (actualLc === want || actualLc.startsWith(want)) return null;
   return err(
@@ -153,12 +138,48 @@ function checkRangeChecksumOrError(
   }
   const result = verifyRangeChecksum(content, startLine, endLine, String(expected));
   if (result.ok) return null;
+  // `in`-narrowing (plain `!result.ok` does not narrow under some CLI builds).
+  if (!("error" in result)) return err("checksum failed");
   return err(
     `${result.error}\n` +
       `expected: ${String(expected).trim().toLowerCase().slice(0, 16)}\n` +
       `actual:   ${result.actual}\n` +
       (result.window ? `window:\n${result.window}` : ""),
   );
+}
+
+/** True for plain editable argument objects (not null, arrays, or primitives). */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Shared field-type gate: present (non-null) argument values must already
+ * have their declared schema types instead of being silently coerced.
+ * label is "" for single-edit args or "edits[i]" for batch items.
+ * (new_string is checked separately so its pinned "is required" message wins.)
+ */
+function checkFieldTypes(raw: Record<string, unknown>, label: string): ToolResult | null {
+  const prefix = label === "" ? "" : `${label}: `;
+  for (const key of ["start_line", "end_line", "insert_before"]) {
+    const v = raw[key];
+    if (v !== undefined && v !== null && typeof v !== "number") {
+      return err(`${prefix}${key} must be a number`);
+    }
+  }
+  for (const key of ["replace_all", "delete"]) {
+    const v = raw[key];
+    if (v !== undefined && v !== null && typeof v !== "boolean") {
+      return err(`${prefix}${key} must be a boolean`);
+    }
+  }
+  for (const key of ["content", "old_string", "file_path"]) {
+    const v = raw[key];
+    if (v !== undefined && v !== null && typeof v !== "string") {
+      return err(`${prefix}${key} must be a string`);
+    }
+  }
+  return null;
 }
 
 function requireProofInStrict(
@@ -293,16 +314,27 @@ export const editTool: Tool & {
     required: [],
   },
   handler: async (args) => {
+    if (!isRecord(args)) {
+      return err("edit arguments must be an object");
+    }
+    if (args.edits !== undefined && !Array.isArray(args.edits)) {
+      return err("edits must be an array of edit objects");
+    }
     if (Array.isArray(args.edits)) {
       return handleBatchEdits(args);
     }
 
-    const filePath = args.file_path !== undefined ? String(args.file_path) : "";
+    let filePath = "";
+    if (args.file_path !== undefined && args.file_path !== null) {
+      if (typeof args.file_path !== "string") {
+        return err("file_path must be a string");
+      }
+      filePath = args.file_path;
+    }
     if (!filePath) return err("file_path is required");
 
-    const loaded = await loadFile(filePath);
-    if (isToolResult(loaded)) return loaded;
-    const { content, sourceBytes, bom } = loaded;
+    const fieldErr = checkFieldTypes(args, "");
+    if (fieldErr) return fieldErr;
 
     const hasMove = isMoveShape(args);
     const hasRange =
@@ -324,8 +356,27 @@ export const editTool: Tool & {
     if (modes === 0) {
       return err("need old_string/new_string, or start_line/end_line with content|delete|insert_before");
     }
+    if (hasStr && typeof args.new_string !== "string") {
+      return err('new_string is required for string mode and must be a string (use "" to delete)');
+    }
 
-    const hashErr = await checkExpectedHash(filePath, args.expected_hash);
+    let canonical: string;
+    try {
+      canonical = (await resolveMutationTarget(filePath)).canonical;
+    } catch (error) {
+      return err(error instanceof Error ? error.message : `Cannot resolve path: ${filePath}`);
+    }
+
+    // Read→compute→write→cache-invalidation runs under the canonical outer
+    // lock (lock errors are tool errors, never uncaught).
+    let singleResult: ToolResult;
+    try {
+      singleResult = await withFileLocks([canonical], async () => {
+    const loaded = await loadFile(filePath);
+    if (isToolResult(loaded)) return loaded;
+    const { content, sourceBytes, bom } = loaded;
+
+    const hashErr = checkExpectedHash(args.expected_hash, sourceBytes);
     if (hashErr) return hashErr;
 
     if (hasMove || hasRange) {
@@ -353,7 +404,7 @@ export const editTool: Tool & {
       if (csErr) return csErr;
 
       const result = applyMoveLines(content, startLine, endLine, insertBefore);
-      if (!result.ok) return err(result.error);
+      if (!result.ok) return err("error" in result ? result.error : "move failed");
       recordRangeEchoSaved(result.movedChars);
 
       const writeErr = await writeEdited(filePath, sourceBytes, bom, result.content);
@@ -383,7 +434,7 @@ export const editTool: Tool & {
       if (csErr) return csErr;
 
       const result = applyRangeEdit(content, startLine, endLine, replacement);
-      if (!result.ok) return err(result.error);
+      if (!result.ok) return err("error" in result ? result.error : "range edit failed");
       recordRangeEchoSaved(result.replacedChars);
 
       const writeErr = await writeEdited(filePath, sourceBytes, bom, result.content);
@@ -398,9 +449,11 @@ export const editTool: Tool & {
       return ok(`Edited ${filePath} (${kind} lines ${startLine}-${endLine})`);
     }
 
-    // Str-replace
-    const oldString = String(args.old_string ?? "");
-    const newString = String(args.new_string ?? "");
+    // Str-replace. Per-span replacements, region-aware EOL, endingsOnly
+    // handling, and computed-unchanged rejection all come from the shared
+    // matcher (no first-literal split/join, no whole-file EOL normalization).
+    const oldString = args.old_string as string;
+    const newString = args.new_string as string;
     const replaceAll = args.replace_all === true;
 
     if (oldString === newString) {
@@ -410,39 +463,27 @@ export const editTool: Tool & {
       return err("old_string cannot be empty");
     }
 
-    const match = findReplacement(content, oldString, replaceAll);
-    if (match.error || match.search === undefined) {
+    const single = computeEditResult(content, oldString, newString, replaceAll);
+    if (!single.ok) {
+      if ("nonUnique" in single && single.nonUnique) {
+        return err("old_string is not unique (2+ matches). Add more context or set replace_all.");
+      }
       if (content.includes(newString)) {
         return err("old_string not found — new_string already present, edit already applied?");
       }
-      if (match.nonUnique) {
-        return err("old_string is not unique (2+ matches). Add more context or set replace_all.");
-      }
-      return err(
-        `${match.error ?? "old_string not found in file"}.${findClosestLineHint(content, oldString)}`,
-      );
+      return err(`${"error" in single ? single.error : "edit failed"}${findClosestLineHint(content, oldString)}`);
     }
 
-    const search = match.search;
-    const replacement = adaptLineEndings(search, newString);
-
-    let updated: string;
-    let count: number;
-    if (replaceAll) {
-      updated = content.split(search).join(replacement);
-      count = content.split(search).length - 1;
-    } else {
-      updated =
-        content.slice(0, match.index!) +
-        replacement +
-        content.slice(match.index! + search.length);
-      count = 1;
-    }
-
-    const writeErr = await writeEdited(filePath, sourceBytes, bom, updated);
+    const writeErr = await writeEdited(filePath, sourceBytes, bom, single.updated);
     if (writeErr) return writeErr;
 
+    const count = single.replacements;
     return ok(`Edited ${filePath} (${count} replacement${count === 1 ? "" : "s"})`);
+      });
+    } catch (error) {
+      return err(error instanceof Error ? error.message : "edit failed");
+    }
+    return singleResult;
   },
 };
 
@@ -450,12 +491,15 @@ async function applyEditsToContent(
   filePath: string,
   content: string,
   edits: Record<string, unknown>[],
+  indices?: number[],
+  fileHashProvided = false,
 ): Promise<{ ok: true; content: string } | ToolResult> {
   const ranges: (RangeEdit & { index: number })[] = [];
   const moves: (MoveEdit & { index: number })[] = [];
   const strEdits: { index: number; edit: StrEdit }[] = [];
 
   for (let i = 0; i < edits.length; i++) {
+    const globalIndex = indices?.[i] ?? i;
     const raw = edits[i];
     const move = isMoveShape(raw);
     const range = isRangeShape(raw) || (raw.delete === true && raw.start_line !== undefined);
@@ -463,11 +507,16 @@ async function applyEditsToContent(
 
     const kinds = [move, range && !move, str].filter(Boolean).length;
     if (kinds > 1) {
-      return err(`edits[${i}]: pass only one of str-replace, range/delete, or move`);
+      return err(`edits[${globalIndex}]: pass only one of str-replace, range/delete, or move`);
     }
     if (kinds === 0) {
       return err(
-        `edits[${i}]: need old_string/new_string, start_line+content|delete, or start_line+insert_before`,
+        `edits[${globalIndex}]: need old_string/new_string, start_line+content|delete, or start_line+insert_before`,
+      );
+    }
+    if (str && typeof raw.new_string !== "string") {
+      return err(
+        `edits[${globalIndex}]: new_string is required and must be a string (use "" to delete)`,
       );
     }
 
@@ -476,16 +525,17 @@ async function applyEditsToContent(
       const endLine = Number(raw.end_line);
       const insertBefore = Number(raw.insert_before);
       if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || !Number.isInteger(insertBefore)) {
-        return err(`edits[${i}]: start_line, end_line, insert_before must be integers`);
+        return err(`edits[${globalIndex}]: start_line, end_line, insert_before must be integers`);
       }
       const proofErr = requireProofInStrict(
-        raw.expected_hash !== undefined && String(raw.expected_hash).trim() !== "",
+        fileHashProvided ||
+          (raw.expected_hash !== undefined && String(raw.expected_hash).trim() !== ""),
         raw.expected_range_checksum !== undefined &&
           String(raw.expected_range_checksum).trim() !== "",
       );
-      if (proofErr) return err(`edits[${i}]: ${proofErr.content[0].type === "text" ? proofErr.content[0].text.replace(/^Error: /, "") : "strict proof required"}`);
+      if (proofErr) return err(`edits[${globalIndex}]: ${proofErr.content[0].type === "text" ? proofErr.content[0].text.replace(/^Error: /, "") : "strict proof required"}`);
       moves.push({
-        index: i,
+        index: globalIndex,
         start_line: startLine,
         end_line: endLine,
         insert_before: insertBefore,
@@ -501,24 +551,25 @@ async function applyEditsToContent(
       const startLine = Number(raw.start_line);
       const endLine = Number(raw.end_line);
       if (!Number.isInteger(startLine) || !Number.isInteger(endLine)) {
-        return err(`edits[${i}]: start_line and end_line must be integers`);
+        return err(`edits[${globalIndex}]: start_line and end_line must be integers`);
       }
       if (raw.delete !== true && raw.content === undefined) {
-        return err(`edits[${i}]: content is required (or delete:true)`);
+        return err(`edits[${globalIndex}]: content is required (or delete:true)`);
       }
       const proofErr = requireProofInStrict(
-        raw.expected_hash !== undefined && String(raw.expected_hash).trim() !== "",
+        fileHashProvided ||
+          (raw.expected_hash !== undefined && String(raw.expected_hash).trim() !== ""),
         raw.expected_range_checksum !== undefined &&
           String(raw.expected_range_checksum).trim() !== "",
       );
       if (proofErr) {
         const msg = proofErr.content[0];
         return err(
-          `edits[${i}]: ${msg.type === "text" ? msg.text.replace(/^Error: /, "") : "strict proof required"}`,
+          `edits[${globalIndex}]: ${msg.type === "text" ? msg.text.replace(/^Error: /, "") : "strict proof required"}`,
         );
       }
       ranges.push({
-        index: i,
+        index: globalIndex,
         start_line: startLine,
         end_line: endLine,
         content: raw.delete === true ? "" : String(raw.content),
@@ -532,9 +583,18 @@ async function applyEditsToContent(
 
     const edit = raw as unknown as StrEdit;
     if (edit.old_string === edit.new_string) {
-      return err(`edits[${i}]: old_string and new_string are identical`);
+      return err(`edits[${globalIndex}]: old_string and new_string are identical`);
     }
-    strEdits.push({ index: i, edit });
+    strEdits.push({ index: globalIndex, edit });
+  }
+
+  // Minimal safe rule: more than one move per file batch would silently
+  // operate on stale coordinates (each move renumbers the lines the next
+  // move names). Reject with split-call advice instead of a fancy engine.
+  if (moves.length > 1) {
+    return err(
+      "multiple moves in one batch for the same file are not supported; split into separate calls (each move changes line numbers for the next)",
+    );
   }
 
   // Overlap check for non-insert ranges on original lines
@@ -545,6 +605,21 @@ async function applyEditsToContent(
   for (let i = 1; i < intervals.length; i++) {
     if (intervals[i].s <= intervals[i - 1].e) {
       return err("edits overlap. Merge them into one edit or target disjoint regions.");
+    }
+  }
+
+  // An insert whose point falls inside a replaced range is ambiguous: the
+  // point names original lines, but the span they belong to is rewritten
+  // (the range start boundary counts as inside — ordering alone would decide
+  // whether the insert lands before or inside the new content).
+  const insertSpans = ranges.filter((r) => r.end_line === r.start_line - 1);
+  for (const ins of insertSpans) {
+    for (const r of intervals) {
+      if (ins.start_line >= r.s && ins.start_line <= r.e) {
+        return err(
+          `edits[${ins.index}]: insert point ${ins.start_line} lies inside replaced range ${r.s}-${r.e} (edits[${r.i}]); merge them or move the insert outside the range`,
+        );
+      }
     }
   }
 
@@ -566,7 +641,7 @@ async function applyEditsToContent(
       );
     }
     const result = applyMoveLines(updated, m.start_line, m.end_line, m.insert_before);
-    if (!result.ok) return err(`edits[${m.index}]: ${result.error}`);
+    if (!result.ok) return err(`edits[${m.index}]: ${"error" in result ? result.error : "move failed"}`);
     recordRangeEchoSaved(result.movedChars);
     updated = result.content;
   }
@@ -577,7 +652,11 @@ async function applyEditsToContent(
     return err("cannot mix move and range edits in one batch for the same file; split calls");
   }
 
-  const rangesHighFirst = [...ranges].sort((a, b) => b.start_line - a.start_line);
+  // High line numbers first so earlier spans keep original coordinates.
+  // Explicit input-order tiebreak: same-point inserts apply deterministically.
+  const rangesHighFirst = [...ranges].sort(
+    (a, b) => b.start_line - a.start_line || a.index - b.index,
+  );
   for (const r of rangesHighFirst) {
     const csErr = checkRangeChecksumOrError(
       updated,
@@ -592,65 +671,62 @@ async function applyEditsToContent(
       );
     }
     const result = applyRangeEdit(updated, r.start_line, r.end_line, r.content);
-    if (!result.ok) return err(`edits[${r.index}]: ${result.error}`);
+    if (!result.ok) return err(`edits[${r.index}]: ${"error" in result ? result.error : "range edit failed"}`);
     recordRangeEchoSaved(result.replacedChars);
     updated = result.content;
   }
 
   if (strEdits.length > 0 && ranges.length === 0 && moves.length === 0) {
-    const matched: MatchedEdit[] = [];
+    // Match every applied span per item against the ORIGINAL snapshot, then
+    // globally overlap-check source coordinates, then apply in reverse, so
+    // disjoint items never observe each other's changes. Per-span
+    // replacements come from the shared matcher (unicode/trailing variants
+    // each change, not just the first literal shape).
+    const allSpans: EditApplied[] = [];
     for (const { index, edit } of strEdits) {
-      const match = findReplacement(content, edit.old_string, edit.replace_all ?? false);
-      if (match.error || match.search === undefined) {
-        if (match.nonUnique) {
+      if (edit.old_string === edit.new_string) {
+        return err(`edits[${index}]: old_string and new_string are identical`);
+      }
+      const r = computeEditResult(content, edit.old_string, edit.new_string, edit.replace_all ?? false);
+      if (!r.ok) {
+        if ("nonUnique" in r && r.nonUnique) {
           return err(
             `edits[${index}]: old_string is not unique (2+ matches). Add more context or set replace_all.`,
           );
         }
-        return err(`edits[${index}]: ${match.error ?? "old_string not found in file."}`);
+        return err(`edits[${index}]: ${"error" in r ? r.error : "string edit failed"}`);
       }
-      matched.push({
-        matchIndex: match.index!,
-        matchLength: match.search.length,
-        new_string: adaptLineEndings(match.search, edit.new_string),
-      });
+      allSpans.push(...r.applied);
     }
-    matched.sort((a, b) => a.matchIndex - b.matchIndex);
-    for (let i = 1; i < matched.length; i++) {
-      const prev = matched[i - 1];
-      const curr = matched[i];
-      if (prev.matchIndex + prev.matchLength > curr.matchIndex) {
+    allSpans.sort((a, b) => a.start - b.start);
+    for (let i = 1; i < allSpans.length; i++) {
+      const prev = allSpans[i - 1];
+      const curr = allSpans[i];
+      if (prev.end > curr.start) {
         return err("edits overlap. Merge them into one edit or target disjoint regions.");
       }
     }
     updated = content;
-    for (let i = matched.length - 1; i >= 0; i--) {
-      const m = matched[i];
-      updated =
-        updated.substring(0, m.matchIndex) +
-        m.new_string +
-        updated.substring(m.matchIndex + m.matchLength);
+    for (let i = allSpans.length - 1; i >= 0; i--) {
+      const m = allSpans[i];
+      updated = updated.substring(0, m.start) + m.replacement + updated.substring(m.end);
     }
   } else if (strEdits.length > 0) {
     for (const { index, edit } of strEdits) {
-      const match = findReplacement(updated, edit.old_string, edit.replace_all ?? false);
-      if (match.error || match.search === undefined) {
-        if (match.nonUnique) {
+      if (edit.old_string === edit.new_string) {
+        return err(`edits[${index}]: old_string and new_string are identical`);
+      }
+      // Sequential on updated content (current mixed-batch semantics), but
+      // each item still gets per-span replacements, endingsOnly handling,
+      // and computed-unchanged rejection from the shared matcher.
+      const r = computeEditResult(updated, edit.old_string, edit.new_string, edit.replace_all ?? false);
+      if (!r.ok) {
+        if ("nonUnique" in r && r.nonUnique) {
           return err(`edits[${index}]: old_string is not unique after prior edits.`);
         }
-        return err(
-          `edits[${index}]: ${match.error ?? "old_string not found after prior edits."}`,
-        );
+        return err(`edits[${index}]: ${"error" in r ? r.error : "string edit failed"}`);
       }
-      const replacement = adaptLineEndings(match.search, edit.new_string);
-      if (edit.replace_all) {
-        updated = updated.split(match.search).join(replacement);
-      } else {
-        updated =
-          updated.slice(0, match.index!) +
-          replacement +
-          updated.slice(match.index! + match.search.length);
-      }
+      updated = r.updated;
     }
   }
 
@@ -658,21 +734,72 @@ async function applyEditsToContent(
   return { ok: true, content: updated };
 }
 
+function validateBatchItemShape(index: number, value: unknown): ToolResult | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return err(`edits[${index}]: must be an edit object`);
+  }
+  const raw = value as Record<string, unknown>;
+  const move = isMoveShape(raw);
+  const range = isRangeShape(raw) || (raw.delete === true && raw.start_line !== undefined);
+  const str = isStrShape(raw);
+  const kinds = [move, range && !move, str].filter(Boolean).length;
+  if (kinds > 1) {
+    return err(`edits[${index}]: pass only one of str-replace, range/delete, or move`);
+  }
+  if (kinds === 0) {
+    return err(
+      `edits[${index}]: need old_string/new_string, start_line+content|delete, or start_line+insert_before`,
+    );
+  }
+  if (str && typeof raw.new_string !== "string") {
+    return err(`edits[${index}]: new_string is required and must be a string (use "" to delete)`);
+  }
+  return null;
+}
+
+function errorText(result: ToolResult): string {
+  const first = result.content[0];
+  return first && first.type === "text" ? first.text.replace(/^Error: /, "") : "operation failed";
+}
+
 async function handleBatchEdits(args: Record<string, unknown>): Promise<ToolResult> {
-  const edits = args.edits as Record<string, unknown>[];
-  if (!Array.isArray(edits) || edits.length === 0) {
+  const rawEdits = args.edits;
+  if (!Array.isArray(rawEdits) || rawEdits.length === 0) {
     return err("edits array is empty");
   }
+  const edits = rawEdits as Record<string, unknown>[];
 
-  const defaultPath = args.file_path !== undefined ? String(args.file_path) : "";
+  const topTypeErr = checkFieldTypes(args, "");
+  if (topTypeErr) return topTypeErr;
+
+  let defaultPath = "";
+  if (args.file_path !== undefined && args.file_path !== null) {
+    if (typeof args.file_path !== "string") {
+      return err("file_path must be a string");
+    }
+    defaultPath = args.file_path;
+  }
+
+  // Validate every item before any file read/write. A malformed later item
+  // must not leave earlier files written. Non-objects keep the pinned shape
+  // message; objects get precise field-type errors before kind errors.
+  for (let i = 0; i < edits.length; i++) {
+    if (!isRecord(edits[i])) {
+      return err(`edits[${i}]: must be an edit object`);
+    }
+    const typeErr = checkFieldTypes(edits[i], `edits[${i}]`);
+    if (typeErr) return typeErr;
+    const shapeErr = validateBatchItemShape(i, edits[i]);
+    if (shapeErr) return shapeErr;
+  }
 
   // Group by file_path
   const byFile = new Map<string, { index: number; edit: Record<string, unknown> }[]>();
   for (let i = 0; i < edits.length; i++) {
     const raw = edits[i];
     const fp =
-      raw.file_path !== undefined && raw.file_path !== null && String(raw.file_path).length > 0
-        ? String(raw.file_path)
+      raw.file_path !== undefined && raw.file_path !== null && (raw.file_path as string).length > 0
+        ? (raw.file_path as string)
         : defaultPath;
     if (!fp) {
       return err(`edits[${i}]: file_path required (set top-level file_path or per-item file_path)`);
@@ -682,47 +809,127 @@ async function handleBatchEdits(args: Record<string, unknown>): Promise<ToolResu
     byFile.set(fp, list);
   }
 
-  // Top-level expected_hash applies when single file
-  if (byFile.size === 1 && args.expected_hash !== undefined) {
-    const only = [...byFile.keys()][0];
-    const hashErr = await checkExpectedHash(only, args.expected_hash);
-    if (hashErr) return hashErr;
+  const topLevelHash =
+    args.expected_hash !== undefined &&
+    args.expected_hash !== null &&
+    String(args.expected_hash).trim() !== "";
+  if (byFile.size > 1 && topLevelHash) {
+    return err(
+      "top-level expected_hash applies only to single-file batches; " +
+        "set expected_hash on each edit item for multi-file batches",
+    );
   }
 
-  const summaries: string[] = [];
-
-  for (const [filePath, items] of byFile) {
-    // Per-item file hash checks
-    for (const { index, edit } of items) {
-      if (edit.expected_hash !== undefined) {
-        const hashErr = await checkExpectedHash(filePath, edit.expected_hash);
-        if (hashErr) {
-          const msg = hashErr.content[0];
-          return err(
-            `edits[${index}]: ${msg.type === "text" ? msg.text.replace(/^Error: /, "") : "hash failed"}`,
-          );
-        }
-      }
+  // Resolve every literal path to its canonical target BEFORE reading.
+  // Distinct spellings of the same file (sub/../f.txt vs f.txt, symlinks)
+  // would otherwise plan and write twice; reject with a clear error.
+  // Paths were shape-validated above, so resolution failures are tool errors.
+  const canonicalFp = new Map<string, { fp: string; index: number }>();
+  for (const [fp, items] of byFile) {
+    let canonical: string;
+    try {
+      canonical = (await resolveMutationTarget(fp)).canonical;
+    } catch (error) {
+      return err(error instanceof Error ? error.message : `Cannot resolve path: ${fp}`);
     }
+    const clash = canonicalFp.get(canonical);
+    if (clash && clash.fp !== fp) {
+      return err(
+        `edits[${items[0].index}] and edits[${clash.index}] target the same file ` +
+          `via different paths ("${clash.fp}" and "${fp}"); use one path per file`,
+      );
+    }
+    if (!clash) canonicalFp.set(canonical, { fp, index: items[0].index });
+  }
+  const lockPaths = [...canonicalFp.keys()].sort();
 
+  // Everything from the first read through the last write and cache
+  // invalidation runs under one canonical path-sorted outer lock, so
+  // concurrent batches over disjoint spans of the same file serialize
+  // instead of racing on stale snapshots. Lock errors are tool errors.
+  let batchResult: ToolResult;
+  try {
+    batchResult = await withFileLocks(lockPaths, async () => {
+  // Load and validate every file before writing any of them.
+  const loadedFiles: {
+    filePath: string;
+    content: string;
+    sourceBytes: Buffer;
+    bom: boolean;
+    items: { index: number; edit: Record<string, unknown> }[];
+  }[] = [];
+  for (const [filePath, items] of byFile) {
     const loaded = await loadFile(filePath);
     if (isToolResult(loaded)) return loaded;
-    const { content, sourceBytes, bom } = loaded;
 
-    const fileEdits = items.map((x) => x.edit);
-    const result = await applyEditsToContent(filePath, content, fileEdits);
+    for (const { index, edit } of items) {
+      const hashErr = checkExpectedHash(edit.expected_hash, loaded.sourceBytes);
+      if (hashErr) {
+        return err(`edits[${index}]: ${errorText(hashErr)}`);
+      }
+    }
+    if (byFile.size === 1 && topLevelHash) {
+      const hashErr = checkExpectedHash(args.expected_hash, loaded.sourceBytes);
+      if (hashErr) return hashErr;
+    }
+
+    loadedFiles.push({ filePath, ...loaded, items });
+  }
+
+  // Compute every file's new content before the first write.
+  const plans: {
+    filePath: string;
+    sourceBytes: Buffer;
+    bom: boolean;
+    updated: string;
+    itemCount: number;
+  }[] = [];
+  for (const file of loadedFiles) {
+    const result = await applyEditsToContent(
+      file.filePath,
+      file.content,
+      file.items.map((x) => x.edit),
+      file.items.map((x) => x.index),
+      byFile.size === 1 && topLevelHash,
+    );
     if (!("ok" in result) || result.ok !== true) {
       return result as ToolResult;
     }
+    plans.push({
+      filePath: file.filePath,
+      sourceBytes: file.sourceBytes,
+      bom: file.bom,
+      updated: result.content,
+      itemCount: file.items.length,
+    });
+  }
 
-    const writeErr = await writeEdited(filePath, sourceBytes, bom, result.content);
-    if (writeErr) return writeErr;
-    summaries.push(`${filePath} (${items.length})`);
+  const summaries: string[] = [];
+  const written: string[] = [];
+  for (let i = 0; i < plans.length; i++) {
+    const plan = plans[i];
+    const writeErr = await writeEdited(plan.filePath, plan.sourceBytes, plan.bom, plan.updated);
+    if (writeErr) {
+      const notAttempted = plans.slice(i + 1).map((p) => p.filePath);
+      return err(
+        `${errorText(writeErr)}\n` +
+          `Failed file (may be partially modified): ${plan.filePath}\n` +
+          `Files written before failure: ${written.length ? written.join(", ") : "(none)"}\n` +
+          `Files not attempted: ${notAttempted.length ? notAttempted.join(", ") : "(none)"}`,
+      );
+    }
+    written.push(plan.filePath);
+    summaries.push(`${plan.filePath} (${plan.itemCount})`);
   }
 
   return ok(
     `Edited ${summaries.length} file${summaries.length === 1 ? "" : "s"}: ${summaries.join(", ")}`,
   );
+    });
+  } catch (error) {
+    return err(error instanceof Error ? error.message : "edit batch failed");
+  }
+  return batchResult;
 }
 
 function ok(text: string): ToolResult {
