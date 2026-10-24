@@ -300,3 +300,52 @@ Go 1.26.3). Raw old/new reports, build metadata, microbenchmark stdout and the
 pre-registered plan are retained locally under
 `.context/go-port-benchmarks/2026-10-24/` (optimization subdirectory). The three
 unrelated expanded-W5 parity failures remain outside this change.
+
+## Large-filter optimization round 2 — verified follow-up
+
+This bounded round started at `81e083b`, using the first-round optimized Go
+binary as the before-control, not the original 170 ms binary. A fresh profile
+identified `CollapseBlankLines` at 32.23% of sampled CPU. Candidate `ff86d12`
+replaces only its `(\r?\n){3,}` regex replacement with an exact byte scanner:
+three or more LF/CRLF units become `\n\n`; shorter runs and every other byte
+remain unchanged. The original regex remains the differential-test oracle.
+No redaction, pipeline-order, archive or budget-policy change was made.
+
+Muse verified equivalence clean, including mixed LF/CRLF, lone CR, EOF, NUL,
+Unicode and invalid UTF-8. Fixed edge cases plus 10,000 seeded random inputs
+match the old regex. Coordinator full Go, scoped compression race, existing
+parity, Windows/Darwin vet and unchanged TS's 14 suites passed.
+
+Coordinator repeated all seven routes, 30 samples per side per route, seeds
+42 and 73. Each seed ran before-control then candidate against frozen TS.
+Every sample was valid; CLI bytes and paired MCP ToolResult payload hashes
+matched, with envelope-only MCP differences still flagged. Milliseconds:
+
+| Workload / seed | Go before p50 | Go after p50 | TS p50 in candidate run | Go before p95 | Go after p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Large filter / 42 | 50.2 | 36.3 | 51.8 | 51.9 | 37.9 |
+| Large filter / 73 | 50.3 | 36.2 | 52.2 | 51.6 | 39.2 |
+| Medium filter / 42 | 8.2 | 6.6 | 41.9 | 9.4 | 7.3 |
+| Medium filter / 73 | 8.1 | 6.8 | 42.1 | 8.7 | 8.1 |
+
+Large-filter median latency fell another **~28%**, roughly **30% below TS** on
+this fixture. Relative to the original ~170 ms Go baseline, the two rounds
+bring it to ~36 ms (~4.7x faster). Warm MCP compression also improved from
+2.4–2.6 to 1.7–1.8 ms through the shared helper, but is still slower than TS's
+~0.5 ms. These are fixture-specific results, not a universal Go speedup.
+
+Retained before/after pipeline profiles (30 iterations each, no process startup)
+record 36.82 → 27.17 ms/op and 10.67 → 7.44 MB allocated/op (about 30% fewer
+allocated bytes, not RSS). `CollapseBlankLines` cumulative CPU share fell from
+32.23% to 5.68%; percentages have different total CPU denominators. The
+coordinator checked the raw profile/benchmark evidence as well as the final
+CLI measurements.
+
+Round-2 binary SHA-256:
+`123cb3dbdcd4adea963dcbf25c2e6fbc2f1a343f860f44c59482affc6ac06fbe`.
+Before-control SHA-256: `55acc144ea170b9390c4b7dd2fcb0656d7b160df67f0e827162262cf3b3d386e`.
+Both use Go 1.26.3, `-trimpath` and version 0.6.1; frozen TS and its dist
+manifest are unchanged. Raw reports, source/build labels, profile logs and the
+pre-registered round-2 plan are retained locally under
+`.context/go-port-benchmarks/2026-10-24/` (round-2 subdirectory). Unrelated W5
+correctness gaps remain pending.
