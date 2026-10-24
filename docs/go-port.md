@@ -369,6 +369,8 @@ Accepted runtime deviations (W1b, Muse review):
 - `BinResolution` uses `""` for a missing binary where TS uses `null`. W3k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
 - Child output is decoded once from the full byte buffer; TS decodes per chunk, so a multibyte char split across chunks becomes U+FFFD in TS but decodes correctly in Go.
 
+- Job `.result.json` with a fractional `exitCode` (only reachable by hand-editing the sidecar) is truncated to an integer in Go; TS keeps the fraction.
+
 ### TS bugs found while porting
 
 - `src/storage/db.ts:595` (and the `try/catch` at `src/storage/db.ts:405-414`):
