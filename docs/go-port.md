@@ -725,17 +725,16 @@ hash cases. The TS side was already correct.
   ```
 
   The scope matters: `// port of` including test files is larger and must not
-  be compared with the non-test count. No numeric count is asserted here
-  because the pending `scanJob` annotation normalization will change it.
+  be compared with the non-test count. No numeric count is asserted here;
+  annotations change as provenance is clarified.
   Counts per file are not evidence of completeness either: some TS types,
   constants and module-level state are annotated under their Go names, and a
   few helpers are referenced only in prose.
-- Known annotation gap (report only, no Go edit in W5c): `storage.scanJob` is
-  annotated with prose "This is the Go form of
-  `src/storage/db.ts:jobFromRow`" rather than the canonical
-  `// port of src/storage/db.ts:jobFromRow`. The implementation exists and is
-  exercised. Coordinator is normalising the comment in `go-w3d`; followup stays
-  pending until the exact SHA and evidence are supplied.
+- The `storage.scanJob` provenance gap is closed by coordinator commit
+  `3d737eb`: its prose reference is now the canonical
+  `// port of src/storage/db.ts:jobFromRow` annotation. No executable code
+  changed; the whole Go suite passed `go test -race -count=1 ./...` at that
+  commit (job `jmvmto0810d0cae`).
 - `src/plugins/**` is adapter code listed above and is not expected to have a
   Go counterpart.
 
@@ -758,7 +757,8 @@ than it states.
   - `src/`, `claude/`, `scripts/`, `rules/`, `AGENTS.md` and `CLAUDE.md` have
     zero diff against `main` `6cefd81`.
   - Two Go mirrors: the CLI instruction constant in `internal/cli/cli.go` and
-    the `cave__bash` description/schema in `internal/tools/bash/bash.go`.
+    the `cave__bash` description in `internal/tools/bash/bash.go` (schema
+    unchanged).
     `TestInitInstructionsMatchTypeScript` runs `node dist/cli.js init` and
     byte-compares `CLAUDE.md`/`AGENTS.md`; bash `TestToolMetadata` pins the
     exact description and full input schema, and the CLI help golden pins the
