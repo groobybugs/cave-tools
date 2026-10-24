@@ -46,6 +46,8 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 	}{
 		{name: "unsupported-signal", args: `{"jobId":"j-diff-stop","signal":"SIGBOGUS"}`},
 		{name: "unknown-job", args: `{"jobId":"j-diff-stop-missing"}`},
+		{name: "missing-job-id", args: `{}`},
+		{name: "null-job-id", args: `{"jobId":null}`},
 		{
 			name: "already-finished",
 			jobs: jobs(finishedJob("j-diff-stop-done", "diff-stop", 7)),

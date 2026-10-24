@@ -33,7 +33,7 @@ var Tool = types.ToolDefinition{
 // handle is the cave__grep handler.
 // port of src/tools/grep.ts:grepTool.handler
 func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) {
-	pattern := jsString(args["pattern"])
+	pattern := jsArgString(args, "pattern")
 	searchDir := "."
 	if raw, ok := args["path"]; ok && jsTruthy(raw) {
 		searchDir = jsString(raw)
@@ -44,15 +44,10 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 	}
 	ignoreCase := isTrue(args["ignoreCase"])
 	literal := isTrue(args["literal"])
-	contextValue := int64(0)
+	contextValue := 0.0
 	if raw, ok := args["context"]; ok {
 		if number, isNumber := numberValue(raw); isNumber && number > 0 {
-			switch {
-			case number >= math.MaxInt32:
-				contextValue = math.MaxInt32
-			default:
-				contextValue = int64(number)
-			}
+			contextValue = number
 		}
 	}
 	effectiveLimit := float64(defaultLimit)
@@ -79,7 +74,7 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 		Pattern:    pattern,
 		File:       file,
 		Include:    glob,
-		Limit:      rgLimit(effectiveLimit),
+		Limit:      effectiveLimit,
 		IgnoreCase: ignoreCase,
 		Literal:    literal,
 	})
@@ -87,10 +82,6 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 		return errorResult("Error: " + err.Error()), nil
 	}
 	truncated := result.Truncated
-	if math.IsNaN(effectiveLimit) {
-		// TS: matches.slice(0, NaN) is empty and `length > NaN` is false.
-		truncated = false
-	}
 	matchesPath := cwd
 	if isDirectory {
 		matchesPath = searchPath
@@ -144,7 +135,7 @@ func (f *formatter) pushLine(relative, line string) {
 
 // formatMatches renders matches with context windows and the per-file cap.
 // port of src/tools/grep.ts:formatMatches
-func formatMatches(matches []rt.GrepMatch, cwd, searchPath string, contextValue int64, truncated bool, effectiveLimit float64) (string, string) {
+func formatMatches(matches []rt.GrepMatch, cwd, searchPath string, contextValue float64, truncated bool, effectiveLimit float64) (string, string) {
 	if len(matches) == 0 {
 		return "", ""
 	}
@@ -166,7 +157,7 @@ func formatMatches(matches []rt.GrepMatch, cwd, searchPath string, contextValue 
 			f.pushLine(relative, relative+":"+strconv.FormatInt(match.Line, 10)+": "+match.Text)
 			continue
 		}
-		window, err := rt.ReadLineWindow(absolute, match.Line, contextValue)
+		window, err := rt.ReadLineWindow(absolute, float64(match.Line), contextValue)
 		if err != nil {
 			f.pushLine(relative, relative+":"+strconv.FormatInt(match.Line, 10)+": "+match.Text)
 			continue
@@ -175,7 +166,7 @@ func formatMatches(matches []rt.GrepMatch, cwd, searchPath string, contextValue 
 			if strings.Contains(item.Text, "... (truncated)") {
 				f.linesTruncated = true
 			}
-			lineNumber := strconv.FormatInt(item.Line, 10)
+			lineNumber := jsNumberString(item.Line)
 			if item.Match {
 				f.pushLine(relative, relative+":"+lineNumber+": "+item.Text)
 			} else {
@@ -225,19 +216,6 @@ func relativePath(from, to string) string {
 		return ""
 	}
 	return filepath.ToSlash(relative)
-}
-
-// rgLimit converts the JS number limit to rgGrep's int64, saturating instead
-// of overflowing.
-func rgLimit(limit float64) int64 {
-	if math.IsNaN(limit) {
-		// slice(0, NaN) is empty anyway; 0 keeps rgGrep from reading past it.
-		return 0
-	}
-	if limit >= math.MaxInt64 {
-		return math.MaxInt64
-	}
-	return int64(limit)
 }
 
 func textResult(text string) types.ToolResult {

@@ -1,14 +1,14 @@
 // ASCII collation matching V8's default-locale localeCompare closely enough
-// for directory listings.
+// for directory listings and the fallback file finder.
 //
 // V8's localeCompare uses ICU's root/en-US collation: primary weights ignore
 // case, punctuation sorts before digits and letters in a fixed DUCET order,
 // and case is a tertiary difference (lowercase first). The table below was
 // derived from node 24.19.0 and verified against 50k random printable-ASCII
 // pairs. Characters outside printable ASCII fall back to their code point,
-// which is the documented deviation from ICU (go-port.md line 431 accepts the
-// same limitation for the ripgrep fallback finder).
-package ls
+// which is the documented deviation from ICU (go-port.md accepts the same
+// limitation for the ripgrep fallback finder).
+package runtime
 
 import "strings"
 
@@ -52,9 +52,9 @@ func tertiaryWeight(char rune) int {
 	return 1
 }
 
-// localeCompare mirrors String.prototype.localeCompare's sign for the names a
-// directory listing carries.
-func localeCompare(a, b string) int {
+// LocaleCompare mirrors String.prototype.localeCompare's sign for the names a
+// directory listing or the fallback finder carries.
+func LocaleCompare(a, b string) int {
 	left := []rune(a)
 	right := []rune(b)
 	shared := len(left)

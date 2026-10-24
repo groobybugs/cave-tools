@@ -11,6 +11,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
 	"github.com/groobybugs/cave-tools/go/internal/jsre"
@@ -158,7 +159,7 @@ func FilterShellOutput(ctx context.Context, input ShellOutput) FilteredShellOutp
 // handle is the cave__bash handler.
 // port of src/tools/bash.ts:bashTool.handler
 func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) {
-	command := jsString(args["command"])
+	command := jsArgString(args, "command")
 	var workdir string
 	if raw, ok := args["workdir"]; ok && jsTruthy(raw) {
 		workdir = jsString(raw)
@@ -197,8 +198,15 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 	if cliMode {
 		shell = CliShell(ctx)
 	}
+	// Node clamps a timer below 1ms to 1ms and truncates the rest
+	// (setTimeout(1.5) fires after 1); a plain int64 cast would turn 0.5 into
+	// "no timeout at all".
+	timeoutMillis := int64(math.Floor(timeout))
+	if timeout > 0 && timeoutMillis < 1 {
+		timeoutMillis = 1
+	}
 	result, err := rt.RunCommand(ctx, rewrittenCommand, rt.RunCommandOptions{
-		Timeout:  int64(timeout),
+		Timeout:  timeoutMillis,
 		Cwd:      cwd,
 		Shell:    shell,
 		MaxBytes: 100 * 1024, // generous; cave's budget table tightens further downstream
@@ -312,6 +320,10 @@ func pathErrorMessage(err error) string {
 			code, description = "ENOENT", "no such file or directory"
 		case errors.Is(err, fs.ErrPermission):
 			code, description = "EACCES", "permission denied"
+		case errors.Is(err, syscall.ENOTDIR):
+			code, description = "ENOTDIR", "not a directory"
+		case errors.Is(err, syscall.ELOOP):
+			code, description = "ELOOP", "too many symbolic links encountered"
 		}
 		if code != "" {
 			return code + ": " + description + ", " + pathErr.Op + " '" + pathErr.Path + "'"

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,12 +181,14 @@ func rgMocks(t *testing.T, withFd bool) context.Context {
 	t.Helper()
 	binDir := t.TempDir()
 	writeScript(t, binDir, "rg", `#!/bin/sh
+if [ -n "$RGARGS" ]; then printf '%s\n' "$@" > "$RGARGS"; fi
 /bin/cat "$RGMOCK"
 if [ -n "$RGMOCK_ERR" ]; then printf '%s' "$RGMOCK_ERR" >&2; fi
 exit "${RGMOCK_EXIT:-0}"
 `)
 	if withFd {
 		writeScript(t, binDir, "fd", `#!/bin/sh
+if [ -n "$FDARGS" ]; then printf '%s\n' "$@" > "$FDARGS"; fi
 /bin/cat "$FDMOCK"
 exit "${FDMOCK_EXIT:-0}"
 `)
@@ -546,5 +549,258 @@ func TestReadLineWindow(t *testing.T) {
 
 	if _, err := ReadLineWindow(filepath.Join(dir, "missing.txt"), 1, 0); err == nil {
 		t.Fatal("ReadLineWindow(missing) must fail")
+	}
+}
+
+// readMockArgv reads one argument per line from a recorded mock argv file.
+func readMockArgv(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read argv: %v", err)
+	}
+	return strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+}
+
+// maxResultsArg returns the value that follows --max-results.
+func maxResultsArg(t *testing.T, argv []string) string {
+	t.Helper()
+	for index := 0; index+1 < len(argv); index++ {
+		if argv[index] == "--max-results" {
+			return argv[index+1]
+		}
+	}
+	t.Fatalf("no --max-results in argv %#v", argv)
+	return ""
+}
+
+// TestRgFilesPassesJSNumberLimitToFd pins String(limit) exactly as TS hands it
+// to fd. TS formats the JS number (2.5, 1e+21, Infinity), so fd rejects the
+// value and rg/findWithNode takes over; a truncated Go int would change both
+// the argv and the fallback.
+func TestRgFilesPassesJSNumberLimitToFd(t *testing.T) {
+	cases := []struct {
+		name  string
+		limit float64
+		want  string
+	}{
+		{name: "integer", limit: 1000, want: "1000"},
+		{name: "fractional", limit: 2.5, want: "2.5"},
+		{name: "huge-exponent", limit: 1e21, want: "1e+21"},
+		{name: "huge-fixed", limit: 1e19, want: "10000000000000000000"},
+		{name: "infinity", limit: math.Inf(1), want: "Infinity"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := rgMocks(t, true)
+			env := GetEnv(ctx)
+			fdArgs := filepath.Join(t.TempDir(), "fd.args")
+			rgArgs := filepath.Join(t.TempDir(), "rg.args")
+			env["FDARGS"] = fdArgs
+			env["RGARGS"] = rgArgs
+			// fd rejects any non-integer --max-results, like the real binary.
+			env["FDMOCK_EXIT"] = "2"
+			if err := os.WriteFile(mockPath(t, ctx, "RGMOCK"), []byte("one.ts\ntwo.ts\nthree.ts\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := RgFiles(ctx, t.TempDir(), "*.ts", testCase.limit, true)
+			if err != nil {
+				t.Fatalf("RgFiles: %v", err)
+			}
+			if value := maxResultsArg(t, readMockArgv(t, fdArgs)); value != testCase.want {
+				t.Fatalf("fd --max-results = %q, want %q", value, testCase.want)
+			}
+			if len(readMockArgv(t, rgArgs)) == 0 {
+				t.Fatal("rg was not used after fd rejected the limit")
+			}
+			wantLen := len([]string{"one.ts", "two.ts", "three.ts"})
+			if testCase.limit == 2.5 {
+				wantLen = 2 // slice(0, 2.5)
+			}
+			if len(got) != wantLen {
+				t.Fatalf("RgFiles = %#v, want %d entries", got, wantLen)
+			}
+		})
+	}
+}
+
+// TestRgFilesFdSuccessSlicesLikeJS: fd accepted the limit, and parsePathLines
+// applies Array.prototype.slice(0, limit) semantics.
+func TestRgFilesFdSuccessSlicesLikeJS(t *testing.T) {
+	ctx := rgMocks(t, true)
+	env := GetEnv(ctx)
+	fdArgs := filepath.Join(t.TempDir(), "fd.args")
+	env["FDARGS"] = fdArgs
+	if err := os.WriteFile(mockPath(t, ctx, "FDMOCK"), []byte("a.ts\nb.ts\nc.ts\nd.ts\ne.ts\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := RgFiles(ctx, t.TempDir(), "*.ts", 2.5, true)
+	if err != nil {
+		t.Fatalf("RgFiles: %v", err)
+	}
+	if value := maxResultsArg(t, readMockArgv(t, fdArgs)); value != "2.5" {
+		t.Fatalf("fd --max-results = %q, want 2.5", value)
+	}
+	if strings.Join(got, ",") != "a.ts,b.ts" {
+		t.Fatalf("RgFiles = %#v, want [a.ts b.ts]", got)
+	}
+}
+
+// TestParsePathLinesJSSliceEnd pins slice(0, limit) for fractional, negative,
+// NaN and infinite limits.
+func TestParsePathLinesJSSliceEnd(t *testing.T) {
+	stdout := "a\nb\nc\nd\ne\n"
+	cases := []struct {
+		limit float64
+		want  string
+	}{
+		{limit: 2.5, want: "a,b"},
+		{limit: 2, want: "a,b"},
+		{limit: -1, want: "a,b,c,d"},
+		{limit: math.NaN(), want: ""},
+		{limit: math.Inf(1), want: "a,b,c,d,e"},
+		{limit: math.Inf(-1), want: ""},
+	}
+	for _, testCase := range cases {
+		got := strings.Join(parsePathLines(stdout, testCase.limit), ",")
+		if got != testCase.want {
+			t.Fatalf("parsePathLines(limit %v) = %q, want %q", testCase.limit, got, testCase.want)
+		}
+	}
+}
+
+// TestFindWithNodeLocaleOrder pins the TS fallback finder's localeCompare sort
+// (mixed case differs from a byte-wise sort).
+func TestFindWithNodeLocaleOrder(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"B.ts", "a.ts", "C.ts", "b.ts", "null", "undefined"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := findWithNode(root, "*", 100, true)
+	want := "a.ts,b.ts,B.ts,C.ts,null,undefined"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("findWithNode = %#v, want %s", got, want)
+	}
+}
+
+// TestRgGrepNaNLimitMatchesTS pins the TS rgGrep behaviour for a NaN limit:
+// every record is parsed (matches.length > NaN is false), the slice is empty
+// and truncation comes from the rg exit code alone.
+func TestRgGrepNaNLimitMatchesTS(t *testing.T) {
+	valid := `{"type":"match","data":{"path":{"text":"a.ts"},"lines":{"text":"one\n"},"line_number":1}}
+{"type":"match","data":{"path":{"text":"a.ts"},"lines":{"text":"two\n"},"line_number":2}}
+`
+	t.Run("code 2 truncates", func(t *testing.T) {
+		ctx := rgMocks(t, true)
+		env := GetEnv(ctx)
+		env["RGMOCK_EXIT"] = "2"
+		if err := os.WriteFile(mockPath(t, ctx, "RGMOCK"), []byte(valid), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		result, err := RgGrep(ctx, RgGrepInput{Cwd: t.TempDir(), Pattern: "x", Limit: math.NaN()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Matches) != 0 || !result.Truncated {
+			t.Fatalf("RgGrep = %#v, want empty matches and truncated", result)
+		}
+	})
+	t.Run("record after a match is still parsed", func(t *testing.T) {
+		ctx := rgMocks(t, true)
+		if err := os.WriteFile(mockPath(t, ctx, "RGMOCK"), []byte(valid+"not json\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := RgGrep(ctx, RgGrepInput{Cwd: t.TempDir(), Pattern: "x", Limit: math.NaN()})
+		if err == nil || err.Error() != "Invalid ripgrep JSON output" {
+			t.Fatalf("error = %v, want Invalid ripgrep JSON output", err)
+		}
+	})
+}
+
+// TestRgGrepFractionalLimit pins slice(0, limit) and truncated for a passed
+// limit.
+func TestRgGrepFractionalLimit(t *testing.T) {
+	body := strings.Join([]string{
+		`{"type":"match","data":{"path":{"text":"a.ts"},"lines":{"text":"1\n"},"line_number":1}}`,
+		`{"type":"match","data":{"path":{"text":"a.ts"},"lines":{"text":"2\n"},"line_number":2}}`,
+		`{"type":"match","data":{"path":{"text":"a.ts"},"lines":{"text":"3\n"},"line_number":3}}`,
+		`{"type":"match","data":{"path":{"text":"a.ts"},"lines":{"text":"4\n"},"line_number":4}}`,
+	}, "\n") + "\n"
+	ctx := rgMocks(t, true)
+	if err := os.WriteFile(mockPath(t, ctx, "RGMOCK"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := RgGrep(ctx, RgGrepInput{Cwd: t.TempDir(), Pattern: "x", Limit: 2.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Matches) != 2 || !result.Truncated {
+		t.Fatalf("RgGrep(2.5) = %#v", result)
+	}
+	result, err = RgGrep(ctx, RgGrepInput{Cwd: t.TempDir(), Pattern: "x", Limit: math.Inf(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Matches) != 4 || result.Truncated {
+		t.Fatalf("RgGrep(Inf) = %#v", result)
+	}
+}
+
+// TestReadLineWindowFractionalContext pins the TS readLineWindow loop: a
+// fractional `current` produces a fractional line number and an empty text
+// (lines[current - 1] is undefined); an integer start keeps real text.
+func TestReadLineWindowFractionalContext(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "frac.txt")
+	if err := os.WriteFile(file, []byte("alpha\nbeta\ngamma\ndelta\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	window, err := ReadLineWindow(file, 3, 1.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []LineWindow{
+		{Line: 1.5}, {Line: 2.5}, {Line: 3.5}, {Line: 4.5},
+	}
+	if len(window) != len(want) {
+		t.Fatalf("window = %#v", window)
+	}
+	for index := range want {
+		if window[index] != want[index] {
+			t.Fatalf("window[%d] = %#v, want %#v", index, window[index], want[index])
+		}
+	}
+
+	window, err = ReadLineWindow(file, 1, 1.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []LineWindow{{Line: 1, Text: "alpha", Match: true}, {Line: 2, Text: "beta"}}
+	if len(window) != len(want) {
+		t.Fatalf("window = %#v", window)
+	}
+	for index := range want {
+		if window[index] != want[index] {
+			t.Fatalf("window[%d] = %#v, want %#v", index, window[index], want[index])
+		}
+	}
+}
+
+// TestTruncateUTF16AstralCutLimitation documents the known deviation: TS
+// String.prototype.slice can cut a surrogate pair and yield a lone high
+// surrogate, which Go strings cannot hold, so utf16.Decode emits U+FFFD.
+func TestTruncateUTF16AstralCutLimitation(t *testing.T) {
+	input := strings.Repeat("a", 499) + "\U0001F600" + "b"
+	got := truncateUTF16(input, 500)
+	want := strings.Repeat("a", 499) + "\uFFFD"
+	if got != want {
+		t.Fatalf("truncateUTF16 = %q, want %q", got, want)
+	}
+	if !strings.Contains(got, "\uFFFD") {
+		t.Fatal("expected the astral cut to produce U+FFFD in Go")
 	}
 }
