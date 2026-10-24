@@ -431,6 +431,8 @@ Accepted runtime deviations (W1b, Muse review):
 - `BinResolution` uses `""` for a missing binary where TS uses `null`. W3k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
 - Job `.result.json` with a fractional `exitCode` (only reachable by hand-editing the sidecar) is truncated to an integer in Go; TS keeps the fraction.
 
+- `daemon/control` (Go `bins` run / CLI exec helpers): output above the TS `maxBuffer` is parsed in Go instead of rejected with a maxBuffer error (Muse W2k, low).
+
 ### TS bugs found while porting
 
 The port found these in the TS implementation. All are fixed in TS on `main`
