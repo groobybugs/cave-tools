@@ -8,7 +8,9 @@ import (
 	"regexp"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	rt "github.com/groobybugs/cave-tools/go/internal/runtime"
 	"github.com/groobybugs/cave-tools/go/internal/storage"
@@ -20,6 +22,19 @@ func envContext(env map[string]string, clientID string) context.Context {
 	rt.RunWithContext(context.Background(), &rt.CallContext{
 		Env:      env,
 		ClientID: clientID,
+	}, func(ctx context.Context) any {
+		captured = ctx
+		return nil
+	})
+	return captured
+}
+
+// clientContext builds a daemon-client call context, like runWithContext with
+// clientPid in the TS suite.
+func clientContext(pid int) context.Context {
+	var captured context.Context
+	rt.RunWithContext(context.Background(), &rt.CallContext{
+		ClientPID: &pid,
 	}, func(ctx context.Context) any {
 		captured = ctx
 		return nil
@@ -134,6 +149,70 @@ func TestFileCacheDedup(t *testing.T) {
 
 func stringPtr(s string) *string { return &s }
 
+// TestIsFileUnchangedConcurrentHash runs ApplyBudget while IsFileUnchanged
+// re-hashes a large file. Under -race it proves the cache lock is not held
+// across stat/re-hash and that entry reads/writes stay synchronized.
+func TestIsFileUnchangedConcurrentHash(t *testing.T) {
+	t.Cleanup(waitPendingPersists)
+	ResetSubagentContextCache()
+	ctx := context.Background()
+	ResetCache(ctx)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("0123456789abcdef", 1<<18)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	UpdateFileCache(ctx, path, "hash-session", FileCacheUpdate{})
+	// Touch the mtime so the next check re-hashes the unchanged content.
+	touched := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, touched, touched); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	var workersReady sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		workersReady.Add(1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			workersReady.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if got := ApplyBudget(ctx, strings.Repeat("line\n", 50), "read"); got == "" {
+					t.Error("ApplyBudget returned empty text")
+					return
+				}
+			}
+		}()
+	}
+	workersReady.Wait()
+	stubbed := IsFileUnchanged(ctx, path, "hash-session", DefaultDeliveryKey)
+	close(stop)
+	wg.Wait()
+	if !stubbed {
+		t.Fatal("mtime touch with same content must still stub")
+	}
+
+	// The mtime update proves the re-hash branch ran while the workers did.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	utilsMu.Lock()
+	cachedMtime := fileCache["hash-session"][path].mtime
+	utilsMu.Unlock()
+	if cachedMtime != mtimeMsMillis(info) {
+		t.Fatalf("cached mtime = %v, want %v (re-hash path not taken)", cachedMtime, mtimeMsMillis(info))
+	}
+}
+
 // TestHashContent ports the hash/getFileHash assertions from test.mjs.
 func TestHashContent(t *testing.T) {
 	want := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
@@ -181,12 +260,58 @@ func TestBounceTracking(t *testing.T) {
 		t.Fatal("recent edit should force full reads")
 	}
 
-	// TS quirk kept for parity: resetStats leaves the range-edit counters.
+	// resetStats clears the range-edit counters too (TS fix e8bb31f).
 	RecordRangeEchoSaved(ctx, 100)
 	ResetStats(ctx)
 	rangeStats := GetRangeEditStats(ctx)
-	if rangeStats.Edits != 1 || rangeStats.EchoSavedChars != 100 {
-		t.Fatalf("range edit stats after reset = %+v, want edits=1 echo=100", rangeStats)
+	if rangeStats != (RangeEditStats{}) {
+		t.Fatalf("range edit stats after reset = %+v, want zeros", rangeStats)
+	}
+}
+
+// TestBuildStatsClientBucketBounces ports scripts/test-port-bugs.mjs test 14:
+// buildStats must report the passed bucket's bounces, not the ambient one.
+func TestBuildStatsClientBucketBounces(t *testing.T) {
+	t.Cleanup(waitPendingPersists)
+	const pid = 777
+	clientCtx := clientContext(pid)
+	ResetStats(clientCtx)
+	RecordRead(clientCtx, "/tmp/pb14.ts", true, 100)
+	RecordRead(clientCtx, "/tmp/pb14.ts", false, 500)
+	// Written from the local context, whose bucket has no bounces.
+	ReleaseClientStats(context.Background(), pid)
+
+	var row *storage.SessionStatsRow
+	for _, candidate := range ListSessionStats(true) {
+		if candidate.Pid == pid {
+			found := candidate
+			row = &found
+			break
+		}
+	}
+	if row == nil {
+		t.Fatal("client row written")
+	}
+	if row.Bounces.TotalBounces != 1 {
+		t.Fatalf("bounces.totalBounces = %d, want 1", row.Bounces.TotalBounces)
+	}
+	if _, ok := row.Bounces.ByExtension[".ts"]; !ok {
+		t.Fatalf("per-extension bounce kept, got %+v", row.Bounces.ByExtension)
+	}
+}
+
+// TestResetStatsClearsRangeEdits ports scripts/test-port-bugs.mjs test 15.
+func TestResetStatsClearsRangeEdits(t *testing.T) {
+	t.Cleanup(waitPendingPersists)
+	ctx := context.Background()
+	ResetStats(ctx)
+	RecordRangeEchoSaved(ctx, 1234)
+	if GetRangeEditStats(ctx).Edits == 0 {
+		t.Fatal("range edit should be recorded")
+	}
+	ResetStats(ctx)
+	if got := GetRangeEditStats(ctx); got != (RangeEditStats{}) {
+		t.Fatalf("range edit stats after reset = %+v, want zeros", got)
 	}
 }
 
@@ -349,6 +474,40 @@ func TestRewriteCommandWithRtk(t *testing.T) {
 	}
 	assertOnce(t, deltaRtk(before, GetRtkStats(ctx)), "passthrough")
 	_ = os.Unsetenv("FAKE_RTK_SLEEP_MS")
+}
+
+// fakeRtkSelfKillScript prints partial output, then kills itself with SIGKILL.
+const fakeRtkSelfKillScript = `#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'rtk-fake 0\n'; exit 0; fi
+if [ "$1" = "rewrite" ]; then printf 'rtk partial'; kill -9 $$; fi
+exit 1
+`
+
+// TestRewriteCommandWithRtkSignalKill mirrors TS: a non-timeout signal kill is
+// not a timeout, so the partial stdout is kept and counted as a rewrite.
+func TestRewriteCommandWithRtkSignalKill(t *testing.T) {
+	t.Cleanup(waitPendingPersists)
+	if goruntime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics")
+	}
+	ctx := context.Background()
+	ResetStats(ctx)
+	ResetRTKAvailabilityCache()
+
+	dir := t.TempDir()
+	fakeRtk := filepath.Join(dir, "rtk")
+	if err := os.WriteFile(fakeRtk, []byte(fakeRtkSelfKillScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ResetRTKAvailabilityCache()
+
+	before := GetRtkStats(ctx)
+	got := RewriteCommandWithRtk(ctx, "echo hi", false)
+	if got != "rtk partial" {
+		t.Fatalf("signal-kill partial stdout = %q, want %q", got, "rtk partial")
+	}
+	assertOnce(t, deltaRtk(before, GetRtkStats(ctx)), "rewrites")
 }
 
 // TestCompactJSON ports test.mjs "2b. Testing JSON compaction".

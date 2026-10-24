@@ -138,9 +138,9 @@ func StartJob(ctx context.Context, input StartJobInput) (*storage.JobRecord, err
 		}
 		_ = storage.UpdateJobState(jobID, storage.JobUpdate{
 			State:    state,
-			EndedAt:  &endedAt,
-			ExitCode: exitCode,
-			Signal:   completionSignal,
+			EndedAt:  storage.Some(endedAt),
+			ExitCode: jobOptionalInt64(exitCode),
+			Signal:   jobOptionalString(completionSignal),
 		})
 		notifyCloseWaiter(jobID)
 	})
@@ -155,6 +155,23 @@ func jobWorkdir(workdir *string) string {
 		return ""
 	}
 	return *workdir
+}
+
+// jobOptionalInt64 maps a `number | null` onto updateJobState's three-state
+// field: TS passes these explicitly, so nil is an explicit NULL.
+func jobOptionalInt64(value *int64) storage.Optional[int64] {
+	if value == nil {
+		return storage.Null[int64]()
+	}
+	return storage.Some(*value)
+}
+
+// jobOptionalString is jobOptionalInt64 for signals.
+func jobOptionalString(value *string) storage.Optional[string] {
+	if value == nil {
+		return storage.Null[string]()
+	}
+	return storage.Some(*value)
 }
 
 // durableJobResult is the worker's structured completion sidecar.
@@ -310,9 +327,9 @@ func GetJobInfo(jobID string) (*storage.JobRecord, error) {
 		endedAt := durable.EndedAt
 		_ = storage.UpdateJobState(jobID, storage.JobUpdate{
 			State:    storage.JobExited,
-			EndedAt:  &endedAt,
-			ExitCode: durable.ExitCode,
-			Signal:   durable.Signal,
+			EndedAt:  storage.Some(endedAt),
+			ExitCode: jobOptionalInt64(durable.ExitCode),
+			Signal:   jobOptionalString(durable.Signal),
 		})
 		job.State = storage.JobExited
 		job.ExitCode = durable.ExitCode
@@ -325,9 +342,9 @@ func GetJobInfo(jobID string) (*storage.JobRecord, error) {
 		endedAt := time.Now().UnixMilli()
 		_ = storage.UpdateJobState(jobID, storage.JobUpdate{
 			State:    storage.JobExited,
-			EndedAt:  &endedAt,
-			ExitCode: &recovered.exitCode,
-			Signal:   recovered.signal,
+			EndedAt:  storage.Some(endedAt),
+			ExitCode: storage.Some(recovered.exitCode),
+			Signal:   jobOptionalString(recovered.signal),
 		})
 		job.State = storage.JobExited
 		job.ExitCode = &recovered.exitCode
@@ -337,10 +354,13 @@ func GetJobInfo(jobID string) (*storage.JobRecord, error) {
 	}
 
 	endedAt := time.Now().UnixMilli()
-	// TS passes only state/endedAt here, so exit_code and signal become NULL.
-	_ = storage.UpdateJobState(jobID, storage.JobUpdate{State: storage.JobLost, EndedAt: &endedAt})
+	// Only state/endedAt are written; a recorded exit code and signal survive.
+	_ = storage.UpdateJobState(jobID, storage.JobUpdate{State: storage.JobLost, EndedAt: storage.Some(endedAt)})
+	// Return the stored row so the result matches the db exactly.
+	if stored, err := storage.GetJob(jobID); err == nil && stored != nil {
+		return stored, nil
+	}
 	job.State = storage.JobLost
-	job.EndedAt = &endedAt
 	return job, nil
 }
 
@@ -389,8 +409,8 @@ func StopJob(jobID string, signal ...string) (*storage.JobRecord, error) {
 	endedAt := time.Now().UnixMilli()
 	_ = storage.UpdateJobState(jobID, storage.JobUpdate{
 		State:   storage.JobKilled,
-		EndedAt: &endedAt,
-		Signal:  &requestedSignal,
+		EndedAt: storage.Some(endedAt),
+		Signal:  storage.Some(requestedSignal),
 	})
 	// pid 0 means the worker never started (a Go-only state: TS fails the
 	// insert before storing it). Signalling 0 would hit this process group.
