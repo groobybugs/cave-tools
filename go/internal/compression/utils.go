@@ -1220,7 +1220,59 @@ func StripAnsi(text string) string {
 // CollapseBlankLines caps runs of blank lines at one.
 // port of src/compression/utils.ts:collapseBlankLines
 func CollapseBlankLines(text string) string {
-	return blankLinesRE.ReplaceAllString(text, "\n\n")
+	var out strings.Builder
+	changed := false
+	for i := 0; i < len(text); {
+		units, width := blankLineRun(text[i:])
+		if units >= 3 {
+			if !changed {
+				out.Grow(len(text))
+				out.WriteString(text[:i])
+				changed = true
+			}
+			out.WriteString("\n\n")
+			i += width
+			continue
+		}
+		if !changed {
+			if width == 0 {
+				i++
+			} else {
+				i += width
+			}
+			continue
+		}
+		if width == 0 {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+		out.WriteString(text[i : i+width])
+		i += width
+	}
+	if !changed {
+		return text
+	}
+	return out.String()
+}
+
+// blankLineRun returns the number of consecutive LF or CRLF line endings at
+// the start of s and their byte width.
+func blankLineRun(s string) (units, width int) {
+	for width < len(s) {
+		if s[width] == '\n' {
+			units++
+			width++
+			continue
+		}
+		if s[width] == '\r' && width+1 < len(s) && s[width+1] == '\n' {
+			units++
+			width += 2
+			continue
+		}
+		break
+	}
+	return units, width
 }
 
 // maskDigitRuns replaces every digit run with '#'.
