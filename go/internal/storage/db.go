@@ -561,11 +561,32 @@ func migrateSessions(conn queryer) error {
 			// Skip corrupt legacy session files.
 			continue
 		}
-		if err := upsertSessionStatsWithDB(conn, stats, nil); err != nil {
-			return err
+		if !legacySessionAcceptedByTS(raw) {
+			continue
 		}
+		// TS catches per file and keeps going.
+		_ = upsertSessionStatsWithDB(conn, stats, nil)
 	}
 	return nil
+}
+
+// legacySessionAcceptedByTS reports whether TS's upsertSessionStats would
+// accept this legacy file: it throws on a missing or null cache, savings,
+// rtk or bounces object (property access on undefined/null) and binds NULL
+// into budgets_json NOT NULL when budgets is missing. TS skips those files.
+func legacySessionAcceptedByTS(raw []byte) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return false
+	}
+	for _, key := range []string{"cache", "savings", "rtk", "bounces"} {
+		v, ok := fields[key]
+		if !ok || string(v) == "null" {
+			return false
+		}
+	}
+	_, ok := fields["budgets"]
+	return ok
 }
 
 // port of src/storage/db.ts:migrateReadRegistry

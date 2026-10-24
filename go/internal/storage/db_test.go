@@ -878,3 +878,48 @@ func equalStrings(a, b []string) bool { return slices.Equal(a, b) }
 
 // contains is strings.Contains with a readable failure message in the caller.
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
+
+// TS migrateSessions skips a legacy file when upsertSessionStats throws: a
+// missing or null cache/savings/rtk/bounces object (property access on
+// undefined) or a missing budgets key (NULL into budgets_json NOT NULL).
+// Other files still migrate.
+func TestLegacyMigrationSkipsFilesTSRejects(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "data")
+	t.Setenv("CAVE_TOOLS_DATA_DIR", dir)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	resetDB(t)
+	t.Cleanup(func() { resetDB(t) })
+
+	full := func(pid int) map[string]any {
+		return map[string]any{
+			"pid": pid, "sessionStart": 1, "updatedAt": 2,
+			"cache":   map[string]any{"hits": 0, "misses": 0, "filesTracked": 0},
+			"savings": map[string]any{"totalCalls": 0, "rawChars": 0, "compressedChars": 0, "compressionSavedChars": 0, "dedupSavedChars": 0, "savedChars": 0, "byTool": map[string]any{}},
+			"rtk":     map[string]any{"rewrites": 0, "alreadyWrapped": 0, "passthrough": 0},
+			"bounces": map[string]any{"totalBounces": 0, "totalWastedChars": 0, "byExtension": map[string]any{}},
+			"budgets": map[string]any{},
+		}
+	}
+	writeJSON(t, filepath.Join(dir, "sessions", "1.json"), full(1))
+	for i, key := range []string{"budgets", "cache", "savings", "rtk", "bounces"} {
+		s := full(10 + i)
+		delete(s, key)
+		writeJSON(t, filepath.Join(dir, "sessions", key+"-missing.json"), s)
+	}
+	nullRtk := full(20)
+	nullRtk["rtk"] = nil
+	writeJSON(t, filepath.Join(dir, "sessions", "rtk-null.json"), nullRtk)
+
+	rows, err := ListSessionStats(true)
+	if err != nil {
+		t.Fatalf("ListSessionStats: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Pid != 1 {
+		pids := []int64{}
+		for _, r := range rows {
+			pids = append(pids, int64(r.Pid))
+		}
+		t.Fatalf("migrated pids = %v, want only [1]", pids)
+	}
+}

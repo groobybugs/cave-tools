@@ -326,11 +326,7 @@ Default stays TypeScript.
    so the emitted results are identical.
 3. `GetCwd` returns `""` when the process cwd no longer exists; TS
    `process.cwd()` throws in that case.
-4. Legacy session files that omit `budgets`/`bounces`: Go writes `{}` and keeps
-   the row, TS binds `NULL` and the `NOT NULL` constraint makes
-   `migrateSessions` drop the file (see the TS bug below). Go therefore
-   migrates data that TS silently discards.
-5. `ListSessionStats(bool)` and `MarkSessionEnded(pid, ...)` make TS's default
+4. `ListSessionStats(bool)` and `MarkSessionEnded(pid, ...)` make TS's default
    parameters explicit/variadic; behaviour is unchanged.
 
 ### TS bugs found while porting
@@ -340,7 +336,7 @@ Default stays TypeScript.
   file predates the `budgets` field. better-sqlite3 binds that as `NULL` and
   `budgets_json TEXT NOT NULL` rejects the row, so `migrateSessions` silently
   skips the whole session (same for a missing `bounces`/`savings` object).
-  Ported faithfully except for the nil-budgets case documented above.
+  Ported faithfully: Go skips the same legacy files (`legacySessionAcceptedByTS`).
 - `src/storage/db.ts:806` `updateJobState` overwrites `ended_at`, `exit_code`
   and `signal` with `NULL` whenever the caller omits them (`update.x ?? null`
   is intentional per call site, but it means a state-only call such as
