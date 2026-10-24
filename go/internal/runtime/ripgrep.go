@@ -93,6 +93,8 @@ func spawnBin(ctx context.Context, command string, args []string, cwd string) sp
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// The TS helper spawns with windowsHide: true and without detached.
+	configureSpawn(cmd, false)
 	err := cmd.Run()
 	if cmd.ProcessState == nil {
 		return spawnBinResult{Code: -1, Err: err}

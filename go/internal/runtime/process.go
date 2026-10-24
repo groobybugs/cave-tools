@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf16"
 )
@@ -270,38 +269,6 @@ func truncateUTF16(s string, n int) string {
 	return string(utf16.Decode(units[:n]))
 }
 
-// port of src/runtime/process.ts:isProcessAlive
-func IsProcessAlive(pid int) bool {
-	if goruntime.GOOS == "windows" {
-		process, err := os.FindProcess(pid)
-		if err != nil {
-			return false
-		}
-		return process.Signal(syscall.Signal(0)) == nil
-	}
-	// process.kill(pid, 0): EPERM throws in Node, so it is not "alive" here.
-	return syscall.Kill(pid, 0) == nil
-}
-
-// port of src/runtime/process.ts:killProcessGroup
-func KillProcessGroup(pid int, signal string) bool {
-	sig, ok := signalFromName(signal)
-	if !ok {
-		return false
-	}
-	if goruntime.GOOS == "windows" {
-		process, err := os.FindProcess(pid)
-		if err != nil {
-			return false
-		}
-		return process.Kill() == nil
-	}
-	if err := syscall.Kill(-pid, sig); err != nil {
-		return false
-	}
-	return true
-}
-
 // StartBackgroundOptions mirrors src/runtime/process.ts:StartBackgroundOptions.
 type StartBackgroundOptions struct {
 	Cwd   string `json:"cwd,omitempty"`
@@ -416,7 +383,7 @@ func startBackgroundProcess(ctx context.Context, cmd *exec.Cmd, cwd string, hand
 		cmd.Dir = cwd
 	}
 	cmd.Env = envSlice(GetEnv(ctx))
-	setProcessGroup(cmd)
+	configureSpawn(cmd, true)
 	if err := cmd.Start(); err != nil {
 		go handle.fire(nil, nil)
 		return
@@ -477,7 +444,7 @@ func RunCommand(ctx context.Context, command string, options RunCommandOptions) 
 	cmd.Env = envSlice(GetEnv(ctx))
 	cmd.Stdout = stdoutCap
 	cmd.Stderr = stderrCap
-	setProcessGroup(cmd)
+	configureSpawn(cmd, true)
 
 	if err := cmd.Start(); err != nil {
 		return RunCommandResult{}, spawnError(shell, err)
@@ -508,12 +475,12 @@ func RunCommand(ctx context.Context, command string, options RunCommandOptions) 
 				return
 			}
 			timedOut.set()
-			killGroup(pid, syscall.SIGTERM)
+			terminateProcess(pid, signalTerm)
 			addTimer(time.AfterFunc(time.Duration(forceKillAfterMs)*time.Millisecond, func() {
 				if finished.isSet() {
 					return
 				}
-				killGroup(pid, syscall.SIGKILL)
+				terminateProcess(pid, signalKill)
 			}))
 		}))
 	}
@@ -558,45 +525,14 @@ func (f *atomicFlag) isSet() bool {
 	return f.on
 }
 
-func shellCommand(shell, command string) *exec.Cmd {
-	if goruntime.GOOS == "windows" && isCmdExe(shell) {
-		return exec.Command(shell, "/d", "/s", "/c", command)
-	}
-	return exec.Command(shell, "-c", command)
-}
+// processSignal is the platform-neutral subset the kill timeout sends:
+// SIGTERM first, then SIGKILL after the grace period.
+type processSignal int
 
-func isCmdExe(shell string) bool {
-	base := strings.ToLower(strings.ReplaceAll(shell, "\\", "/"))
-	base = base[strings.LastIndex(base, "/")+1:]
-	return base == "cmd" || base == "cmd.exe"
-}
-
-func setProcessGroup(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-}
-
-func killGroup(pid int, sig syscall.Signal) {
-	// Process already exited: ignore, exactly like the TS catch.
-	_ = syscall.Kill(-pid, sig)
-}
-
-func waitResult(cmd *exec.Cmd) (*int, *string) {
-	state := cmd.ProcessState
-	if state == nil {
-		return nil, nil
-	}
-	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-		name := signalName(status.Signal())
-		return nil, &name
-	}
-	code := state.ExitCode()
-	if code < 0 {
-		// Unreachable on Unix (signalled processes are handled above); keep
-		// TS's null code instead of a sentinel.
-		return nil, nil
-	}
-	return &code, nil
-}
+const (
+	signalTerm processSignal = iota
+	signalKill
+)
 
 func spawnError(command string, err error) error {
 	switch {
@@ -619,60 +555,4 @@ func envSlice(env map[string]string) []string {
 		values = append(values, key+"="+env[key])
 	}
 	return values
-}
-
-var signalNames = map[syscall.Signal]string{
-	syscall.SIGHUP:    "SIGHUP",
-	syscall.SIGINT:    "SIGINT",
-	syscall.SIGQUIT:   "SIGQUIT",
-	syscall.SIGILL:    "SIGILL",
-	syscall.SIGTRAP:   "SIGTRAP",
-	syscall.SIGABRT:   "SIGABRT",
-	syscall.SIGBUS:    "SIGBUS",
-	syscall.SIGFPE:    "SIGFPE",
-	syscall.SIGKILL:   "SIGKILL",
-	syscall.SIGUSR1:   "SIGUSR1",
-	syscall.SIGSEGV:   "SIGSEGV",
-	syscall.SIGUSR2:   "SIGUSR2",
-	syscall.SIGPIPE:   "SIGPIPE",
-	syscall.SIGALRM:   "SIGALRM",
-	syscall.SIGTERM:   "SIGTERM",
-	syscall.SIGCHLD:   "SIGCHLD",
-	syscall.SIGCONT:   "SIGCONT",
-	syscall.SIGSTOP:   "SIGSTOP",
-	syscall.SIGTSTP:   "SIGTSTP",
-	syscall.SIGTTIN:   "SIGTTIN",
-	syscall.SIGTTOU:   "SIGTTOU",
-	syscall.SIGURG:    "SIGURG",
-	syscall.SIGXCPU:   "SIGXCPU",
-	syscall.SIGXFSZ:   "SIGXFSZ",
-	syscall.SIGVTALRM: "SIGVTALRM",
-	syscall.SIGPROF:   "SIGPROF",
-	syscall.SIGWINCH:  "SIGWINCH",
-	syscall.SIGIO:     "SIGIO",
-	syscall.SIGSYS:    "SIGSYS",
-}
-
-var signalsByName = func() map[string]syscall.Signal {
-	byName := make(map[string]syscall.Signal, len(signalNames))
-	for value, name := range signalNames {
-		byName[name] = value
-	}
-	return byName
-}()
-
-func signalName(sig syscall.Signal) string {
-	if name, ok := signalNames[sig]; ok {
-		return name
-	}
-	return fmt.Sprintf("SIG%d", int(sig))
-}
-
-func signalFromName(name string) (syscall.Signal, bool) {
-	normalized := strings.ToUpper(strings.TrimSpace(name))
-	if !strings.HasPrefix(normalized, "SIG") {
-		normalized = "SIG" + normalized
-	}
-	sig, ok := signalsByName[normalized]
-	return sig, ok
 }

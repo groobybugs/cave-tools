@@ -16,7 +16,6 @@ import (
 	goruntime "runtime"
 	"strings"
 	"sync"
-	"syscall"
 )
 
 // port of src/runtime/bins.ts:RG_VERSION
@@ -173,18 +172,6 @@ func homeDir() string {
 	return home
 }
 
-// port of src/runtime/bins.ts:isExecutable
-func isExecutable(filePath string) bool {
-	if goruntime.GOOS == "windows" {
-		// fs.constants.F_OK on win32.
-		_, err := os.Stat(filePath)
-		return err == nil
-	}
-	// X_OK is 1 in POSIX; Go keeps it out of package syscall.
-	const xOK = 1
-	return syscall.Access(filePath, xOK) == nil
-}
-
 // port of src/runtime/bins.ts:whichOnPath
 func WhichOnPath(ctx context.Context, names []string) string {
 	pathEnv := GetEnv(ctx)["PATH"]
@@ -245,6 +232,8 @@ func run(ctx context.Context, command string, args []string) (code int, stderr s
 	cmd := exec.Command(command, args...)
 	var errBuf strings.Builder
 	cmd.Stderr = &errBuf
+	// The TS helper spawns with windowsHide: true and without detached.
+	configureSpawn(cmd, false)
 	err := cmd.Run()
 	stderr = errBuf.String()
 	if cmd.ProcessState == nil {
