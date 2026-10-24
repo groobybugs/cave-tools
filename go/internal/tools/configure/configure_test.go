@@ -15,76 +15,90 @@ import (
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
 
+type configureParityPayload struct {
+	Results []types.ToolResult `json:"results"`
+	Status  string             `json:"status"`
+	Applied []string           `json:"applied"`
+}
+
+type applyCase struct {
+	Tool string `json:"tool"`
+	Text string `json:"text"`
+}
+
+// configureParityCalls exercises JS number coercion, fractional budgets, the
+// optional max_chars carry-over, Object.entries ordering, and the drain cases.
+var configureParityCalls = []map[string]any{
+	{"action": "set_budget", "tool_name": "grep", "max_lines": 5, "head_lines": 2, "tail_lines": 2},
+	{"action": "set_budget", "tool_name": "no-such-tool", "max_lines": 10},
+	{"action": "set_budget", "tool_name": "web", "max_lines": 120, "head_lines": 60, "tail_lines": 60, "max_chars": 100},
+	{"action": "set_budget", "tool_name": "web", "max_lines": 120, "head_lines": 60, "tail_lines": 60, "max_chars": 0},
+	{"action": "set_budget", "tool_name": "zzz", "max_lines": 1, "head_lines": 1, "tail_lines": 1},
+	{"action": "set_budget", "tool_name": "aaa", "max_lines": 2, "head_lines": 2, "tail_lines": 2},
+	{"action": "set_budget", "tool_name": "frac", "max_lines": 12.7, "head_lines": 2.5, "tail_lines": 1.25, "max_chars": 12.7},
+	{"action": "set_budget", "tool_name": "frac", "max_lines": 6, "head_lines": 1.5, "tail_lines": 1.25},
+	{"action": "set_budget", "tool_name": "neg", "max_lines": 4, "head_lines": 1.5, "tail_lines": 1.25, "max_chars": -5},
+	{"action": "set_budget", "tool_name": "neglines", "max_lines": -3, "head_lines": -2.5, "tail_lines": -1},
+	{"action": "set_budget", "tool_name": "inf", "max_lines": "Infinity", "head_lines": 2, "tail_lines": 1},
+	{"action": "set_budget", "tool_name": "infchars", "max_lines": 10, "max_chars": "Infinity"},
+	{"action": "set_budget", "tool_name": "radix", "max_lines": "0b11", "head_lines": "0o17", "tail_lines": "0x10", "max_chars": "0o17"},
+	{"action": "set_budget", "tool_name": "2", "max_lines": 2, "head_lines": 2, "tail_lines": 2},
+	{"action": "set_budget", "tool_name": "10", "max_lines": 10, "head_lines": 5, "tail_lines": 5},
+	{"action": "set_budget", "tool_name": "1", "max_lines": 1, "head_lines": 1, "tail_lines": 1},
+	{"action": "set_budget", "tool_name": "coerce1", "max_lines": []any{}, "head_lines": []any{7}, "tail_lines": nil, "max_chars": []any{12.5}},
+	{"action": "set_budget", "tool_name": "coerce2", "max_lines": "1e999", "max_chars": "1e999"},
+	{"action": "set_budget", "tool_name": "coerce3", "max_lines": []any{"5"}, "max_chars": "abc"},
+	{"action": "set_budget", "tool_name": "coerce4", "max_lines": map[string]any{"x": 1}, "max_chars": map[string]any{}},
+	{"action": "reset_cache"},
+	{"action": "reset_stats"},
+	{"action": "frobnicate"},
+	{},
+	{"action": 42},
+}
+
+var configureParityApply = []applyCase{
+	{Tool: "frac", Text: "a\nb\nc\nd\ne\nf\ng\nh"},
+	{Tool: "neg", Text: "one\ntwo\nthree\nfour\nfive\nsix"},
+	{Tool: "neglines", Text: "one\ntwo\nthree\nfour\nfive\nsix"},
+	{Tool: "inf", Text: "one\ntwo\nthree"},
+	{Tool: "infchars", Text: "one\ntwo\nthree"},
+	{Tool: "radix", Text: "a\nb\nc\nd\ne"},
+	{Tool: "2", Text: "a\nb\nc\nd\ne"},
+}
+
 // TestHandlerParity runs the TS handler and the Go handler over the same call
-// sequence and fixture, then compares every ToolResult plus the final status
-// report (which includes TS's insertion-ordered budgets).
+// sequence in fresh processes, then compares every ToolResult, the status
+// report and applyBudget output. The Go side runs in a test-binary child so
+// budgets and the storage singleton cannot leak from other tests.
 func TestHandlerParity(t *testing.T) {
 	root := repoRoot(t)
 	distConfigure := filepath.Join(root, "dist", "tools", "configure.js")
 	distStatus := filepath.Join(root, "dist", "tools", "status.js")
-	if _, err := os.Stat(distConfigure); err != nil {
-		t.Skip("dist/tools/configure.js is missing: run pnpm build first")
-	}
-	if _, err := os.Stat(distStatus); err != nil {
-		t.Skip("dist/tools/status.js is missing: run pnpm build first")
+	distUtils := filepath.Join(root, "dist", "compression", "utils.js")
+	for _, dist := range []string{distConfigure, distStatus, distUtils} {
+		if _, err := os.Stat(dist); err != nil {
+			t.Skipf("%s is missing: run pnpm build first", dist)
+		}
 	}
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not found on PATH")
 	}
 
-	calls := []map[string]any{
-		{"action": "set_budget", "tool_name": "grep", "max_lines": 5, "head_lines": 2, "tail_lines": 2},
-		{"action": "set_budget", "tool_name": "no-such-tool", "max_lines": 10},
-		{"action": "set_budget", "tool_name": "web", "max_lines": 120, "head_lines": 60, "tail_lines": 60, "max_chars": 100},
-		{"action": "set_budget", "tool_name": "web", "max_lines": 120, "head_lines": 60, "tail_lines": 60, "max_chars": 0},
-		{"action": "set_budget", "tool_name": "zzz", "max_lines": 1, "head_lines": 1, "tail_lines": 1},
-		{"action": "set_budget", "tool_name": "aaa", "max_lines": 2, "head_lines": 2, "tail_lines": 2},
-		{"action": "reset_cache"},
-		{"action": "reset_stats"},
-		{"action": "frobnicate"},
-		{},
-		{"action": 42},
-	}
-
-	type payload struct {
-		Results []types.ToolResult `json:"results"`
-		Status  string             `json:"status"`
-	}
-
 	dir := t.TempDir()
-	t.Setenv("CAVE_TOOLS_DATA_DIR", dir)
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(dir, "claude"))
-	ctx := context.Background()
-	compression.ResetStats(ctx)
-	goPayload := payload{Results: make([]types.ToolResult, 0, len(calls))}
-	for _, call := range calls {
-		result, err := Tool.Handler(ctx, call)
-		if err != nil {
-			t.Fatalf("go handler %v: %v", call, err)
-		}
-		goPayload.Results = append(goPayload.Results, result)
-	}
-	statusResult, err := status.Tool.Handler(ctx, map[string]any{})
-	if err != nil {
-		t.Fatalf("go status: %v", err)
-	}
-	if text, ok := statusResult.Content[0].(types.TextContent); ok {
-		goPayload.Status = text.Text
-	}
-	goJSON, err := json.Marshal(goPayload)
-	if err != nil {
-		t.Fatal(err)
-	}
+	goJSON := runGoConfigure(t, dir)
 
 	script := filepath.Join(t.TempDir(), "run-configure.mjs")
 	source := "import { configureTool } from " + jsonString(pathToFileURL(distConfigure)) + ";\n" +
 		"import { statusTool } from " + jsonString(pathToFileURL(distStatus)) + ";\n" +
-		"const calls = " + mustJSON(calls) + ";\n" +
+		"import { applyBudget } from " + jsonString(pathToFileURL(distUtils)) + ";\n" +
+		"const calls = " + mustJSON(configureParityCalls) + ";\n" +
+		"const applyCases = " + mustJSON(configureParityApply) + ";\n" +
 		"const results = [];\n" +
 		"for (const args of calls) results.push(await configureTool.handler(args));\n" +
 		"const statusResult = await statusTool.handler({});\n" +
-		"process.stdout.write(JSON.stringify({ results, status: statusResult.content[0].text }));\n"
+		"const applied = applyCases.map((c) => applyBudget(c.text, c.tool));\n" +
+		"process.stdout.write(JSON.stringify({ results, status: statusResult.content[0].text, applied }));\n"
 	if err := os.WriteFile(script, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +117,93 @@ func TestHandlerParity(t *testing.T) {
 	if stdout.String() != string(goJSON) {
 		t.Errorf("handler mismatch\nTS: %s\nGo: %s", stdout.String(), goJSON)
 	}
+}
+
+// TestConfigureHelperProcess is the child side of TestHandlerParity: a fresh
+// process with the temp data dir and default budgets.
+func TestConfigureHelperProcess(t *testing.T) {
+	callsPath := os.Getenv("CAVE_TOOLS_CONFIGURE_CALLS")
+	resultPath := os.Getenv("CAVE_TOOLS_CONFIGURE_RESULT")
+	if callsPath == "" || resultPath == "" {
+		t.Skip("helper process only")
+	}
+	var calls []map[string]any
+	if err := readJSON(callsPath, &calls); err != nil {
+		t.Fatal(err)
+	}
+	var applyCases []applyCase
+	if err := readJSON(os.Getenv("CAVE_TOOLS_CONFIGURE_APPLY"), &applyCases); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	payload := configureParityPayload{
+		Results: make([]types.ToolResult, 0, len(calls)),
+		Applied: make([]string, 0, len(applyCases)),
+	}
+	for _, call := range calls {
+		result, err := Tool.Handler(ctx, call)
+		if err != nil {
+			t.Fatalf("handler %v: %v", call, err)
+		}
+		payload.Results = append(payload.Results, result)
+	}
+	statusResult, err := status.Tool.Handler(ctx, map[string]any{})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	payload.Status = resultText(t, statusResult)
+	for _, apply := range applyCases {
+		payload.Applied = append(payload.Applied, compression.ApplyBudget(ctx, apply.Text, apply.Tool))
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runGoConfigure(t *testing.T, dir string) []byte {
+	t.Helper()
+	scratch := t.TempDir()
+	callsPath := filepath.Join(scratch, "calls.json")
+	applyPath := filepath.Join(scratch, "apply.json")
+	resultPath := filepath.Join(scratch, "result.json")
+	if err := os.WriteFile(callsPath, []byte(mustJSON(configureParityCalls)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(applyPath, []byte(mustJSON(configureParityApply)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestConfigureHelperProcess$")
+	cmd.Env = append(os.Environ(),
+		"CAVE_TOOLS_CONFIGURE_CALLS="+callsPath,
+		"CAVE_TOOLS_CONFIGURE_APPLY="+applyPath,
+		"CAVE_TOOLS_CONFIGURE_RESULT="+resultPath,
+		"CAVE_TOOLS_DATA_DIR="+dir,
+		"CLAUDE_CONFIG_DIR="+filepath.Join(dir, "claude"),
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("go helper: %v (stderr %s)", err, stderr.String())
+	}
+	encoded, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("read helper result: %v (stderr %s)", err, stderr.String())
+	}
+	return encoded
+}
+
+func readJSON(path string, target any) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, target)
 }
 
 func TestToolMetadata(t *testing.T) {
@@ -208,6 +309,60 @@ func TestSetBudgetMaxChars(t *testing.T) {
 	if budget.MaxLines != 120 || budget.HeadLines != 60 || budget.TailLines != 60 ||
 		budget.MaxChars == nil || *budget.MaxChars != 8000 {
 		t.Errorf("budget = %+v", budget)
+	}
+}
+
+// TestSetBudgetFractionalText reproduces the W3e Muse finding: configure
+// numbers must stay intact in the confirmation text (and status) instead of
+// being truncated to int64 by the shared budget store.
+func TestSetBudgetFractionalText(t *testing.T) {
+	ctx, cleanup := configureTestContext(t)
+	defer cleanup()
+
+	result, err := Tool.Handler(ctx, map[string]any{
+		"action": "set_budget", "tool_name": "frac",
+		"max_lines": 12.7, "head_lines": 2.5, "tail_lines": 1.25,
+		"max_chars": 12.7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Set budget for frac: max=12.7, head=2.5, tail=1.25, chars=12.7"
+	if got := resultText(t, result); got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+	budget := compression.GetAllBudgets()["frac"]
+	if budget.MaxLines != 12.7 || budget.HeadLines != 2.5 || budget.TailLines != 1.25 ||
+		budget.MaxChars == nil || *budget.MaxChars != 12.7 {
+		t.Fatalf("stored budget = %+v, want 12.7/2.5/1.25 chars=12.7", budget)
+	}
+	statusResult, err := status.Tool.Handler(ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusText := resultText(t, statusResult)
+	if !strings.Contains(statusText, "frac: max=12.7, head=2.5, tail=1.25, chars=12.7") {
+		t.Fatalf("status did not match stored fraction:\n%s", statusText)
+	}
+}
+
+// TestSetBudgetNumberSyntax covers Number()'s binary/octal literals and the
+// String() coercion on the confirmation text.
+func TestSetBudgetNumberSyntax(t *testing.T) {
+	ctx, cleanup := configureTestContext(t)
+	defer cleanup()
+
+	result, err := Tool.Handler(ctx, map[string]any{
+		"action": "set_budget", "tool_name": "radix",
+		"max_lines": "0b11", "head_lines": "0o17", "tail_lines": "0x10",
+		"max_chars": "0o17",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Set budget for radix: max=3, head=15, tail=16, chars=15"
+	if got := resultText(t, result); got != want {
+		t.Fatalf("text = %q, want %q", got, want)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/groobybugs/cave-tools/go/internal/compression"
 	"github.com/groobybugs/cave-tools/go/internal/runtime"
 	"github.com/groobybugs/cave-tools/go/internal/tools"
 	"github.com/groobybugs/cave-tools/go/internal/tools/applypatch"
@@ -190,6 +191,51 @@ func differentialCases() []diffCase {
 			Fixture: []diffFixture{{Path: "d5.txt", Content: "alpha\n"}}},
 		{Name: "edit range checksum ok", Tool: "edit", Args: map[string]any{"file_path": "$DIR/d6.txt", "start_line": 2, "end_line": 2, "content": "B", "expected_range_checksum": tools.RangeChecksum([]string{"a", "b", "c", ""}, 2, 2)},
 			Fixture: []diffFixture{{Path: "d6.txt", Content: "a\nb\nc\n"}}},
+
+		// Number(null) === 0: explicit null end_line inserts before line 1 in
+		// range mode, but move rejects it through the bounds check. Absent
+		// keys stay NaN, and batch delete:true reaches parsing with null start.
+		{Name: "edit range end_line null", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n1.txt", "start_line": 1, "end_line": nil, "content": "INSERTED"},
+			Fixture: []diffFixture{{Path: "n1.txt", Content: "line1\nline2\n"}}},
+		{Name: "edit move end_line null", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n2.txt", "start_line": 1, "end_line": nil, "insert_before": 3},
+			Fixture: []diffFixture{{Path: "n2.txt", Content: "line1\nline2\n"}}},
+		{Name: "edit batch range end_line null", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n3.txt", "edits": []any{
+			map[string]any{"start_line": 1, "end_line": nil, "content": "INSERTED"},
+		}}, Fixture: []diffFixture{{Path: "n3.txt", Content: "line1\nline2\n"}}},
+		{Name: "edit batch move end_line null", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n4.txt", "edits": []any{
+			map[string]any{"start_line": 1, "end_line": nil, "insert_before": 3},
+		}}, Fixture: []diffFixture{{Path: "n4.txt", Content: "line1\nline2\n"}}},
+		{Name: "edit batch delete null start", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n5.txt", "edits": []any{
+			map[string]any{"start_line": nil, "end_line": 2, "delete": true},
+		}}, Fixture: []diffFixture{{Path: "n5.txt", Content: "line1\nline2\n"}}},
+
+		// Strict proofs must be nonempty strings (TS 7c81d32): null, numeric
+		// and boolean proofs pass in enforce/checksum paths but not in strict.
+		{Name: "edit range null expected_hash", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n6.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": nil},
+			Fixture: []diffFixture{{Path: "n6.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit move null checksum", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n7.txt", "start_line": 1, "end_line": 1, "insert_before": 3, "expected_range_checksum": nil},
+			Fixture: []diffFixture{{Path: "n7.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit batch range null proofs", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n8.txt", "expected_hash": nil, "edits": []any{
+			map[string]any{"start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": nil},
+		}}, Fixture: []diffFixture{{Path: "n8.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit batch move null checksum", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n9.txt", "edits": []any{
+			map[string]any{"start_line": 1, "end_line": 1, "insert_before": 3, "expected_range_checksum": nil},
+		}}, Fixture: []diffFixture{{Path: "n9.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit range numeric checksum", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n10.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": 42},
+			Fixture: []diffFixture{{Path: "n10.txt", Content: "alpha\nbeta\n"}}},
+
+		// Valid string proofs still satisfy the strict gate.
+		{Name: "edit range valid proofs", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n11.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": compression.HashContent([]byte("alpha\nbeta\n")), "expected_range_checksum": tools.RangeChecksum([]string{"alpha", "beta", ""}, 1, 1)},
+			Fixture: []diffFixture{{Path: "n11.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit move valid checksum", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n12.txt", "start_line": 1, "end_line": 1, "insert_before": 3, "expected_range_checksum": tools.RangeChecksum([]string{"alpha", "beta", ""}, 1, 1)},
+			Fixture: []diffFixture{{Path: "n12.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit batch range valid checksum", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n13.txt", "edits": []any{
+			map[string]any{"start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": tools.RangeChecksum([]string{"alpha", "beta", ""}, 1, 1)},
+		}}, Fixture: []diffFixture{{Path: "n13.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit batch move valid checksum", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n14.txt", "edits": []any{
+			map[string]any{"start_line": 1, "end_line": 1, "insert_before": 3, "expected_range_checksum": tools.RangeChecksum([]string{"alpha", "beta", ""}, 1, 1)},
+		}}, Fixture: []diffFixture{{Path: "n14.txt", Content: "alpha\nbeta\n"}}},
+
 		{Name: "write numeric path", Tool: "write", Args: map[string]any{"file_path": 5, "content": "x"}},
 
 		{Name: "patch add", Tool: "apply_patch", Args: map[string]any{"patchText": "*** Begin Patch\n*** Add File: $DIR/p1.txt\n+one\n+two\n*** End Patch"}},
