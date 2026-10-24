@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -99,6 +100,7 @@ func fixtureTools() []types.ToolDefinition {
 		{Name: "cave__fixture_slow", Description: "fixture slow", InputSchema: schema},
 		{Name: "cave__fixture_error", Description: "fixture error", InputSchema: schema},
 		{Name: "cave__fixture_stats", Description: "fixture stats", InputSchema: schema},
+		{Name: "cave__fixture_number", Description: "fixture number", InputSchema: schema},
 	}
 }
 
@@ -137,6 +139,18 @@ func fixtureCall(ctx context.Context, tool string, args map[string]any, call *ru
 	case "cave__fixture_stats":
 		compression.ApplyBudget(ctx, strings.Repeat("x", 100), "fixture")
 		return types.ToolResult{Content: []types.Content{types.Text("stats")}}, nil
+	case "cave__fixture_number":
+		// Report the numeric argument as JS stringifies it: nil (JSON null),
+		// Infinity, or a finite value.
+		rendered := "absent"
+		if raw, ok := args["n"]; ok {
+			if raw == nil {
+				rendered = "null"
+			} else if number, ok := raw.(float64); ok {
+				rendered = strconv.FormatFloat(number, 'g', -1, 64)
+			}
+		}
+		return types.ToolResult{Content: []types.Content{types.Text(rendered)}}, nil
 	}
 	return types.ToolResult{}, fmt.Errorf("unknown fixture tool %q", tool)
 }
@@ -434,6 +448,58 @@ func TestServerCallValidation(t *testing.T) {
 
 // TestServerCallContext covers ctx propagation, session namespace, per-client
 // ids, media/_meta preservation and thrown callback errors.
+// TestServerArgsNumberOverflow covers both daemon wire directions:
+// JSON.parse (raw client) keeps 1e400 as Infinity, while JSON.stringify (the
+// Go client, like the TS client) writes non-finite numbers as null.
+func TestServerArgsNumberOverflow(t *testing.T) {
+	path, _ := startFixtureDaemon(t, 0)
+
+	raw := dialRaw(t, path)
+	defer raw.close()
+	hello(t, raw, nil)
+	raw.sendLine(t, `{"id":2,"method":"call","tool":"cave__fixture_number","args":{"n":1e400,"text":"kept"},"ctx":{"cwd":"/tmp"}}`)
+	if got := callText(t, raw.read(t)); got != "+Inf" {
+		t.Fatalf("raw-wire 1e400 = %q, want +Inf", got)
+	}
+
+	client := NewDaemonClient()
+	defer client.Close()
+	outcome, err := client.Call(context.Background(), "cave__fixture_number", map[string]any{"n": math.Inf(1), "text": "kept"}, &runtime.CallContext{
+		SessionID: "overflow",
+		Cwd:       "/tmp",
+		Env:       map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("client call: %v", err)
+	}
+	if !outcome.Sent {
+		t.Fatal("client call was not sent")
+	}
+	if len(outcome.Result.Content) == 0 {
+		t.Fatalf("client result = %#v", outcome.Result.Content)
+	}
+	block, ok := outcome.Result.Content[0].(types.TextContent)
+	if !ok {
+		t.Fatalf("client block = %#v", outcome.Result.Content[0])
+	}
+	if block.Text != "null" {
+		t.Fatalf("client Infinity arg = %q, want null (JSON.stringify)", block.Text)
+	}
+}
+
+// callText returns the first text block of a daemon call reply.
+func callText(t *testing.T, reply map[string]any) string {
+	t.Helper()
+	result, _ := reply["result"].(map[string]any)
+	blocks, _ := result["content"].([]any)
+	if len(blocks) == 0 {
+		t.Fatalf("call reply has no content: %#v", reply)
+	}
+	block, _ := blocks[0].(map[string]any)
+	text, _ := block["text"].(string)
+	return text
+}
+
 func TestServerCallContext(t *testing.T) {
 	path, _ := startFixtureDaemon(t, 0)
 	client := dialRaw(t, path)

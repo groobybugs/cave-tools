@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
+	"github.com/groobybugs/cave-tools/go/internal/jsjson"
 	"github.com/groobybugs/cave-tools/go/internal/jsre"
 	"github.com/groobybugs/cave-tools/go/internal/runtime"
 	"github.com/groobybugs/cave-tools/go/internal/types"
@@ -533,8 +534,12 @@ func decodeArgs(raw json.RawMessage) map[string]any {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}
-	var args map[string]any
-	if json.Unmarshal(raw, &args) != nil {
+	parsed, err := jsjson.Parse(string(raw))
+	if err != nil {
+		return nil
+	}
+	args, ok := parsed.(map[string]any)
+	if !ok {
 		return nil
 	}
 	return args

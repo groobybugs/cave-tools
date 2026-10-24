@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/groobybugs/cave-tools/go/internal/jsjson"
 	"github.com/groobybugs/cave-tools/go/internal/jsre"
 	"github.com/groobybugs/cave-tools/go/internal/runtime"
 	"github.com/groobybugs/cave-tools/go/internal/types"
@@ -432,7 +433,10 @@ func (c *DaemonClient) Call(ctx context.Context, tool string, args map[string]an
 
 	payload := map[string]any{
 		"tool": tool,
-		"args": args,
+		// TS writes args through JSON.stringify: NaN and ±Infinity become
+		// null on the wire. Copy them instead of mutating the caller's map so
+		// an in-process fallback still sees the decoded values.
+		"args": jsjson.StringifyValue(args),
 		"ctx":  requestCtx,
 	}
 	reply, err := c.request(conn, "call", payload, 0)
