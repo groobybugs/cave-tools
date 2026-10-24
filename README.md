@@ -178,11 +178,25 @@ cave-tools help grep                  # params generated from the tool schema
 - `cave-tools status` stays the savings report; the `cave__status` tool runs as `cave-tools tool status`. `cave-tools tool <name> ...` works for every tool.
 - `cave-tools bash` mirrors the child: it exits with the real exit code (124 on timeout, 128+n on signal) and writes the child's stderr (redacted, budgeted) to fd 2. `--` ends flags: `cave-tools bash --session s1 -- 'cmd'`.
 
+Normal agents on Claude Code / opencode do **not** need to spell out `cave-tools bash`: their native shell already uses the CLI post-filter below. Explicit CLI is most useful for scripts, hosts without MCP, or MCP fallback. Each invocation pays CLI startup; persistent MCP does not.
+
+### Usage analysis
+
+```bash
+pnpm run usage -- --source claude --project cave-tools
+pnpm run usage -- --source opencode --project cave-tools
+# Optional fixture/alternate DB:
+pnpm run usage -- --source opencode --db /path/to/opencode.db --json
+```
+
+Reports classify shell calls as `native-shell`, `mcp-bash`, `cli-bash`, or `cli-filter`, with calls, errors, results, and returned characters. `native-shell` includes calls whether their output was automatically post-filtered or not; the hook is not a separate model call. OpenCode reads its SQLite DB read-only and reports tool/route usage only, not synthetic LLM token totals.
+
 ### Native shell integration
 
-Agents keep their own shell tool (background jobs, permission UI); cave-tools compresses what it prints.
+Agents keep their own shell tool (background jobs, permission UI); cave-tools compresses what it prints. Native shell is the default for ordinary commands on hooked hosts; use `cave__bash` for RTK pre-rewrite or guaranteed failure compression.
 
-- **Default: post-process.** A Claude Code `PostToolUse` hook (`claude/hooks/cave-tools-bash-filter.js`) and the opencode plugin (`tool.execute.after`) pipe native Bash output through `cave-tools filter --json`, which runs the `cave__bash` pipeline (redact, structured extraction, repetition collapse, budget, archive) without executing anything. The command is never changed, so permission allow/deny rules keep matching. Skipped for background launches, interrupted or image results, output under 2 KB, `cave-tools`/`rtk proxy`/`CAVE_RAW` commands, mode `off`, and whenever the filter fails or takes over ~5 s (the original output is kept). Failed commands (non-zero exit) reach Claude through `PostToolUseFailure`, which can't replace output, so they're shown uncompressed. `CAVE_TOOLS_FILTER_BASH=0` turns it off.
+- **Default: post-process.** A Claude Code `PostToolUse` hook (`claude/hooks/cave-tools-bash-filter.js`) and the opencode plugin (`tool.execute.after`) pipe native Bash output through `cave-tools filter --json`, which runs the `cave__bash` pipeline (redact, structured extraction, repetition collapse, budget, archive) without executing anything. The command is never changed, so permission allow/deny rules keep matching. Skipped for background launches, interrupted or image results, output under 2 KB, `cave-tools`/`rtk proxy`/`CAVE_RAW` commands, mode `off`, and whenever the filter fails or takes over ~5 s (the original output is kept). True execution failures cannot be replaced: Claude uses `PostToolUseFailure`, and OpenCode error events expose only `error`, not a mutable shell result. Completed nonzero shell results can still be filtered. `CAVE_TOOLS_FILTER_BASH=0` turns it off.
+- **Health:** the OpenCode plugin tracks process-local filter attempts, compressed results, no-op results, and fallbacks. While the latest attempt is a fallback, context guidance shows those counts and recommends `cave__bash` for large/failing commands; original output is always preserved.
 - **Opt-in: wrap.** `CAVE_TOOLS_WRAP_BASH=1` rewrites native commands before they run to `cave-tools bash --session <id> -- '<cmd>'` (also rtk-rewrites them). Tradeoffs: permission rules are matched against the rewritten command, so allow rules like `Bash(git status:*)` stop matching and, worse, deny rules like `Bash(rm:*)` no longer catch `cave-tools bash -- 'rm …'`; a `cd` inside the command doesn't persist to the next call. Interactive (vim, less, ssh, `docker run -it`, `git add -p`, heredocs…) and background commands are never wrapped.
 - **Raw.** `cave-tools raw <command...>` runs a command with no rewrite or compression, inherited stdio and the real exit code (the `rtk proxy` equivalent). `CAVE_RAW=1 cave-tools bash ...` does the same.
 
@@ -259,8 +273,9 @@ Use this instruction block in agent rules:
 
 - Use `cave__read` instead of the built-in read tool for file reads. Optimized drop-in replacement (read dedup + line budgets).
 - Use `cave__grep`, `cave__find`, and `cave__ls` instead of shell commands for file exploration when available. Optimized drop-in replacements that respect ignore rules and trim output to a line budget.
-- Use `cave__bash` instead of the built-in shell tool for commands. Optimized drop-in replacement: tries RTK command rewriting when `rtk` is available, then structured JSON/XML extraction and output budgets. Max timeout 10min.
-- Use `cave__bash_start` for commands expected to exceed ~2-3min (builds, test suites, installs): runs detached, returns a jobId immediately. Poll with `cave__bash_status` (`wait` up to 60s — returns the moment the job exits); stop with `cave__bash_stop`. Never `sleep`-poll inside `cave__bash`.
+- Shell on Claude Code / opencode: use the built-in native shell by default; output is auto-compressed through the CLI filter. Use `cave__bash` for RTK pre-rewrite or guaranteed failure compression.
+- Shell on other hosts: use `cave__bash` (RTK rewrite, structured extraction, output budgets, max 10min); if MCP is down, run `cave-tools bash -- '<cmd>'` in the native shell.
+- Use `cave__bash_start` when a long job's final output should be compressed (builds, test suites, installs): runs detached, returns a jobId immediately. Poll with `cave__bash_status` (`wait` up to 60s — returns the moment the job exits); stop with `cave__bash_stop`. Never `sleep`-poll.
 - Use `cave__edit` / `cave__write` for single-file changes and `cave__apply_patch` for multi-file add/update/delete/move patches. For medium+ hunks prefer line-range: `cave__read` with `line_numbers=true`, then `cave__edit` with `start_line`/`end_line`/`content` (+ `expected_hash` from the footer).
 - Use `cave__websearch` for current web information when a local web search tool is needed; results are redacted, archived when trimmed, and budget-compressed.
 - Use `cave__webfetch` to fetch a specific URL and return it as markdown/text/html (or a base64 image block); output is redacted, archived when trimmed, and budget-compressed.

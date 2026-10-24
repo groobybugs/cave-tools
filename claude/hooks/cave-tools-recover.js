@@ -71,7 +71,7 @@ function emit() {
 function buildRecovery(tool) {
   const head = 'CAVE-TOOLS: `' + (tool || 'a cave-tools tool') + '` failed. ' +
     'Recover inside cave-tools — do NOT fall back to built-in Read/Grep/Glob, ' +
-    'they are blocked by PreToolUse and cost more tokens (native Bash is fine: its output is compressed).';
+    'they are blocked by PreToolUse and cost more tokens (native Bash remains the default on hooked hosts: its output is CLI-filtered).';
 
   const short = tool.replace(/^mcp__cave-tools__/, '');
   let hint;
