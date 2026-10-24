@@ -216,5 +216,27 @@ await test("13 daemon control skips a malformed reply line instead of crashing",
   assert.match(r.stdout, /running pid 42/);
 });
 
+const stats = await import(join(ROOT, "dist/compression/utils.js"));
+
+await test("14 buildStats reports the given bucket's bounces", () => {
+  runWithContext({ ...ctx(work, process.env), clientPid: 777 }, () => {
+    stats.recordRead("/tmp/pb14.ts", true, 100);
+    stats.recordRead("/tmp/pb14.ts", false, 500);
+  });
+  // Written from the local context, whose bucket has no bounces.
+  stats.releaseClientStats(777);
+  const row = db.listSessionStats(true).find((r) => r.pid === 777);
+  assert.ok(row, "client row written");
+  assert.equal(row.bounces.totalBounces, 1);
+  assert.ok(row.bounces.byExtension[".ts"], "per-extension bounce kept");
+});
+
+await test("15 resetStats clears range-edit counters", async () => {
+  stats.recordRangeEchoSaved(1234);
+  assert.ok(stats.getRangeEditStats().edits > 0);
+  await stats.resetStats();
+  assert.deepEqual(stats.getRangeEditStats(), { edits: 0, echoSavedChars: 0, estimatedTokensSaved: 0 });
+});
+
 console.log(`port-bugs: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
