@@ -123,6 +123,18 @@ func TestCompressStructuredNonBoolean(t *testing.T) {
 	}
 }
 
+// An explicit JSON null follows String(null); only a missing key follows
+// String(undefined). map[string]any keeps them apart with the presence flag.
+func TestCompressNullText(t *testing.T) {
+	result := run(t, map[string]any{"text": nil})
+	if result.IsError {
+		t.Fatalf("isError: %s", text(t, result))
+	}
+	if got := text(t, result); got != "null" {
+		t.Fatalf("text = %q, want %q", got, "null")
+	}
+}
+
 // A missing text argument follows String(undefined).
 func TestCompressMissingText(t *testing.T) {
 	result := run(t, map[string]any{})

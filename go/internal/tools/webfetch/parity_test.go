@@ -113,7 +113,12 @@ func TestParityHandler(t *testing.T) {
 	}{
 		{"missing url", map[string]any{"format": "markdown"}},
 		{"bad scheme", map[string]any{"url": "ftp://example.com"}},
+		{"zero url", map[string]any{"url": float64(0)}},
 		{"unparseable url", map[string]any{"url": "http://"}},
+		{"null url", map[string]any{"url": nil}},
+		{"null format", map[string]any{"url": base + "/text", "format": nil}},
+		{"null timeout", map[string]any{"url": base + "/text", "timeout": nil}},
+		{"null redact secrets", map[string]any{"url": base + "/secret", "redact_secrets": nil}},
 		{"space in host", map[string]any{"url": "https://exa mple.com"}},
 		{"url trimmed", map[string]any{"url": "  " + base + "/text  ", "format": "text"}},
 		{"text plain text format", map[string]any{"url": base + "/text", "format": "text"}},

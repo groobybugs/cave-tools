@@ -26,7 +26,8 @@ import (
 //
 //	pnpm build && cd go && go test -tags parity -run TestParity ./internal/tools/websearch/
 
-const tsRunner = `import { pathToFileURL } from "node:url";
+const tsRunner = `import { appendFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 const toolPath = process.argv[2];
 const exportName = process.argv[3];
@@ -35,6 +36,12 @@ if (process.env.PARITY_FETCH_BASE) {
   const base = new URL(process.env.PARITY_FETCH_BASE);
   globalThis.fetch = (url, init) => {
     const target = new URL(String(url));
+    if (process.env.PARITY_CAPTURE_FILE) {
+      appendFileSync(
+        process.env.PARITY_CAPTURE_FILE,
+        JSON.stringify({ url: String(url), body: String((init && init.body) || "") }) + "\n",
+      );
+    }
     target.protocol = base.protocol;
     target.host = base.host;
     return realFetch(target, init);
@@ -73,19 +80,31 @@ func repoRoot(t *testing.T) string {
 	}
 }
 
-func runTS(t *testing.T, root string, args map[string]any, env map[string]string, fetchBase string) string {
+// capturedRequest is one fetch the TS handler performed.
+type capturedRequest struct {
+	URL  string `json:"url"`
+	Body string `json:"body"`
+}
+
+// runTS returns the TS ToolResult JSON plus every request the handler made.
+func runTS(t *testing.T, root string, args map[string]any, env map[string]string, fetchBase string) (string, []capturedRequest) {
 	t.Helper()
 	encoded, err := json.Marshal(args)
 	if err != nil {
 		t.Fatalf("args: %v", err)
 	}
-	runner := filepath.Join(t.TempDir(), "run-tool.mjs")
+	dir := t.TempDir()
+	runner := filepath.Join(dir, "run-tool.mjs")
 	if err := os.WriteFile(runner, []byte(tsRunner), 0o600); err != nil {
 		t.Fatalf("runner: %v", err)
 	}
+	captureFile := filepath.Join(dir, "capture.jsonl")
 	command := exec.Command("node", runner, filepath.Join(root, "dist/tools/websearch.js"), "websearchTool")
 	command.Stdin = bytes.NewReader(encoded)
-	command.Env = append(os.Environ(), "PARITY_FETCH_BASE="+fetchBase)
+	command.Env = append(os.Environ(),
+		"PARITY_FETCH_BASE="+fetchBase,
+		"PARITY_CAPTURE_FILE="+captureFile,
+	)
 	for key, value := range env {
 		command.Env = append(command.Env, key+"="+value)
 	}
@@ -95,7 +114,20 @@ func runTS(t *testing.T, root string, args map[string]any, env map[string]string
 	if err := command.Run(); err != nil {
 		t.Fatalf("node: %v\n%s", err, stderr.String())
 	}
-	return stdout.String()
+	requests := make([]capturedRequest, 0, 1)
+	if data, err := os.ReadFile(captureFile); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line == "" {
+				continue
+			}
+			var request capturedRequest
+			if err := json.Unmarshal([]byte(line), &request); err != nil {
+				t.Fatalf("capture line: %v", err)
+			}
+			requests = append(requests, request)
+		}
+	}
+	return stdout.String(), requests
 }
 
 // longResult is a search answer long enough for applyBudget + archiveHandle.
@@ -192,6 +224,35 @@ func TestParityHandler(t *testing.T) {
 			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("ctx")},
 		},
 		{
+			name:    "null context max characters",
+			args:    map[string]any{"query": "abc", "provider": "exa", "contextMaxCharacters": nil, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("null context")},
+		},
+		{
+			name:    "null timeout",
+			args:    map[string]any{"query": "abc", "provider": "exa", "timeout": nil},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("null timeout")},
+		},
+		{
+			name:    "null num results",
+			args:    map[string]any{"query": "abc", "provider": "exa", "numResults": nil, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("null numResults")},
+		},
+		{
+			name:    "null provider",
+			args:    map[string]any{"query": "abc", "provider": nil, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("null provider")},
+		},
+		{
+			name:    "null redact secrets",
+			args:    map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2), "redact_secrets": nil},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("Authorization: Bearer zbcd1234efgh5678ijkl9012mnop3456")},
+		},
+		{
+			name: "null query",
+			args: map[string]any{"query": nil},
+		},
+		{
 			name:    "env provider",
 			args:    map[string]any{"query": "abc", "timeout": float64(2)},
 			env:     map[string]string{"CAVE_TOOLS_WEBSEARCH_PROVIDER": "parallel"},
@@ -241,7 +302,7 @@ func TestParityHandler(t *testing.T) {
 			transport := installFixture(t, handler)
 			tsURL := "http://" + transport.base.Host
 
-			tsJSON := runTS(t, root, testCase.args, testCase.env, tsURL)
+			tsJSON, tsRequests := runTS(t, root, testCase.args, testCase.env, tsURL)
 
 			encoded, err := json.Marshal(testCase.args)
 			if err != nil {
@@ -276,6 +337,20 @@ func TestParityHandler(t *testing.T) {
 			}
 			if !reflect.DeepEqual(tsValue, goValue) {
 				t.Fatalf("TS and Go disagree\n TS: %s\n Go: %s", tsJSON, goJSON)
+			}
+
+			// The outgoing JSON-RPC request must match too: null-vs-missing
+			// arguments only show up in the body, not in the ToolResult.
+			if len(tsRequests) != len(transport.requests) {
+				t.Fatalf("request count TS=%d Go=%d\n TS: %+v\n Go: %+v", len(tsRequests), len(transport.requests), tsRequests, transport.requests)
+			}
+			for index := range tsRequests {
+				if tsRequests[index].URL != transport.requests[index] {
+					t.Fatalf("request URL %d\n TS: %s\n Go: %s", index, tsRequests[index].URL, transport.requests[index])
+				}
+				if tsRequests[index].Body != transport.bodies[index] {
+					t.Fatalf("request body %d\n TS: %s\n Go: %s", index, tsRequests[index].Body, transport.bodies[index])
+				}
 			}
 		})
 	}

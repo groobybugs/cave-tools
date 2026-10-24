@@ -224,6 +224,16 @@ func TestParseInput(t *testing.T) {
 			want: webSearchInput{query: "q", numResults: 8, livecrawl: "fallback", typ: "auto", contextMaxCharacters: intPtr(10_000), timeout: 25, redactSecrets: true},
 		},
 		{
+			name: "null context max characters",
+			args: map[string]any{"query": "q", "contextMaxCharacters": nil},
+			want: webSearchInput{query: "q", numResults: 8, livecrawl: "fallback", typ: "auto", contextMaxCharacters: intPtr(10_000), timeout: 25, redactSecrets: true},
+		},
+		{
+			name: "null timeout and num results",
+			args: map[string]any{"query": "q", "timeout": nil, "numResults": nil},
+			want: webSearchInput{query: "q", numResults: 8, livecrawl: "fallback", typ: "auto", timeout: 25, redactSecrets: true},
+		},
+		{
 			name: "string numbers",
 			args: map[string]any{"query": "q", "numResults": "5", "timeout": "7"},
 			want: webSearchInput{query: "q", numResults: 5, livecrawl: "fallback", typ: "auto", timeout: 7, redactSecrets: true},
@@ -308,6 +318,33 @@ func TestHandlerExa(t *testing.T) {
 	wantBody := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"web_search_exa","arguments":{"query":"latest cave tools news","type":"auto","numResults":2,"livecrawl":"fallback"}}}`
 	if transport.bodies[0] != wantBody {
 		t.Fatalf("body = %q, want %q", transport.bodies[0], wantBody)
+	}
+}
+
+// An explicit null contextMaxCharacters is a present argument (Number(null)
+// is 0, so positiveInt falls back to 10000); a missing key is omitted.
+func TestHandlerNullContextMaxCharacters(t *testing.T) {
+	transport := installFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(directPayload("ok")))
+	}))
+	result := run(t, map[string]string{}, map[string]any{
+		"query": "abc", "provider": "exa", "contextMaxCharacters": nil, "timeout": float64(1),
+	})
+	if result.IsError {
+		t.Fatalf("isError: %s", resultText(t, result))
+	}
+	if !strings.Contains(transport.bodies[0], `"contextMaxCharacters":10000`) {
+		t.Fatalf("body = %q", transport.bodies[0])
+	}
+
+	missing := installFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(directPayload("ok")))
+	}))
+	_ = run(t, map[string]string{}, map[string]any{"query": "abc", "provider": "exa", "timeout": float64(1)})
+	if strings.Contains(missing.bodies[0], "contextMaxCharacters") {
+		t.Fatalf("body = %q", missing.bodies[0])
 	}
 }
 

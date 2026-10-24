@@ -354,7 +354,9 @@ func parseInput(args map[string]any) webSearchInput {
 	if jsStringEquals(args["type"], "fast") || jsStringEquals(args["type"], "deep") {
 		input.typ = args["type"].(string)
 	}
-	if value, present := args["contextMaxCharacters"]; present && value != nil {
+	// undefined omits the argument; an explicit null reaches positiveInt as
+	// Number(null) === 0, which falls back to 10000 (a present argument).
+	if value, present := args["contextMaxCharacters"]; present {
 		clamped := positiveInt(value, 10_000, MaxContextCharacters)
 		input.contextMaxCharacters = &clamped
 	}

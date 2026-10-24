@@ -42,7 +42,7 @@ func handler(ctx context.Context, args map[string]any) (types.ToolResult, error)
 		return types.ToolResult{Content: []types.Content{types.Text(expanded)}}, nil
 	}
 
-	text := jsString(args["text"])
+	text := jsStringArg(args, "text")
 	var commandHint *string
 	if hint := args["command_hint"]; jsTruthy(hint) {
 		value := jsString(hint)
@@ -105,9 +105,23 @@ func jsTruthy(value any) bool {
 	}
 }
 
+// jsStringArg mirrors String(args[key]): a missing key is undefined, an
+// explicit JSON null is null, and the presence flag in the map tells them
+// apart.
+func jsStringArg(args map[string]any, key string) string {
+	value, present := args[key]
+	if !present {
+		return "undefined"
+	}
+	if value == nil {
+		return "null"
+	}
+	return jsString(value)
+}
+
 // jsString mirrors String(value) for the JSON value shapes handlers receive.
-// A missing key and an explicit null both arrive as nil, so both render as
-// "undefined" here; TS distinguishes them but no caller sends a null.
+// Explicit nulls must be resolved through jsStringArg first; nil here means
+// the caller already knows the JS value is undefined.
 func jsString(value any) string {
 	switch v := value.(type) {
 	case nil:
