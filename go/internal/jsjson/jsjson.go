@@ -1,10 +1,14 @@
-// Package jsjson reproduces the SyntaxError message that V8's JSON.parse
-// throws for malformed input.
+// Package jsjson reproduces V8's JSON.parse behaviour that the TypeScript
+// implementation relies on: the SyntaxError message it throws for malformed
+// input, the float64 number semantics it accepts, and JSON.stringify's null
+// for non-finite numbers.
 //
 // The command line ports call JSON.parse and surface the error message
 // verbatim, so a Go implementation that reports encoding/json's wording
 // diverges. SyntaxErrorMessage walks the input the way V8's JsonParser does
 // (src/json/json-parser.cc) and formats the same message templates.
+// Parse decodes values with the same number rules, and StringifyValue mirrors
+// the text JSON.stringify writes.
 //
 // Positions are UTF-16 code units, like JavaScript string indices, and the
 // line/column calculation follows V8's CalculateFileLocation (only \r and \n

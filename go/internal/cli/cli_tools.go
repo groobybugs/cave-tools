@@ -271,8 +271,7 @@ func coerceFlagValue(flag string, prop *propSchema, value string) (any, error) {
 	case "boolean":
 		return parseBoolean(flag, value)
 	case "array":
-		var parsed any
-		if json.Unmarshal([]byte(value), &parsed) == nil {
+		if parsed, err := jsjson.Parse(value); err == nil {
 			if array, ok := parsed.([]any); ok {
 				return array, nil
 			}
@@ -282,8 +281,7 @@ func coerceFlagValue(flag string, prop *propSchema, value string) (any, error) {
 		}
 		return nil, usageErrorf("--%s expects a JSON array", flag)
 	case "object":
-		var parsed any
-		if json.Unmarshal([]byte(value), &parsed) == nil {
+		if parsed, err := jsjson.Parse(value); err == nil {
 			if object, ok := parsed.(map[string]any); ok && object != nil {
 				return object, nil
 			}
@@ -944,63 +942,6 @@ func marshalJS(value any) ([]byte, error) {
 	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
 }
 
-// v8JSONNumber converts one JSON number token to the float64 JSON.parse
-// yields. V8 never throws on magnitude: overflow becomes ±Inf and underflow
-// becomes ±0, so strconv.ErrRange is the expected result, not a failure.
-func v8JSONNumber(number json.Number) float64 {
-	value, err := strconv.ParseFloat(string(number), 64)
-	if err != nil {
-		var numErr *strconv.NumError
-		if errors.As(err, &numErr) && numErr.Err == strconv.ErrRange {
-			return value
-		}
-		return 0
-	}
-	return value
-}
-
-// convertV8JSONNumbers rewrites every json.Number in a decoded document to the
-// float64 JSON.parse would have produced.
-func convertV8JSONNumbers(value any) any {
-	switch typed := value.(type) {
-	case json.Number:
-		return v8JSONNumber(typed)
-	case []any:
-		for i := range typed {
-			typed[i] = convertV8JSONNumbers(typed[i])
-		}
-		return typed
-	case map[string]any:
-		for key := range typed {
-			typed[key] = convertV8JSONNumbers(typed[key])
-		}
-		return typed
-	default:
-		return value
-	}
-}
-
-// parseV8JSON decodes JSON with JSON.parse's acceptance rules: numbers keep
-// their float64 semantics (UseNumber defers the conversion so an out-of-range
-// literal cannot fail the decode), and, like JSON.parse/json.Unmarshal, exactly
-// one top-level value is allowed.
-func parseV8JSON(text string) (any, error) {
-	decoder := json.NewDecoder(strings.NewReader(text))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			err = errors.New("unexpected data after top-level value")
-		}
-		return nil, err
-	}
-	return convertV8JSONNumbers(value), nil
-}
-
 // runFilterCommand ports `cave-tools filter --json [--session <id>]`: reads
 // {command, stdout, stderr, exitCode?} on stdin, runs the cave__bash post-run
 // pipeline (nothing is executed), writes {stdout, stderr} JSON. Any failure
@@ -1028,7 +969,7 @@ func runFilterCommand(ctx context.Context, argv []string, stdin io.Reader, stdou
 	if err != nil {
 		return finish(stderr, "cave-tools filter: "+err.Error(), 1)
 	}
-	parsed, err := parseV8JSON(text)
+	parsed, err := jsjson.Parse(text)
 	if err != nil {
 		// TS surfaces JSON.parse's V8 SyntaxError text; reproduce it instead
 		// of encoding/json's wording.

@@ -532,6 +532,63 @@ func TestFilterCasesMatchNode(t *testing.T) {
 	}
 }
 
+// overflowCLICase is one recorded `node dist/cli.js <tool> <argv...>` run.
+type overflowCLICase struct {
+	Name     string   `json:"name"`
+	Argv     []string `json:"argv"`
+	Stdin    string   `json:"stdin"`
+	ExitCode int      `json:"exitCode"`
+	Stdout   string   `json:"stdout"`
+	Stderr   string   `json:"stderr"`
+}
+
+func loadOverflowCLIFixture(t *testing.T) []overflowCLICase {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "overflow_cases.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var fixture struct {
+		NodeVersion string            `json:"nodeVersion"`
+		Template    string            `json:"template"`
+		Cases       []overflowCLICase `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if len(fixture.Cases) == 0 {
+		t.Fatal("fixture has no cases")
+	}
+	t.Logf("fixture generated with node %s (%d cases): %s", fixture.NodeVersion, len(fixture.Cases), fixture.Template)
+	return fixture.Cases
+}
+
+// TestCLIOverflowNumbersMatchNode pins CLI array/object/number flag coercion
+// to the TypeScript CLI for JSON numbers outside float64 range: TS's
+// JSON.parse turns 1e400 into Infinity and hands it to the tool, where Go's
+// encoding/json used to reject the whole flag. Expectations come from
+// testdata/gen_overflow_cases.mjs.
+func TestCLIOverflowNumbersMatchNode(t *testing.T) {
+	minimalEnv(t)
+	t.Setenv("CAVE_TOOLS_DATA_DIR", t.TempDir())
+	for _, tc := range loadOverflowCLIFixture(t) {
+		tc := tc
+		t.Run(tc.Name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Run(context.Background(), tc.Argv, strings.NewReader(tc.Stdin), &stdout, &stderr, "test")
+			if code != tc.ExitCode {
+				t.Fatalf("exit = %d, want %d (stderr %q)", code, tc.ExitCode, stderr.String())
+			}
+			if stdout.String() != tc.Stdout {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), tc.Stdout)
+			}
+			if stderr.String() != tc.Stderr {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.Stderr)
+			}
+		})
+	}
+}
+
 func mustHex(t *testing.T, value string) string {
 	t.Helper()
 	decoded, err := hex.DecodeString(value)
