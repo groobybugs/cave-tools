@@ -64,12 +64,13 @@ var tsPatterns = []signaturePattern{
 		re:   jsre.MustCompile(`^(\s*)(export\s+)?enum\s+(\w+)`, ""),
 	},
 	{
-		kind: SigConst,
-		re:   jsre.MustCompile(`^(\s*)(export\s+)?(const|let|var)\s+(\w+)(?:\s*:\s*([^=]+))?\s*=`, ""),
-	},
-	{
+		// Arrow functions before plain const: the const pattern matches them too.
 		kind: SigFn,
 		re:   jsre.MustCompile(`^(\s*)(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(([^)]*)\)(?:\s*:\s*([^=]+))?\s*=>`, ""),
+	},
+	{
+		kind: SigConst,
+		re:   jsre.MustCompile(`^(\s*)(export\s+)?(const|let|var)\s+(\w+)(?:\s*:\s*([^=]+))?\s*=`, ""),
 	},
 }
 
@@ -119,14 +120,20 @@ func extractTsSignatures(content string) []Signature {
 
 			indent := utf16Length(match[1])
 			isExported := match[2] != ""
+			// function pattern: async in group 3; arrow pattern: group 5.
+			isArrow := pattern.kind == SigFn &&
+				(match[3] == "const" || match[3] == "let" || match[3] == "var")
 			isAsync := jsre.Trim(match[3]) == "async"
+			if isArrow {
+				isAsync = jsre.Trim(match[5]) == "async"
+			}
 
 			var name string
 			var params string
 			var returnType string
 
 			switch {
-			case pattern.kind == SigFn && strings.Contains(match[0], "function"):
+			case pattern.kind == SigFn && !isArrow:
 				name = match[4]
 				params = match[5]
 				returnType = jsre.Trim(match[6])

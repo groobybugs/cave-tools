@@ -68,7 +68,8 @@ var verbatimPatterns = []*regexp.Regexp{
 	jsre.MustCompile(`^docker\s+inspect\b`, "i"),
 	jsre.MustCompile(`^kubectl\s+get\b`, "i"),
 	jsre.MustCompile(`^terraform\s+show\b`, "i"),
-	jsre.MustCompile(`^aws\s+.*\b--output\s+json\b`, "i"),
+	// No \b before "--": a space then "-" is not a word boundary.
+	jsre.MustCompile(`^aws\s.*\s--output(?:\s+|=)json\b`, "i"),
 }
 
 // classifyCommand picks the output policy for a shell command.

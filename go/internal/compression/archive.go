@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/groobybugs/cave-tools/go/internal/storage"
 )
@@ -137,6 +138,14 @@ func ArchiveIfLarge(output, command string) (*ArchiveSummary, error) {
 	}
 
 	lines := strings.Split(output, "\n")
+	if len(lines) <= 30 {
+		// Few huge lines: a line-based head/tail would keep everything, so cut
+		// by chars.
+		head := utf16Prefix(output, 1000)
+		tail := utf16Suffix(output, 500)
+		summary := head + "\n\n... (" + strconv.Itoa(utf16Length(output)-1500) + " chars archived) ...\n\n" + tail
+		return &ArchiveSummary{ID: id, Summary: summary}, nil
+	}
 	head := strings.Join(lines[:minInt(len(lines), 20)], "\n")
 	tailStart := len(lines) - 10
 	if tailStart < 0 {
@@ -146,6 +155,29 @@ func ArchiveIfLarge(output, command string) (*ArchiveSummary, error) {
 	summary := head + "\n\n... (" + strconv.Itoa(len(lines)-30) + " lines archived) ...\n\n" + tail
 
 	return &ArchiveSummary{ID: id, Summary: summary}, nil
+}
+
+// utf16Suffix mirrors String.prototype.slice(-n) over UTF-16 code units.
+// Cutting through a surrogate pair leaves a lone surrogate in JS, which Node
+// serialises to UTF-8 as U+FFFD.
+func utf16Suffix(s string, n int) string {
+	units := 0
+	for i := len(s); i > 0; {
+		r, size := utf8.DecodeLastRuneInString(s[:i])
+		width := 1
+		if r > 0xFFFF {
+			width = 2
+		}
+		if units+width > n {
+			if units < n {
+				return "\uFFFD" + s[i:]
+			}
+			return s[i:]
+		}
+		units += width
+		i -= size
+	}
+	return s
 }
 
 // ExpandArchive returns an archive's content, or ok=false when it is missing.

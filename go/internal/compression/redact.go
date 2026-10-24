@@ -58,9 +58,9 @@ var patterns = []redactRule{
 	{
 		pattern: RedactPattern{
 			Label: "Private key block",
-			Regex: jsre.MustCompile(`(-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----)[\s\S]*?(-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----)`, "g"),
+			Regex: jsre.MustCompile(`(-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----)([\s\S]*?)(-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----)`, "g"),
 		},
-		replacement: "${1}[REDACTED:Private key block]",
+		replacement: "${1}[REDACTED:Private key block]${3}",
 	},
 	{
 		pattern: RedactPattern{
@@ -107,9 +107,9 @@ var patterns = []redactRule{
 	{
 		pattern: RedactPattern{
 			Label: "Database URL",
-			Regex: jsre.MustCompile(`((?:postgres|mysql|mongodb|redis):\/\/[^\s]+:)([^\s]+@)`, "g"),
+			Regex: jsre.MustCompile(`((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?):\/\/[^\s]*:)([^\s]+)(@)`, "g"),
 		},
-		replacement: "${1}[REDACTED:Database URL]",
+		replacement: "${1}[REDACTED:Database URL]${3}",
 	},
 	{
 		pattern: RedactPattern{
