@@ -28,7 +28,7 @@ const maxTimeout = 10 * 60 * 1000
 // Tool is the cave__bash MCP definition.
 var Tool = types.ToolDefinition{
 	Name:        "cave__bash",
-	Description: "Shell with RTK rewriting (never prefix rtk yourself), secret redaction, output budget; archives what it trims. On Claude Code/opencode native shell output is already compressed (successful commands); this also compresses failures.",
+	Description: "Shell with RTK pre-rewrite, secret redaction, output budget, and failure compression. On Claude Code/opencode use native shell by default (CLI-filtered); use this for RTK pre-rewrite or guaranteed failure compression. Never prefix rtk yourself.",
 	InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"description":{"type":"string","description":"5-10 word summary"},"workdir":{"type":"string","description":"Use instead of cd"},"timeout":{"type":"number","description":"ms; 0 disables, max 600000","default":120000},"allowFailure":{"type":"boolean","description":"Return non-zero exits as text, not errors","default":false},"redact_secrets":{"type":"boolean","default":true}},"required":["command","description"]}`),
 	Handler:     handle,
 }

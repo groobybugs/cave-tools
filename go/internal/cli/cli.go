@@ -29,12 +29,12 @@ const caveInstructions = "# Cave Tools — token-optimized MCP\n" +
 	"\n" +
 	"Cave Tools provides optimized drop-in replacements for shell + file ops (RTK\n" +
 	"rewriting, structured JSON/XML extraction, per-tool line budgets). Same results,\n" +
-	"fewer tokens. Prefer these over built-ins.\n" +
+	"fewer tokens. Prefer file/web/edit replacements over built-ins; use shell routing below.\n" +
 	"\n" +
 	"## Tools\n" +
 	"- `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).\n" +
 	"- `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.\n" +
-	"- Shell: on Claude Code / opencode native shell output is auto-compressed after it runs (Claude: successful commands only) — never prefix `cave-tools` or `rtk` yourself. Other hosts: use `cave__bash` (RTK + structured extraction + line budgets, max 10min), or `cave-tools bash -- '<cmd>'` from the shell if MCP is down.\n" +
+	"- Shell: native shell is the default on Claude Code / opencode, with output auto-compressed through the CLI filter (Claude: successful commands only). Use `cave__bash` for RTK pre-rewrite or guaranteed failure compression — never prefix `cave-tools` or `rtk` yourself. Other hosts: use `cave__bash` (max 10min), or `cave-tools bash -- '<cmd>'` from the shell if MCP is down.\n" +
 	"- Long jobs: native background for servers/watchers (uncompressed); `cave__bash_start` when a long job's final output should be compressed — poll `cave__bash_status` (`wait` up to 60s), stop `cave__bash_stop`. `cave-tools jobs` lists/kills jobs from a terminal.\n" +
 	"- `[cave: full output … at <path>]`: `cave__read` offset/limit or `cave__grep` that path instead of re-running. Unfiltered: `cave-tools raw <cmd>` / `CAVE_RAW=1`. `CAVE_TOOLS_FILTER_BASH=0` disables the native filter; `CAVE_TOOLS_WRAP_BASH=1` wraps commands before they run (changes which permission/deny rules match).\n" +
 	"- `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.\n" +

@@ -62,11 +62,13 @@ func TestToolMetadata(t *testing.T) {
 	if Tool.Annotations != nil {
 		t.Fatalf("annotations = %s, want none", Tool.Annotations)
 	}
-	if !strings.Contains(string(Tool.InputSchema), `"required":["command","description"]`) {
-		t.Fatalf("input schema = %s", Tool.InputSchema)
+	const wantDescription = "Shell with RTK pre-rewrite, secret redaction, output budget, and failure compression. On Claude Code/opencode use native shell by default (CLI-filtered); use this for RTK pre-rewrite or guaranteed failure compression. Never prefix rtk yourself."
+	if Tool.Description != wantDescription {
+		t.Fatalf("description = %q, want %q", Tool.Description, wantDescription)
 	}
-	if !strings.Contains(string(Tool.InputSchema), `"default":120000`) {
-		t.Fatalf("input schema missing timeout default: %s", Tool.InputSchema)
+	const wantInputSchema = `{"type":"object","properties":{"command":{"type":"string"},"description":{"type":"string","description":"5-10 word summary"},"workdir":{"type":"string","description":"Use instead of cd"},"timeout":{"type":"number","description":"ms; 0 disables, max 600000","default":120000},"allowFailure":{"type":"boolean","description":"Return non-zero exits as text, not errors","default":false},"redact_secrets":{"type":"boolean","default":true}},"required":["command","description"]}`
+	if got := string(Tool.InputSchema); got != wantInputSchema {
+		t.Fatalf("input schema = %s, want %s", got, wantInputSchema)
 	}
 }
 

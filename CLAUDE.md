@@ -3,9 +3,9 @@
 
 ## Golden Rule
 
-**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
+**On Claude Code / opencode with cave-tools, use native shell by default and do not prefix `rtk`; use `cave__bash` when RTK pre-rewrite is wanted. On other hosts, prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged.
 
-**Important**: Even in command chains with `&&`, use `rtk`:
+**Important**: In command chains with `&&` on hosts using explicit RTK, prefix each command:
 ```bash
 # ❌ Wrong
 git add . && git commit -m "msg" && git push
@@ -142,13 +142,13 @@ Overall average: **60-90% token reduction** on common development operations.
 
 Cave Tools provides optimized drop-in replacements for built-in file/shell/web
 tools. Same results, fewer tokens (RTK rewriting, structured JSON/XML extraction,
-per-tool line budgets, dedup cache, redaction, archiving). Prefer these over
-built-ins.
+per-tool line budgets, dedup cache, redaction, archiving). Prefer file/web/edit
+replacements over built-ins; use native shell where filtered.
 
 ## Tools
 - `cave__read` instead of Read — dedup cache + line budgets.
 - `cave__grep`, `cave__find`, `cave__ls` instead of Grep/Glob/shell `ls`.
-- Native Bash is auto-compressed after it runs (successful commands; never prefix `cave-tools`/`rtk`). `cave__bash` — RTK + structured extraction + line budgets — also compresses failures.
+- Native Bash is the default on Claude Code / opencode (auto-compressed through the CLI filter; never prefix `cave-tools`/`rtk`). Use `cave__bash` for RTK pre-rewrite or guaranteed failure compression.
 - `cave__bash_start`/`cave__bash_status`/`cave__bash_stop` for long jobs whose final output matters. A job whose shell fails to start reports exit 127 (never 0).
 - `cave__write` to create/overwrite a single file; `cave__edit` for fuzzy string replacement.
 - `cave__apply_patch` for multi-file add/update/delete/move patches.

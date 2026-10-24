@@ -229,6 +229,9 @@ try {
     assert.match(prompt, /old_string/);
     assert.match(prompt, /new_string/);
     assert.match(prompt, /never infer target/i);
+    assert.match(prompt, /Native shell is the default/);
+    assert.match(prompt, /RTK pre-rewrite or guaranteed failure compression/);
+    assert.doesNotMatch(prompt, /cave__bash also fine/);
     ok("prompt shows explicit file_path + old_string/new_string");
   }
 
