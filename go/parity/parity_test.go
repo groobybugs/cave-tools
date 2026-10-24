@@ -287,6 +287,10 @@ func isolatedEnv(dataDir string, extra map[string]string) []string {
 	env["CAVE_TOOLS_DATA_DIR"] = dataDir
 	env["CLAUDE_CONFIG_DIR"] = filepath.Join(dataDir, "claude")
 	env["CAVE_TOOLS_DAEMON"] = "0"
+	// The TS entry point can delegate to Go when these are set. The reference
+	// side must always execute dist/cli.js, whatever the developer's shell has.
+	delete(env, "CAVE_TOOLS_IMPL")
+	delete(env, "CAVE_TOOLS_GO_BIN")
 	for key, value := range extra {
 		env[key] = value
 	}
