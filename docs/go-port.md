@@ -450,8 +450,9 @@ Accepted compression deviations (W2d, Muse review):
 ### TS bugs found while porting
 
 The port found these in the TS implementation. All are fixed in TS on `main`
-(commit `ebe616e` "fix: TS bugs found by the Go port", and `1b3fbbc` for the
-daemon) and the Go side now mirrors the fixed behaviour. The regression cases
+(commit `ebe616e` "fix: TS bugs found by the Go port", `1b3fbbc` for the
+daemon, and `7c81d32` for the strict edit proofs) and the Go side now mirrors
+the fixed behaviour. The regression cases
 live in `scripts/test-port-bugs.mjs` (plus the single-group redaction block in
 `test.mjs`) and are ported to the matching `*_test.go`.
 
@@ -469,3 +470,12 @@ live in `scripts/test-port-bugs.mjs` (plus the single-group redaction block in
 | 10 | `src/compression/classify.ts` `/^aws\s+.*\b--output\s+json\b/i` never matched: `\b` between a space and `-` is not a word boundary. | `/^aws\s.*\s--output(?:\s+|=)json\b/i`. | same source through `jsre`. |
 | 11 | `src/compression/redact.ts` dropped the private-key END marker and the database URL's `@`, and missed `postgresql`, `mongodb+srv`, `rediss` URLs and empty users. | 3-group patterns keep the delimiters; scheme variants added. | same patterns and `${1}…${3}` replacements. |
 | 12 | `src/daemon/control.ts` `rpc` parsed every reply line with an unguarded `JSON.parse`, so one malformed line crashed `daemon status`/`stop`. | `try/catch` + `continue` (`1b3fbbc`). | `daemon/control.go` already skipped malformed lines; the stale comment was updated. |
+| 13 | `src/tools/edit.ts` strict proof gates stringified `null`/numbers/booleans, so `expected_hash: null` passed strict mode and the edit was written without any proof verification (found in W3b review). | `hasProofValue` requires a nonempty string in the single and batch range/move gates; the batch keeps the legacy top-level hash for its multi-file error but passes the string-only proof to `applyEditsToContent` (`7c81d32`). | `hasProofValue` in `edit.go`; `scripts/test-port-bugs.mjs` cases 18-21 are ported as `TestEditStrictProofValues`. |
+
+Independently of the table, the W3b review found Go's edit handlers rejecting
+an explicit `null` line number where TS's `Number(null) === 0`: Go now
+distinguishes an absent key (`Number(undefined)` is NaN) from a present null in
+single and batch range/move and the batch `delete:true` path, preserving the
+shape gates. The batch planners also stringify a present
+`expected_range_checksum` like TS (`String(null)` is `"null"`), so an explicit
+null fails verification instead of being skipped.
