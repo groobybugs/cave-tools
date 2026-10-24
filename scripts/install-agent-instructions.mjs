@@ -804,13 +804,20 @@ if [ "\${CAVE_TOOLS_IMPL:-}" = "go" ]; then
   else
     cave_go_bin=${posixShellQuote(GO_BIN_DEFAULT)}
   fi
+  # A bare relative name validates against the caller cwd above, but a
+  # slashless exec would search PATH instead. Prefix the cwd so the binary
+  # that passed the check is exactly the one executed.
+  case "$cave_go_bin" in
+    /*) ;;
+    *) cave_go_bin="\${PWD:-.}/$cave_go_bin" ;;
+  esac
   if [ -f "$cave_go_bin" ] && [ -x "$cave_go_bin" ]; then
     exec "$cave_go_bin" "$@"
   fi
   printf '%s\\n' "cave-tools: CAVE_TOOLS_IMPL=go but $cave_go_bin is missing or not executable" >&2
   exit 127
 fi
-exec "${CAVE_NODE_LAUNCHER}" "${CAVE_TOOLS_CLI}" "$@"
+exec ${posixShellQuote(CAVE_NODE_LAUNCHER)} ${posixShellQuote(CAVE_TOOLS_CLI)} "$@"
 `;
 
 let launchersReady = null;

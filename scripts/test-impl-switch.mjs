@@ -144,9 +144,11 @@ async function testResolutionModule() {
 
   const win = mod.resolveGoBinary({ env: {}, platform: "win32", packageRoot: join(ROOT, "pkg") });
   assert.equal(win.path, join(ROOT, "pkg", "go", "bin", "cave-tools-go.exe"));
+  assert.ok(win.path.endsWith("cave-tools-go.exe"), "Windows default uses .exe");
   assert.equal(win.source, "default");
   const posix = mod.resolveGoBinary({ env: {}, platform: "linux", packageRoot: join(ROOT, "pkg") });
   assert.equal(posix.path, join(ROOT, "pkg", "go", "bin", "cave-tools-go"));
+  assert.ok(!posix.path.endsWith(".exe"), "POSIX default has no .exe suffix");
 
   const spaced = join(ROOT_FIXTURE, "override dir ü", "my go");
   const override = mod.resolveGoBinary({
@@ -175,6 +177,7 @@ async function testResolutionModule() {
     const plain = join(ROOT_FIXTURE, "plain-go");
     writeFileSync(plain, "not executable", { mode: 0o644 });
     assert.equal(mod.goBinaryProblem(plain, "linux"), "not-executable");
+    assert.equal(mod.goBinaryProblem(plain, "win32"), null, "Windows has no POSIX X_OK check");
   }
   const executable = fakeGo(join(ROOT_FIXTURE, "unit"));
   assert.equal(mod.goBinaryProblem(executable, process.platform), null);
@@ -300,6 +303,21 @@ function testDirectSwitch() {
   });
   assert.equal(relative.status, 0, relative.stderr);
   assert.match(relative.stdout, /^argc=1\n/, "relative Go override accepted");
+
+  // A bare name has no slash, so POSIX exec would search PATH instead of the
+  // caller cwd that passed the existence check. Direct resolution is cwd-based.
+  const bareCwd = join(ROOT_FIXTURE, "bare cwd ü");
+  fakeGo(bareCwd, "bare go");
+  const bare = runCli(["--version"], {
+    cwd: bareCwd,
+    env: {
+      CAVE_TOOLS_IMPL: "go",
+      CAVE_TOOLS_GO_BIN: "bare go",
+      PATH: dirname(process.execPath),
+    },
+  });
+  assert.equal(bare.status, 0, bare.stderr);
+  assert.match(bare.stdout, /^argc=1\n/, "bare-name cwd override accepted");
 }
 
 async function testDirectSignalRelay() {
@@ -375,9 +393,10 @@ async function testRealGoSmoke() {
   assert.match(stderr, /Cave Tools MCP server running on stdio/);
 }
 
-function installFakeHome() {
-  if (installFakeHome.context) return installFakeHome.context;
-  const home = join(ROOT_FIXTURE, "home with spaces ü");
+function installFakeHome(name = "home with spaces ü") {
+  installFakeHome.contexts ??= new Map();
+  if (installFakeHome.contexts.has(name)) return installFakeHome.contexts.get(name);
+  const home = join(ROOT_FIXTURE, name);
   const nvm = join(ROOT_FIXTURE, "fake nvm");
   const nodeDir = join(nvm, "versions", "node", `v${process.versions.node}`, "bin");
   mkdirSync(nodeDir, { recursive: true });
@@ -398,8 +417,9 @@ function installFakeHome() {
     timeout: 30000,
   });
   assert.equal(result.status, 0, result.stderr);
-  installFakeHome.context = { home, nvm, shim: join(home, ".local", "bin", "cave-tools") };
-  return installFakeHome.context;
+  const context = { home, nvm, shim: join(home, ".local", "bin", "cave-tools") };
+  installFakeHome.contexts.set(name, context);
+  return context;
 }
 
 function shimEnv(context, extra = {}) {
@@ -440,7 +460,7 @@ function testLauncherShim() {
   const syntax = spawnSync("sh", ["-n", context.shim], { encoding: "utf8" });
   assert.equal(syntax.status, 0, syntax.stderr);
   const goExec = shim.indexOf('exec "$cave_go_bin" "$@"');
-  const nodeExec = shim.lastIndexOf('exec "');
+  const nodeExec = shim.lastIndexOf("exec ");
   assert.ok(goExec > 0, "shim execs the Go binary");
   assert.ok(nodeExec > goExec, "Go selection precedes the Node launcher");
   assert.match(shim, /exit 127/, "missing Go binary has a hard failure");
@@ -498,6 +518,21 @@ function testLauncherShim() {
   assert.equal(noArgs.status, 0);
   assert.match(noArgs.stdout, /^argc=0\n/);
 
+  // The shim must execute the cwd binary that passed the check, not a PATH
+  // lookup for the same slashless name. Compare it with direct Node.
+  const bareCwd = join(ROOT_FIXTURE, "shim bare cwd ü");
+  fakeGo(bareCwd, "bare go shim");
+  const bareEnv = {
+    CAVE_TOOLS_IMPL: "go",
+    CAVE_TOOLS_GO_BIN: "bare go shim",
+    PATH: dirname(process.execPath),
+  };
+  const directBare = runCli(["--version"], { cwd: bareCwd, env: bareEnv });
+  const shimBare = runShim(context, ["--version"], { cwd: bareCwd, env: bareEnv });
+  assert.equal(shimBare.status, 0, shimBare.stderr);
+  assert.equal(shimBare.stdout, directBare.stdout, "direct and shim resolve the same cwd binary");
+  assert.equal(shimBare.stderr, directBare.stderr);
+
   const cat = fakeCat(join(dir, "cat"));
   const bytes = Buffer.from([0, 1, 2, 10, 13, 255, 65, 0]);
   const piped = runShim(context, [], {
@@ -537,6 +572,24 @@ function testLauncherShim() {
   } else {
     console.log("SKIP shim real Go smoke: build go/bin/cave-tools-go first");
   }
+
+  // Static launcher paths must be single-quoted too: a directory containing
+  // $, backticks or a single quote must not be shell-expanded.
+  const special = installFakeHome("home $dollar `tick` 'quote");
+  const specialShim = readFileSync(special.shim, "utf8");
+  const nodeExecLine = specialShim
+    .split("\n")
+    .find((line) => line.startsWith("exec ") && line.includes("cave-node"));
+  assert.ok(nodeExecLine, "generated shim has a Node exec line");
+  assert.match(nodeExecLine, /^exec '/, "static node path is single-quoted");
+  assert.match(nodeExecLine, /^exec '.+' '.+' "\$@"$/, "static node and CLI paths are single-quoted");
+  const specialMarker = join(ROOT_FIXTURE, "special marker");
+  const specialTs = runShim(special, ["--version"], {
+    env: { CAVE_TOOLS_GO_BIN: fake, CAVE_TOOLS_SWITCH_MARKER: specialMarker },
+  });
+  assert.equal(specialTs.status, 2, specialTs.stderr);
+  assert.match(specialTs.stderr, /^Usage: cave-tools /, "special-char HOME reaches TypeScript");
+  assert.equal(existsSync(specialMarker), false);
 }
 
 async function testShimSignal() {
