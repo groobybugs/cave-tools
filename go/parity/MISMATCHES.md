@@ -25,7 +25,7 @@ opt-in switch (`a0dcc6e`); Go merged from `a0dcc6e`. All tests below live in
    Test: `TestCLIBlackBoxDifferential/bash.empty-command`.
 
 3. **`filter --json` malformed-JSON wording differs.**
-   Go `go/internal/cli/cli_tools.go:974` surfaces `encoding/json` text
+   Go `go/internal/cli/cli_tools.go:973` surfaces `encoding/json` text
    (`invalid character 'o' in literal null (expecting 'u')`). TS
    `JSON.parse` on Node 24 says
    `Unexpected token 'o', "not json" is not valid JSON`. Exit code and empty
