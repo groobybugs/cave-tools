@@ -119,8 +119,8 @@ func ArchiveHandle(full, shown, command string) string {
 // ArchiveSummary is archiveIfLarge's result object.
 // port of src/compression/archive.ts:archiveIfLarge (return object)
 type ArchiveSummary struct {
-	ID      string
-	Summary string
+	ID      string `json:"id"`
+	Summary string `json:"summary"`
 }
 
 // ArchiveIfLarge archives output at or above archiveThreshold chars and returns
