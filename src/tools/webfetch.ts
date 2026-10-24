@@ -278,13 +278,10 @@ function convertHtmlToMarkdown(html: string): string {
     }
     if (skipDepth > 0) continue;
 
-    if (HEADING_TAGS[tag] && !closing) {
+    if (Object.hasOwn(HEADING_TAGS, tag) && !closing) {
       out.push(`\n\n${HEADING_TAGS[tag]} `);
     } else if (tag === "br" && !closing) {
       out.push("\n");
-    } else if (BLOCK_TAGS.has(tag) || tag === "body" || tag === "html") {
-      if (!closing && !self && out.length && out[out.length - 1] !== "\n") out.push("\n");
-      if ((closing || self) && out.length && out[out.length - 1] !== "\n") out.push("\n");
     } else if (tag === "a" && !closing && attrs.href) {
       linkHrefStack.push(attrs.href);
       out.push("[");
@@ -334,6 +331,9 @@ function convertHtmlToMarkdown(html: string): string {
       } else {
         out.push("\n- ");
       }
+    } else if (BLOCK_TAGS.has(tag) || tag === "body" || tag === "html") {
+      if (!closing && !self && out.length && out[out.length - 1] !== "\n") out.push("\n");
+      if ((closing || self) && out.length && out[out.length - 1] !== "\n") out.push("\n");
     }
   }
 

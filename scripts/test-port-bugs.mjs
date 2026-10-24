@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,8 @@ const { extractSignatures } = await import(join(ROOT, "dist/compression/signatur
 const { classifyCommand } = await import(join(ROOT, "dist/compression/classify.js"));
 const { redactSecrets } = await import(join(ROOT, "dist/compression/redact.js"));
 const { runWithContext } = await import(join(ROOT, "dist/runtime/context.js"));
+const { webfetchTool } = await import(join(ROOT, "dist/tools/webfetch.js"));
+const { editTool } = await import(join(ROOT, "dist/tools/edit.js"));
 
 let passed = 0;
 let failed = 0;
@@ -45,6 +48,25 @@ async function test(name, fn) {
   }
 }
 const ctx = (cwd, env) => ({ sessionId: "port-bugs", cwd, env, clientId: "test" });
+async function renderHtml(html, format) {
+  const server = createServer((_req, res) => {
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.end(html);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = server.address();
+    const result = await webfetchTool.handler({
+      url: `http://127.0.0.1:${port}/fixture`,
+      format,
+      redact_secrets: false,
+    });
+    assert.equal(result.isError, undefined, result.content[0].text);
+    return result.content[0].text;
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
 const job = (over) => ({
   jobId: `pb-${Math.random().toString(36).slice(2)}`,
   pid: 999999,
@@ -214,6 +236,107 @@ await test("13 daemon control skips a malformed reply line instead of crashing",
   const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", env: process.env });
   assert.equal(r.status, 0, r.stderr || r.stdout);
   assert.match(r.stdout, /running pid 42/);
+});
+
+const stats = await import(join(ROOT, "dist/compression/utils.js"));
+
+await test("14 buildStats reports the given bucket's bounces", () => {
+  runWithContext({ ...ctx(work, process.env), clientPid: 777 }, () => {
+    stats.recordRead("/tmp/pb14.ts", true, 100);
+    stats.recordRead("/tmp/pb14.ts", false, 500);
+  });
+  // Written from the local context, whose bucket has no bounces.
+  stats.releaseClientStats(777);
+  const row = db.listSessionStats(true).find((r) => r.pid === 777);
+  assert.ok(row, "client row written");
+  assert.equal(row.bounces.totalBounces, 1);
+  assert.ok(row.bounces.byExtension[".ts"], "per-extension bounce kept");
+});
+
+await test("15 resetStats clears range-edit counters", async () => {
+  stats.recordRangeEchoSaved(1234);
+  assert.ok(stats.getRangeEditStats().edits > 0);
+  await stats.resetStats();
+  assert.deepEqual(stats.getRangeEditStats(), { edits: 0, echoSavedChars: 0, estimatedTokensSaved: 0 });
+});
+
+await test("16 webfetch markdown renders list markers and blockquote prefixes", async () => {
+  const html = "<ul><li>one</li><li>two</li></ul><ol><li>first</li><li>second</li></ol><blockquote>quoted</blockquote>";
+  assert.equal(
+    await renderHtml(html, "markdown"),
+    "- one\n\n- two\n\n1. first\n\n2. second\n\n> quoted",
+  );
+  assert.equal(await renderHtml(html, "text"), "one\ntwo\nfirst\nsecond\nquoted");
+});
+
+await test("17 webfetch markdown treats inherited object keys as ordinary tags", async () => {
+  const html = "<constructor>Alpha</constructor><toString>Beta</toString><h2>Real</h2>";
+  assert.equal(await renderHtml(html, "markdown"), "AlphaBeta\n\n## Real");
+  assert.equal(await renderHtml(html, "text"), "AlphaBetaReal");
+});
+
+const strictProofError = /STRICT: range\/move edit requires expected_hash or expected_range_checksum/;
+const resultText = (result) => result.content.map((part) => part.text ?? "").join("\n");
+async function inStrictMode(fn) {
+  const previous = process.env.CAVE_TOOLS_MODE;
+  process.env.CAVE_TOOLS_MODE = "strict";
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.CAVE_TOOLS_MODE;
+    else process.env.CAVE_TOOLS_MODE = previous;
+  }
+}
+async function rejectsStrictProof(file, args, prefix = "") {
+  const before = readFileSync(file, "utf8");
+  const result = await inStrictMode(() => editTool.handler(args));
+  assert.equal(result.isError, true, resultText(result));
+  assert.match(resultText(result), strictProofError);
+  if (prefix) assert.match(resultText(result), new RegExp(`Error: ${prefix}`));
+  assert.equal(readFileSync(file, "utf8"), before);
+}
+
+await test("18 strict single range rejects null expected_hash", async () => {
+  const file = join(work, "strict-single-range.txt");
+  writeFileSync(file, "alpha\nbeta\n");
+  await rejectsStrictProof(file, {
+    file_path: file,
+    start_line: 1,
+    end_line: 1,
+    content: "ALPHA",
+    expected_hash: null,
+  });
+});
+
+await test("19 strict single move rejects null expected_range_checksum", async () => {
+  const file = join(work, "strict-single-move.txt");
+  writeFileSync(file, "alpha\nbeta\n");
+  await rejectsStrictProof(file, {
+    file_path: file,
+    start_line: 1,
+    end_line: 1,
+    insert_before: 3,
+    expected_range_checksum: null,
+  });
+});
+
+await test("20 strict batch range rejects null proof values", async () => {
+  const file = join(work, "strict-batch-range.txt");
+  writeFileSync(file, "alpha\nbeta\n");
+  await rejectsStrictProof(file, {
+    file_path: file,
+    expected_hash: null,
+    edits: [{ start_line: 1, end_line: 1, content: "ALPHA", expected_hash: null }],
+  }, "edits\\[0\\]: STRICT");
+});
+
+await test("21 strict batch move rejects null expected_range_checksum", async () => {
+  const file = join(work, "strict-batch-move.txt");
+  writeFileSync(file, "alpha\nbeta\n");
+  await rejectsStrictProof(file, {
+    file_path: file,
+    edits: [{ start_line: 1, end_line: 1, insert_before: 3, expected_range_checksum: null }],
+  }, "edits\\[0\\]: STRICT");
 });
 
 console.log(`port-bugs: ${passed} passed, ${failed} failed`);
