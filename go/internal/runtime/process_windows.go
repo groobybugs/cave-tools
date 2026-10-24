@@ -17,11 +17,14 @@ import (
 
 // shellCommand mirrors the win32 spawn in src/runtime/process.ts:231-241.
 // Node uses `/d /s /c` only for cmd.exe and `-c` for every other shell
-// (normalizeSpawnArguments). Node also sets windowsVerbatimArguments; os/exec
-// has no verbatim mode, so the command goes through Go's Windows quoting.
+// (normalizeSpawnArguments). For cmd.exe Node also sets
+// windowsVerbatimArguments, so the command line is passed raw via
+// SysProcAttr.CmdLine instead of Go's argument quoting.
 func shellCommand(shell, command string) *exec.Cmd {
 	if isCmdExe(shell) {
-		return exec.Command(shell, "/d", "/s", "/c", command)
+		cmd := exec.Command(shell)
+		cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: cmdExeCommandLine(shell, command)}
+		return cmd
 	}
 	return exec.Command(shell, "-c", command)
 }
@@ -38,7 +41,10 @@ func isCmdExe(shell string) bool {
 // `detached` on win32, so there is no process group to create.
 func configureSpawn(cmd *exec.Cmd, detached bool) {
 	_ = detached
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.HideWindow = true
 }
 
 // terminateProcess is the Go form of the runCommand kill closure on win32:
