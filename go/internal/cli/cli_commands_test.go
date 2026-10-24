@@ -460,6 +460,74 @@ func TestToolCommandDaemonOutcome(t *testing.T) {
 	}
 }
 
+func TestLocalToolCallFlushesStats(t *testing.T) {
+	minimalEnv(t)
+	// Use the production bindings (server.CallTool) so the tool records its
+	// savings in the process bucket before the CLI flushes it.
+	old := hooks
+	t.Cleanup(func() { hooks = old })
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"bash", "echo flush-me"}, strings.NewReader(""), &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("bash exit = %d stderr=%q", code, stderr.String())
+	}
+	rows, err := storage.ListSessionStats(false)
+	if err != nil {
+		t.Fatalf("ListSessionStats: %v", err)
+	}
+	found := false
+	for _, row := range rows {
+		if row.Pid == int64(os.Getpid()) {
+			found = true
+			if row.Savings.TotalCalls < 1 {
+				t.Fatalf("stats not flushed: %#v", row.Savings)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no stats row for pid %d: %#v", os.Getpid(), rows)
+	}
+}
+
+func TestDaemonCallDoesNotFlushLocalStats(t *testing.T) {
+	minimalEnv(t)
+	const sentinelCalls = int64(7)
+	if err := storage.UpsertSessionStats(storage.PersistedStats{
+		Pid:       int64(os.Getpid()),
+		UpdatedAt: 1,
+		Savings:   storage.SavingsStats{TotalCalls: sentinelCalls},
+	}); err != nil {
+		t.Fatalf("UpsertSessionStats: %v", err)
+	}
+	installToolFixture(t, []types.ToolDefinition{demoTool()}, func(ctx context.Context, name string, args map[string]any, call *rt.CallContext) (types.ToolResult, error) {
+		t.Fatal("daemon-served call must not run locally")
+		return types.ToolResult{}, nil
+	})
+	hooks.DaemonEnabled = func() bool { return true }
+	hooks.DaemonCall = func(ctx context.Context, name string, args map[string]any, call *rt.CallContext, explicit bool) (daemonCallOutcome, error) {
+		return daemonCallOutcome{Sent: true, Result: types.ToolResult{Content: []types.Content{types.Text("remote")}}}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"demo", "x"}, strings.NewReader(""), &stdout, &stderr, "test")
+	if code != 0 {
+		t.Fatalf("demo exit = %d stderr=%q", code, stderr.String())
+	}
+	rows, err := storage.ListSessionStats(false)
+	if err != nil {
+		t.Fatalf("ListSessionStats: %v", err)
+	}
+	for _, row := range rows {
+		if row.Pid != int64(os.Getpid()) {
+			continue
+		}
+		if row.Savings.TotalCalls != sentinelCalls {
+			t.Fatalf("daemon call flushed local stats: calls=%d want=%d", row.Savings.TotalCalls, sentinelCalls)
+		}
+		return
+	}
+	t.Fatal("sentinel stats row disappeared")
+}
+
 func TestMCPUnlinkedIsReported(t *testing.T) {
 	old := hooks
 	hooks = integration{}
