@@ -342,6 +342,13 @@ func checkFieldTypes(raw map[string]any, label string) *types.ToolResult {
 	return nil
 }
 
+// hasProofValue reports a nonempty string strict proof.
+// port of src/tools/edit.ts:hasProofValue
+func hasProofValue(value any) bool {
+	text, isString := value.(string)
+	return isString && jsre.Trim(text) != ""
+}
+
 // requireProofInStrict enforces the strict-mode proof requirement.
 // port of src/tools/edit.ts:requireProofInStrict
 func requireProofInStrict(ctx context.Context, hasFileHash, hasRangeChecksum bool) *types.ToolResult {
@@ -475,8 +482,8 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 		if hasMove || hasRange {
 			proofErr := requireProofInStrict(
 				lockedCtx,
-				keySet(args, "expected_hash") && jsre.Trim(jsStringValue(args["expected_hash"])) != "",
-				keySet(args, "expected_range_checksum") && jsre.Trim(jsStringValue(args["expected_range_checksum"])) != "",
+				hasProofValue(args["expected_hash"]),
+				hasProofValue(args["expected_range_checksum"]),
 			)
 			if proofErr != nil {
 				return *proofErr, nil
@@ -484,9 +491,9 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 		}
 
 		if hasMove {
-			startLine, startOK := integerValue(args["start_line"])
-			endLine, endOK := integerValue(args["end_line"])
-			insertBefore, insertOK := integerValue(args["insert_before"])
+			startLine, startOK := integerField(args, "start_line")
+			endLine, endOK := integerField(args, "end_line")
+			insertBefore, insertOK := integerField(args, "insert_before")
 			if !startOK || !endOK || !insertOK {
 				return errResult("start_line, end_line, and insert_before must be integers"), nil
 			}
@@ -512,8 +519,8 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 		}
 
 		if hasRange {
-			startLine, startOK := integerValue(args["start_line"])
-			endLine, endOK := integerValue(args["end_line"])
+			startLine, startOK := integerField(args, "start_line")
+			endLine, endOK := integerField(args, "end_line")
 			if !startOK || !endOK {
 				return errResult("start_line and end_line must be integers for range mode"), nil
 			}
@@ -642,19 +649,16 @@ func applyEditsToContent(
 		}
 
 		if move {
-			startLine, startOK := integerValue(raw["start_line"])
-			endLine, endOK := integerValue(raw["end_line"])
-			insertBefore, insertOK := integerValue(raw["insert_before"])
+			startLine, startOK := integerField(raw, "start_line")
+			endLine, endOK := integerField(raw, "end_line")
+			insertBefore, insertOK := integerField(raw, "insert_before")
 			if !startOK || !endOK || !insertOK {
 				return "", errResultPtr("edits[" + strconv.Itoa(globalIndex) + "]: start_line, end_line, insert_before must be integers")
 			}
 			proofErr := requireProofInStrict(
 				ctx,
-				fileHashProvided || (func() bool {
-					value, ok := raw["expected_hash"]
-					return ok && jsre.Trim(jsStringValue(value)) != ""
-				})(),
-				keySet(raw, "expected_range_checksum") && jsre.Trim(jsStringValue(raw["expected_range_checksum"])) != "",
+				fileHashProvided || hasProofValue(raw["expected_hash"]),
+				hasProofValue(raw["expected_range_checksum"]),
 			)
 			if proofErr != nil {
 				return "", errResultPtr("edits[" + strconv.Itoa(globalIndex) + "]: " + errorText(*proofErr))
@@ -664,14 +668,14 @@ func applyEditsToContent(
 				startLine:             startLine,
 				endLine:               endLine,
 				insertBefore:          insertBefore,
-				expectedRangeChecksum: raw["expected_range_checksum"],
+				expectedRangeChecksum: rawExpectedRangeChecksum(raw),
 			})
 			continue
 		}
 
 		if rangeShape || raw["delete"] == true {
-			startLine, startOK := integerValue(raw["start_line"])
-			endLine, endOK := integerValue(raw["end_line"])
+			startLine, startOK := integerField(raw, "start_line")
+			endLine, endOK := integerField(raw, "end_line")
 			if !startOK || !endOK {
 				return "", errResultPtr("edits[" + strconv.Itoa(globalIndex) + "]: start_line and end_line must be integers")
 			}
@@ -682,11 +686,8 @@ func applyEditsToContent(
 			}
 			proofErr := requireProofInStrict(
 				ctx,
-				fileHashProvided || (func() bool {
-					value, ok := raw["expected_hash"]
-					return ok && jsre.Trim(jsStringValue(value)) != ""
-				})(),
-				keySet(raw, "expected_range_checksum") && jsre.Trim(jsStringValue(raw["expected_range_checksum"])) != "",
+				fileHashProvided || hasProofValue(raw["expected_hash"]),
+				hasProofValue(raw["expected_range_checksum"]),
 			)
 			if proofErr != nil {
 				return "", errResultPtr("edits[" + strconv.Itoa(globalIndex) + "]: " + errorText(*proofErr))
@@ -700,7 +701,7 @@ func applyEditsToContent(
 				startLine:             startLine,
 				endLine:               endLine,
 				content:               replacement,
-				expectedRangeChecksum: raw["expected_range_checksum"],
+				expectedRangeChecksum: rawExpectedRangeChecksum(raw),
 			})
 			continue
 		}
@@ -985,6 +986,7 @@ func handleBatchEdits(ctx context.Context, args map[string]any) types.ToolResult
 	if value, ok := args["expected_hash"]; ok && value != nil {
 		topLevelHash = jsre.Trim(jsStringValue(value)) != ""
 	}
+	topLevelHashProof := hasProofValue(args["expected_hash"])
 	if len(groups) > 1 && topLevelHash {
 		return errResult("top-level expected_hash applies only to single-file batches; " +
 			"set expected_hash on each edit item for multi-file batches")
@@ -1070,7 +1072,7 @@ func handleBatchEdits(ctx context.Context, args map[string]any) types.ToolResult
 				edits[i] = item.edit
 				indices[i] = item.index
 			}
-			updated, failure := applyEditsToContent(lockedCtx, file.filePath, file.content, edits, indices, len(groups) == 1 && topLevelHash)
+			updated, failure := applyEditsToContent(lockedCtx, file.filePath, file.content, edits, indices, len(groups) == 1 && topLevelHashProof)
 			if failure != nil {
 				return *failure, nil
 			}
@@ -1191,13 +1193,35 @@ func numberValue(value any) (float64, bool) {
 	}
 }
 
-// integerValue mirrors Number.isInteger(Number(value)).
+// integerValue mirrors Number.isInteger(Number(value)); nil is Number(null) === 0.
 func integerValue(value any) (int, bool) {
+	if value == nil {
+		return 0, true
+	}
 	parsed, ok := numberValue(value)
 	if !ok || math.IsInf(parsed, 0) || math.IsNaN(parsed) || parsed != math.Trunc(parsed) {
 		return 0, false
 	}
 	return int(parsed), true
+}
+
+// rawExpectedRangeChecksum mirrors the batch planners' `!== undefined ?
+// String(value) : undefined`, so an explicit null proves as "null" (and fails
+// verification) instead of being dropped like an absent key.
+func rawExpectedRangeChecksum(raw map[string]any) any {
+	if value, ok := raw["expected_range_checksum"]; ok {
+		return jsStringValue(value)
+	}
+	return nil
+}
+
+// integerField parses Number(raw[key]) for the edit handlers. A missing key is
+// Number(undefined) === NaN (rejected); an explicit null is Number(null) === 0.
+func integerField(raw map[string]any, key string) (int, bool) {
+	if !keySet(raw, key) {
+		return 0, false
+	}
+	return integerValue(raw[key])
 }
 
 // jsStringValue mirrors JavaScript's String(value), including null -> "null".

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"strconv"
 	"time"
@@ -37,7 +36,7 @@ func rpc(method string) (*rpcReply, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := dialDaemon(path)
+	conn, err := dialDaemon(path, rpcTimeout)
 	if err != nil {
 		return nil, nil
 	}
@@ -106,15 +105,6 @@ func writeJSONLine(w io.Writer, value any) error {
 	raw = append(raw, '\n')
 	_, err = w.Write(raw)
 	return err
-}
-
-// dialDaemon connects to the daemon socket: a unix socket everywhere except
-// Windows, where SocketPath returns a named pipe opened as a file.
-func dialDaemon(path string) (io.ReadWriteCloser, error) {
-	if pathsPlatform == "win32" {
-		return os.OpenFile(path, os.O_RDWR, 0)
-	}
-	return net.DialTimeout("unix", path, rpcTimeout)
 }
 
 // DaemonStatus implements `cave-tools daemon status`: 0 when a daemon answered

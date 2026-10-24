@@ -4,11 +4,13 @@ package ls
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
 	rt "github.com/groobybugs/cave-tools/go/internal/runtime"
@@ -131,7 +133,7 @@ func sortEntries(entries []entry) {
 	sort.SliceStable(entries, func(i, j int) bool {
 		a, b := entries[i], entries[j]
 		if a.isDirectory == b.isDirectory {
-			return localeCompare(a.name, b.name) < 0
+			return rt.LocaleCompare(a.name, b.name) < 0
 		}
 		return a.isDirectory
 	})
@@ -144,6 +146,12 @@ func readdirErrorMessage(err error, dirPath string) string {
 	}
 	if os.IsNotExist(err) {
 		return "ENOENT: no such file or directory, scandir '" + dirPath + "'"
+	}
+	if errors.Is(err, syscall.ENOTDIR) {
+		return "ENOTDIR: not a directory, scandir '" + dirPath + "'"
+	}
+	if errors.Is(err, syscall.ELOOP) {
+		return "ELOOP: too many symbolic links encountered, scandir '" + dirPath + "'"
 	}
 	return err.Error()
 }

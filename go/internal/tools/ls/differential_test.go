@@ -42,6 +42,12 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 		{name: "offset-beyond", args: `{"path":".","offset":50}`},
 		{name: "limit-string", args: `{"path":".","limit":"3"}`},
 		{name: "default-path", args: `{}`},
+		{name: "null-path", args: `{"path":null}`},
+		{name: "null-limit", args: `{"path":".","limit":null}`},
+		{name: "null-offset", args: `{"path":".","offset":null}`},
+		{name: "fractional-limit", args: `{"path":".","limit":2.5}`},
+		{name: "fractional-offset", args: `{"path":".","offset":1.5,"limit":50}`},
+		{name: "huge-limit", args: `{"path":".","limit":1e21}`},
 	}
 
 	if err := os.MkdirAll(filepath.Join(fixtureDir, "empty"), 0o700); err != nil {

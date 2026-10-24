@@ -22,7 +22,7 @@ var Tool = types.ToolDefinition{
 // handle is the cave__bash_start handler.
 // port of src/tools/bash-start.ts:bashStartTool.handler
 func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) {
-	command := jsString(args["command"])
+	command := jsArgString(args, "command")
 	description := ""
 	if raw, ok := args["description"]; ok && raw != nil {
 		description = jsString(raw)
