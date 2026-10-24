@@ -313,12 +313,14 @@ async function test() {
       { name: "t5", status: "passed" },
     ],
   };
-  const longResults = JSON.stringify(results, null, 2) + "\n// padding ".repeat(60);
+  // Pad with more passing items so the array cap triggers (a trailing
+  // comment used to make this invalid JSON, so the assertions never ran).
+  for (let i = 6; i <= 40; i++) results.results.push({ name: `t${i}`, status: "passed" });
+  const longResults = JSON.stringify(results, null, 2);
   const jsonCompressed = compressStructuredSemantic(longResults);
-  if (jsonCompressed !== null) {
-    assert.ok(jsonCompressed.includes("t4"), "failed test item survives the array cap");
-    assert.ok(jsonCompressed.includes("error-bearing"), "stub notes error keeps");
-  }
+  assert.ok(jsonCompressed !== null, "valid JSON payload is compressed");
+  assert.ok(jsonCompressed.includes("t4"), "failed test item survives the array cap");
+  assert.ok(jsonCompressed.includes("error-bearing"), "stub notes error keeps");
 
   // Digit-masked run-length collapse for repeated log spam.
   const spamLines = [];
