@@ -203,6 +203,9 @@ func TestJSString(t *testing.T) {
 		{"small", 1e-7, "1e-7"},
 		{"large", 1e21, "1e+21"},
 		{"array", []any{float64(1), nil, "x"}, "1,,x"},
+		{"empty array", []any{}, ""},
+		{"singleton null", []any{nil}, ""},
+		{"nested empty", []any{[]any{}}, ""},
 		{"object", map[string]any{"a": 1}, "[object Object]"},
 	}
 	for _, test := range tests {
