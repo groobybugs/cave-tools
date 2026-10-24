@@ -45,7 +45,8 @@ const VERBATIM_PATTERNS = [
   /^docker\s+inspect\b/i,
   /^kubectl\s+get\b/i,
   /^terraform\s+show\b/i,
-  /^aws\s+.*\b--output\s+json\b/i,
+  // No \b before "--": a space then "-" is not a word boundary.
+  /^aws\s.*\s--output(?:\s+|=)json\b/i,
 ];
 
 export function classifyCommand(command: string): OutputPolicy {

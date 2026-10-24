@@ -13,7 +13,8 @@ export function containsPath(parent: string, child: string): boolean {
 
 export async function realPathSafe(value: string): Promise<string> {
   try {
-    return await realpath(value);
+    // Resolve relative paths against the call cwd, never the server's.
+    return await realpath(path.resolve(getCwd(), value));
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT") throw error;

@@ -23,6 +23,10 @@ if (!jobId || !logPath || !resultPath || !shell || command === undefined) {
   process.exit(1);
 }
 
+// Spawn failure exit code: 127, like the shell's "command not found", so a
+// job that never started is never reported as success.
+const SPAWN_FAILED = 127;
+
 let finished = false;
 
 function finish(exitCode: number | null, signal: NodeJS.Signals | null, error?: Error): void {
@@ -87,9 +91,9 @@ try {
   closeSync(fd);
   fd = undefined;
 
-  child.once("error", (error) => finish(-1, null, error));
+  child.once("error", (error) => finish(SPAWN_FAILED, null, error));
   child.once("close", (code, signal) => finish(code, signal));
 } catch (error) {
   if (fd !== undefined) closeSync(fd);
-  finish(-1, null, error instanceof Error ? error : new Error(String(error)));
+  finish(SPAWN_FAILED, null, error instanceof Error ? error : new Error(String(error)));
 }

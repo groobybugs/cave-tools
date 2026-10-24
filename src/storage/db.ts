@@ -403,14 +403,56 @@ function migrateSessions(conn: Database.Database): void {
   for (const name of readdirSync(sessionsDir())) {
     if (!name.endsWith(".json")) continue;
     try {
-      const stats = JSON.parse(
-        readFileSync(join(sessionsDir(), name), "utf-8"),
-      ) as PersistedStats;
-      upsertSessionStatsWithDb(conn, stats, null);
+      const stats = normalizeLegacyStats(
+        JSON.parse(readFileSync(join(sessionsDir(), name), "utf-8")),
+      );
+      if (stats) upsertSessionStatsWithDb(conn, stats, null);
     } catch {
       // Skip corrupt legacy session files.
     }
   }
+}
+
+// Older session files may lack sections (budgets, rtk, bounces, ...) or hold
+// nulls. Fill them the way a fresh session would so NOT NULL columns accept
+// the row instead of the whole session being dropped.
+function normalizeLegacyStats(raw: any): PersistedStats | null {
+  if (!raw || typeof raw !== "object" || !Number.isFinite(raw.pid)) return null;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const obj = (v: unknown): Record<string, any> => (v && typeof v === "object" ? (v as Record<string, any>) : {});
+  const cache = obj(raw.cache);
+  const savings = obj(raw.savings);
+  const rtk = obj(raw.rtk);
+  const bounces = obj(raw.bounces);
+  const byTool: Record<string, ToolSavings> = {};
+  for (const [k, t] of Object.entries(obj(savings.byTool))) {
+    const v = obj(t);
+    byTool[k] = { calls: num(v.calls), rawChars: num(v.rawChars), compressedChars: num(v.compressedChars), savedChars: num(v.savedChars) };
+  }
+  const byExtension: Record<string, BounceStats> = {};
+  for (const [k, b] of Object.entries(obj(bounces.byExtension))) {
+    const v = obj(b);
+    byExtension[k] = { totalReads: num(v.totalReads), bounces: num(v.bounces), wastedChars: num(v.wastedChars) };
+  }
+  return {
+    pid: raw.pid,
+    sessionStart: num(raw.sessionStart),
+    updatedAt: num(raw.updatedAt),
+    cache: { hits: num(cache.hits), misses: num(cache.misses), total: num(cache.total), hitRate: num(cache.hitRate), filesTracked: num(cache.filesTracked) },
+    savings: {
+      totalCalls: num(savings.totalCalls),
+      rawChars: num(savings.rawChars),
+      compressedChars: num(savings.compressedChars),
+      compressionSavedChars: num(savings.compressionSavedChars),
+      dedupSavedChars: num(savings.dedupSavedChars),
+      savedChars: num(savings.savedChars),
+      estimatedTokensSaved: num(savings.estimatedTokensSaved),
+      byTool,
+    },
+    rtk: { rewrites: num(rtk.rewrites), alreadyWrapped: num(rtk.alreadyWrapped), passthrough: num(rtk.passthrough) },
+    budgets: obj(raw.budgets) as Record<string, BudgetConfig>,
+    bounces: { totalBounces: num(bounces.totalBounces), totalWastedChars: num(bounces.totalWastedChars), byExtension },
+  };
 }
 
 function migrateReadRegistry(conn: Database.Database): void {
@@ -807,17 +849,15 @@ export function updateJobState(
   jobId: string,
   update: { state: JobState; endedAt?: number | null; exitCode?: number | null; signal?: string | null },
 ): void {
+  // Only fields the caller passes are written; omitted ones keep their value.
+  const sets = ["state = ?"];
+  const values: Array<string | number | null> = [update.state];
+  if (update.endedAt !== undefined) { sets.push("ended_at = ?"); values.push(update.endedAt); }
+  if (update.exitCode !== undefined) { sets.push("exit_code = ?"); values.push(update.exitCode); }
+  if (update.signal !== undefined) { sets.push("signal = ?"); values.push(update.signal); }
   openDb()
-    .prepare(
-      `UPDATE jobs SET state = ?, ended_at = ?, exit_code = ?, signal = ? WHERE job_id = ?`,
-    )
-    .run(
-      update.state,
-      update.endedAt ?? null,
-      update.exitCode ?? null,
-      update.signal ?? null,
-      jobId,
-    );
+    .prepare(`UPDATE jobs SET ${sets.join(", ")} WHERE job_id = ?`)
+    .run(...values, jobId);
 }
 
 export function getJob(jobId: string): JobRecord | null {

@@ -22,7 +22,7 @@ const PATTERNS: RedactPattern[] = [
   },
   {
     label: "Private key block",
-    regex: /(-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----)[\s\S]*?(-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----)/g,
+    regex: /(-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----)([\s\S]*?)(-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----)/g,
   },
   {
     label: "GitHub token",
@@ -50,7 +50,7 @@ const PATTERNS: RedactPattern[] = [
   },
   {
     label: "Database URL",
-    regex: /((?:postgres|mysql|mongodb|redis):\/\/[^\s]+:)([^\s]+@)/g,
+    regex: /((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?):\/\/[^\s]*:)([^\s]+)(@)/g,
   },
   {
     label: "Generic long secret",
