@@ -362,6 +362,13 @@ Accepted legacy-migration deviations (one-time import of pre-SQLite files; not w
 - A legacy session missing `savings.byTool` or `bounces.byExtension` keeps its row with no tool/bounce rows in Go; TS keeps the row and throws before the tool/bounce rows.
 - String-typed numbers in legacy `lifetime.json` (e.g. `"calls": "5"`) read as 0 in Go; TS lets SQLite coerce them to 5.
 
+Accepted runtime deviations (W1b, Muse review):
+
+- Fallback file finder (no rg/fd) sorts byte-wise; TS uses `localeCompare` (ICU), so mixed-case order can differ.
+- `RunCommand` options `MaxBytes`/`MaxLines`/`ForceKillAfterMs` treat 0 as "use default"; TS `??` keeps an explicit 0. No TS caller passes 0.
+- `BinResolution` uses `""` for a missing binary where TS uses `null`. W3k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
+- Child output is decoded once from the full byte buffer; TS decodes per chunk, so a multibyte char split across chunks becomes U+FFFD in TS but decodes correctly in Go.
+
 ### TS bugs found while porting
 
 - `src/storage/db.ts:595` (and the `try/catch` at `src/storage/db.ts:405-414`):
