@@ -3,7 +3,7 @@
 //
 // Both events fire only for `mcp__cave-tools__*` tools (see the matcher in
 // hooks.json). Their job is to keep a failed or denied cave-tools call from
-// pushing the model back onto the built-in Read/Grep/Glob/Bash:
+// pushing the model back onto the built-in Read/Grep/Glob:
 //
 //   PostToolUseFailure → additionalContext describing the cave-tools retry
 //                        (force, cave__invalidate, allowFailure, bash_start).
@@ -70,8 +70,8 @@ function emit() {
 
 function buildRecovery(tool) {
   const head = 'CAVE-TOOLS: `' + (tool || 'a cave-tools tool') + '` failed. ' +
-    'Recover inside cave-tools — do NOT fall back to built-in Read/Grep/Glob/Bash, ' +
-    'they are blocked by PreToolUse and cost more tokens.';
+    'Recover inside cave-tools — do NOT fall back to built-in Read/Grep/Glob, ' +
+    'they are blocked by PreToolUse and cost more tokens (native Bash is fine: its output is compressed).';
 
   const short = tool.replace(/^mcp__cave-tools__/, '');
   let hint;
