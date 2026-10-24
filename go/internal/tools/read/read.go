@@ -126,7 +126,7 @@ func sniffImageMime(filePath string, ext string) (string, bool) {
 	if startsWith(bytes, []byte{0x47, 0x49, 0x46, 0x38}) {
 		return "image/gif", true
 	}
-	if startsWith(bytes, []byte{0x52, 0x49, 0x46, 0x46}) && startsWith(bytes[8:], []byte{0x57, 0x45, 0x42, 0x50}) {
+	if len(bytes) >= 12 && startsWith(bytes, []byte{0x52, 0x49, 0x46, 0x46}) && startsWith(bytes[8:], []byte{0x57, 0x45, 0x42, 0x50}) {
 		return "image/webp", true
 	}
 	return extensionMime, hasExtensionMime

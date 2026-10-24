@@ -91,6 +91,24 @@ func resultText(t *testing.T, result types.ToolResult) string {
 	return text.Text
 }
 
+// TestShortRIFFPrefix pins Uint8Array.slice's non-panicking behavior on short
+// files that happen to start with the RIFF image-container signature.
+func TestShortRIFFPrefix(t *testing.T) {
+	ctx := resetState(t)
+	dir := fixtureRoot(t)
+	for size := 4; size < 12; size++ {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			body := "RIFF" + strings.Repeat("x", size-4)
+			file := filepath.Join(dir, fmt.Sprintf("riff-%d.txt", size))
+			mustWrite(t, file, body)
+			result := callRead(t, ctx, map[string]any{"file_path": file})
+			if result.IsError || resultText(t, result) != body {
+				t.Fatalf("short RIFF read = %+v, want text %q", result, body)
+			}
+		})
+	}
+}
+
 // TestToolDefinition pins the listing metadata byte-for-byte against the TS
 // tool object declared in src/tools/read.ts.
 func TestToolDefinition(t *testing.T) {
