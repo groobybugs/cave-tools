@@ -245,10 +245,58 @@ call (not RSS). `RedactSecrets` accounted for 82.6% of sampled CPU; regex
 execution overall 95.9%, `ApplyBudget` 13.8%, and `ArchiveHandle` 1.2%.
 Cumulative percentages overlap. The measured hotspot is repeated regex
 matching/case folding, not primarily SQLite or startup. No production
-optimization was made. Redaction must not be disabled or moved after
-truncation to improve benchmark numbers.
+optimization had been made at that baseline; the verified follow-up is below.
+Redaction must not be disabled or moved after truncation to improve numbers.
 
 Raw JSON, provenance, CPU/memory profiles and the temporary profiling harness
 are retained locally under `.context/go-port-benchmarks/2026-10-24/` (not shipped
 as package files). This is workload-specific evidence, not a global Go speedup,
 extra token-savings claim, or full migration acceptance.
+
+## Redaction optimization — verified follow-up
+
+User approved a targeted redaction optimization after the baseline profile.
+Candidate `662e77b` preserves all regex sources, flags, rule order, replacements
+and per-match counter semantics. Mandatory-prefix checks reject impossible
+matches; regex execution starts at the earliest possible match. Non-ASCII
+case-fold inputs fall back to the original regex path. No redaction is disabled
+or delayed until after truncation.
+
+Muse reviewed the security proof and the copied pre-optimization differential
+oracle clean. Tests cover all 13 rules, whitespace, Unicode folding, invalid
+UTF-8, overlap/order, late large-input secrets, idempotency and match counts.
+Existing Go-vs-JS non-`u` case-fold differences are preserved, not changed by
+this optimization.
+
+Coordinator re-ran all seven core routes, 30 samples per side per route,
+seeds 42 and 73. Each seed ran the old Go control and then the candidate against
+the same frozen TS artifact. All samples were valid, artifact pins matched,
+four CLI routes matched bytes, and every paired MCP ToolResult payload hash
+matched (envelope-only differences remain flagged). Lower times are better:
+
+| Workload / seed | Old Go p50 | New Go p50 | TS p50 in candidate run | Old Go p95 | New Go p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Large filter / 42 | 172.2 | 49.9 | 53.4 | 185.2 | 51.7 |
+| Large filter / 73 | 170.2 | 50.1 | 52.3 | 177.3 | 54.5 |
+| Medium filter / 42 | 19.9 | 8.2 | 43.4 | 20.7 | 9.5 |
+| Medium filter / 73 | 19.6 | 8.1 | 41.9 | 20.9 | 8.8 |
+
+Times are milliseconds. Large filtering improved about **3.4x** (about 71%
+lower median latency), reaching roughly TS speed on this fixture. Do not turn
+the small TS/Go difference into a universal Go-faster claim. Help/read startup
+remained fast. Warm MCP compression remained about 2.4–2.6 ms in Go versus
+0.5 ms in TS; that separate hot path was not optimized here.
+
+A separate coordinator microbenchmark of the optimized redactor, 10 iterations,
+measured 8.54 ms/op on a clean ~650 KiB payload and 29.45 ms/op with secrets at
+the start, middle and end. This is not a pipeline/RSS measurement or an
+independently reproduced baseline microbenchmark comparison. The secret case
+allocated about 2.53 MB/op; the clean case allocated zero bytes per operation.
+
+Candidate binary SHA-256:
+`55acc144ea170b9390c4b7dd2fcb0656d7b160df67f0e827162262cf3b3d386e`.
+Build flags/toolchain matched the old control (`-trimpath`, version 0.6.1,
+Go 1.26.3). Raw old/new reports, build metadata, microbenchmark stdout and the
+pre-registered plan are retained locally under
+`.context/go-port-benchmarks/2026-10-24/` (optimization subdirectory). The three
+unrelated expanded-W5 parity failures remain outside this change.
