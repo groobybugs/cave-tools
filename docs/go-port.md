@@ -147,7 +147,7 @@ cave-tools-go __job-worker <jobId> <logPath> <resultPath> <shell> <command>
 passes it as `StartDurableBackgroundOptions.WorkerPath` to
 `runtime.StartDurableBackgroundCommand`, which invokes the current executable
 with `WorkerPath` first. `cmd/cave-tools-go/main.go` must check for it before
-any flag parsing (W3k wiring):
+any flag parsing (W4k wiring):
 
 ```go
 if len(os.Args) > 1 && os.Args[1] == runtime.JobWorkerCommand {
@@ -437,7 +437,7 @@ Accepted runtime deviations (W1b, Muse review):
 
 - Fallback file finder (no rg/fd) sorts byte-wise; TS uses `localeCompare` (ICU), so mixed-case order can differ.
 - `RunCommand` options `MaxBytes`/`MaxLines`/`ForceKillAfterMs` treat 0 as "use default"; TS `??` keeps an explicit 0. No TS caller passes 0.
-- `BinResolution` uses `""` for a missing binary where TS uses `null`. W3k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
+- `BinResolution` uses `""` for a missing binary where TS uses `null`. W4k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
 - Job `.result.json` with a fractional `exitCode` (only reachable by hand-editing the sidecar) is truncated to an integer in Go; TS keeps the fraction.
 
 - `daemon/control` (Go `bins` run / CLI exec helpers): output above the TS `maxBuffer` is parsed in Go instead of rejected with a maxBuffer error (Muse W2k, low).
