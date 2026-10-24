@@ -159,8 +159,14 @@ func jsString(value any) string {
 
 // jsNumberToString formats a float64 like ECMAScript Number::toString(10).
 func jsNumberToString(value float64) string {
-	if math.IsNaN(value) || math.IsInf(value, 0) {
+	if math.IsNaN(value) {
 		return "NaN"
+	}
+	if math.IsInf(value, 0) {
+		if value > 0 {
+			return "Infinity"
+		}
+		return "-Infinity"
 	}
 	if value == 0 {
 		return "0"

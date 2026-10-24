@@ -34,6 +34,7 @@ const { redactSecrets } = await import(join(ROOT, "dist/compression/redact.js"))
 const { runWithContext } = await import(join(ROOT, "dist/runtime/context.js"));
 const { webfetchTool } = await import(join(ROOT, "dist/tools/webfetch.js"));
 const { editTool } = await import(join(ROOT, "dist/tools/edit.js"));
+const { websearchTool, MAX_RESPONSE_BYTES, NO_RESULTS } = await import(join(ROOT, "dist/tools/websearch.js"));
 
 let passed = 0;
 let failed = 0;
@@ -67,6 +68,42 @@ async function renderHtml(html, format) {
     await new Promise((resolve) => server.close(resolve));
   }
 }
+function streamingResponse(chunks, headers = {}) {
+  const stats = { pulls: 0, canceled: false, sent: 0 };
+  const response = new Response(
+    new ReadableStream({
+      pull(controller) {
+        stats.pulls++;
+        if (stats.sent >= chunks.length) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunks[stats.sent++]);
+      },
+      cancel() {
+        stats.canceled = true;
+      },
+    }, { highWaterMark: 0 }),
+    { status: 200, headers },
+  );
+  return { response, stats };
+}
+
+async function searchWithResponse(response) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => response;
+  try {
+    return await websearchTool.handler({
+      query: "port-bug-websearch-cap",
+      provider: "exa",
+      timeout: 1,
+      redact_secrets: false,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 const job = (over) => ({
   jobId: `pb-${Math.random().toString(36).slice(2)}`,
   pid: 999999,
@@ -337,6 +374,46 @@ await test("21 strict batch move rejects null expected_range_checksum", async ()
     file_path: file,
     edits: [{ start_line: 1, end_line: 1, insert_before: 3, expected_range_checksum: null }],
   }, "edits\\[0\\]: STRICT");
+});
+
+const capError = new RegExp(`websearch response exceeded ${MAX_RESPONSE_BYTES} bytes`);
+
+await test("22 websearch chunked body stops at cap and cancels the stream", async () => {
+  const chunks = Array.from({ length: 320 }, () => new Uint8Array(1024).fill(0x61));
+  const { response, stats } = streamingResponse(chunks);
+  const result = await searchWithResponse(response);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, capError);
+  assert.equal(stats.canceled, true, "stream was not canceled");
+  assert.ok(stats.pulls <= 258, `consumed the entire body (${stats.pulls} pulls for ${chunks.length} chunks)`);
+});
+
+await test("23 websearch declared oversize content-length rejects without reading", async () => {
+  const chunks = Array.from({ length: 320 }, () => new Uint8Array(1024).fill(0x61));
+  const { response, stats } = streamingResponse(chunks, {
+    "content-length": String(MAX_RESPONSE_BYTES + 1),
+  });
+  const result = await searchWithResponse(response);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, capError);
+  assert.equal(stats.pulls, 0);
+});
+
+await test("24 websearch null response body yields no results", async () => {
+  const result = await searchWithResponse(new Response(null, { status: 200 }));
+  assert.equal(result.isError, undefined);
+  assert.equal(result.content[0].text, NO_RESULTS);
+});
+
+await test("25 websearch decodes UTF-8 split across stream chunks", async () => {
+  const payload = JSON.stringify({ result: { content: [{ type: "text", text: "héllo ✓" }] } });
+  const bytes = new TextEncoder().encode(payload);
+  const cut = Buffer.from(bytes).indexOf(Buffer.from("✓")) + 1;
+  assert.ok(cut > 1, "fixture did not split a multibyte character");
+  const { response } = streamingResponse([bytes.subarray(0, cut), bytes.subarray(cut)]);
+  const result = await searchWithResponse(response);
+  assert.equal(result.isError, undefined, result.content[0].text);
+  assert.equal(result.content[0].text, "héllo ✓");
 });
 
 console.log(`port-bugs: ${passed} passed, ${failed} failed`);

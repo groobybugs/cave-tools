@@ -126,6 +126,17 @@ func TestParityHandler(t *testing.T) {
 		{"expand unknown", map[string]any{"action": "expand", "archive_id": "nope"}},
 		{"expand round trip", map[string]any{"action": "expand", "archive_id": archiveID}},
 		{"empty action", map[string]any{"action": "", "text": "hello"}},
+		{"array text", map[string]any{"text": []any{float64(1), nil, "x"}}},
+		{"empty array text", map[string]any{"text": []any{}}},
+		{"singleton null text", map[string]any{"text": []any{nil}}},
+		{"nested array text", map[string]any{"text": []any{[]any{"a", nil, "b"}}}},
+		{"object text", map[string]any{"text": map[string]any{"a": 1}}},
+		{"array object text", map[string]any{"text": []any{map[string]any{}}}},
+		{"boolean text", map[string]any{"text": true}},
+		{"array tool name", map[string]any{"text": longLines, "tool_name": []any{"grep"}}},
+		{"array command hint", map[string]any{"text": "a b\nc d", "command_hint": []any{"ls"}}},
+		{"array action expand", map[string]any{"action": []any{"expand"}, "archive_id": []any{archiveID}}},
+		{"array action compress", map[string]any{"action": []any{"compress"}, "text": "hello"}},
 	}
 
 	for _, testCase := range cases {
