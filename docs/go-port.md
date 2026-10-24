@@ -2,11 +2,28 @@
 
 The TypeScript implementation in `src/` is the reference and keeps working.
 The Go port lives in `go/` and is ported function by function, file by file.
-Both implementations must be interchangeable: same output bytes, same error
-texts, same exit codes, same files on disk, same SQLite schema and data dir.
+Both implementations are designed to be interchangeable: same output bytes,
+same error texts, same exit codes, same files on disk, same SQLite schema and
+data dir. Interchangeability is a per-behaviour claim backed by tests, not a
+blanket statement about every function; see "Verification status" and "Known
+deviations and limitations".
 
-The user must be able to switch between the two implementations easily. The
-switch is **not implemented yet** (W4); the plan is at the end of this document.
+## Status
+
+- W0–W4 are integrated on `go-port` (proof-coercion fix `fa5d968` included).
+  The W5 main sync is now merged at `d163dae`; every one of the 56
+  `src/**/*.ts` files listed below has a mapped Go implementation.
+- Source truth for the TypeScript reference is `main` at `6cefd81`.
+  `d163dae` merges that commit: `src/`, `claude/`, `scripts/`, `rules/`,
+  `AGENTS.md` and `CLAUDE.md` have zero diff against `6cefd81`. The sync adds
+  two Go mirrors (the CLI instruction text and the bash tool metadata) and
+  exact init/metadata tests; see "Verification status".
+- W5 is **not complete**. Main sync is done; parity expansion, the
+  implementation switch and the benchmark remain on separate worktrees.
+  Nothing in this document claims those are merged or tested unless it names
+  a test and result.
+- TypeScript remains the default implementation. `CAVE_TOOLS_IMPL=go` is
+  **not integrated yet**; see "Implementations switch".
 
 ## Layout
 
@@ -14,39 +31,54 @@ switch is **not implemented yet** (W4); the plan is at the end of this document.
 go/
   go.mod                        module github.com/groobybugs/cave-tools/go, go 1.26
   cmd/cave-tools-go/main.go     binary entry point (thin: argv -> internal/cli)
-  internal/types/               shared MCP result shapes
+  internal/types/               shared MCP result shapes, ToolDefinition
   internal/runtime/             per-call context, processes, paths, bins, jobs
   internal/storage/             data dir + SQLite (stats, archives, jobs)
   internal/compression/         output compression + archiving
   internal/jsre/                JS regex + whitespace semantics for ported code
-  internal/tools/               one file per MCP tool
+  internal/tools/               shared tool helpers (line range, edit match, replacers)
+  internal/tools/<tool>/        one package per MCP tool (17 packages)
   internal/server/              MCP stdio server, dispatch, tool list, profile
   internal/daemon/              daemon server, client, control, socket paths
   internal/cli/                 CLI dispatch, CLI-only tools, status UI
   parity/                       TS <-> Go parity harness (build tag `parity`)
 ```
 
+The 17 tool packages are `applypatch`, `bash`, `bashstart`, `bashstatus`,
+`bashstop`, `compress`, `configure`, `edit`, `find`, `grep`, `invalidate`,
+`ls`, `read`, `status`, `webfetch`, `websearch` and `write`. Each exports
+`var Tool types.ToolDefinition` from its main file; package names drop dashes
+(`bash-start.ts` → `bashstart/bash_start.go`).
+
 Build and check:
 
 ```sh
-cd go && go build ./... && go vet ./... && go test ./...
+cd go && go build ./... && go vet ./... && go test -count=1 ./...
+GOOS=windows go vet ./... && GOOS=darwin go vet ./...
 pnpm build && cd go && go test -tags parity ./parity/
 pnpm build && pnpm test        # TS reference must stay green
 ```
 
-Version stamping: `cmd/cave-tools-go/main.go` declares
-`var version = "0.6.1"` and the build may override it with
+Build the local binary next to the TS tree, never named `cave-tools`:
 
 ```sh
-go build -ldflags "-X main.version=$(node -p "require('./package.json').version")" ./cmd/cave-tools-go
+cd go && go build -o bin/cave-tools-go ./cmd/cave-tools-go
 ```
 
-Plain `go build` uses the constant. The parity harness always stamps the
-package.json version, so a drift between the constant and package.json fails
-`go test -tags parity`.
+Version stamping: `cmd/cave-tools-go/main.go` declares
+`var version = "0.6.1"` and `go build` may override it with
 
-The binary is **never** named `cave-tools`: it is `cave-tools-go` so it cannot
-shadow the TS launcher.
+```sh
+VERSION=$(node -p "require('./package.json').version")
+go build -ldflags "-X main.version=$VERSION" -o bin/cave-tools-go ./cmd/cave-tools-go
+```
+
+Plain `go build` uses the constant. The parity harness rebuilds the Go binary
+with the `package.json` version stamped in, so it compares against that value;
+it does not fail merely because the plain-build constant drifts. `--version` is
+an intentional Go-only probe (TS has no `--version` branch) and is the single
+`knownDivergence` in the parity table. The binary is **never** named
+`cave-tools`: it is `cave-tools-go` so it cannot shadow the TS launcher.
 
 ## TS → Go file map
 
@@ -54,6 +86,10 @@ One TS file maps to exactly one Go file with the same base name (kebab-case →
 snake_case). Packages mirror the TS directories; the handful of top-level TS
 files live in the package that owns their responsibility (`server` for the MCP
 entry layer, `cli` for the CLI, `daemon` for the socket client).
+
+The wave column is the wave that actually ported the file, not an early plan:
+W2e is the shared tool helpers, W2k is status/profile/daemon paths+control,
+W3a–e are the tools, W4i/j/k are the surfaces.
 
 | TS file | Go file | Wave |
 | --- | --- | --- |
@@ -83,8 +119,8 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/tools/read.ts` | `go/internal/tools/read/read.go` | W3a |
 | `src/tools/line-range.ts` | `go/internal/tools/line_range.go` | W2e |
 | `src/tools/edit.ts` | `go/internal/tools/edit/edit.go` | W3b |
-| `src/tools/edit-match.ts` | `go/internal/tools/edit_match.go` | W2f |
-| `src/tools/replacers.ts` | `go/internal/tools/replacers.go` | W2f |
+| `src/tools/edit-match.ts` | `go/internal/tools/edit_match.go` | W2e |
+| `src/tools/replacers.ts` | `go/internal/tools/replacers.go` | W2e |
 | `src/tools/write.ts` | `go/internal/tools/write/write.go` | W3b |
 | `src/tools/apply-patch.ts` | `go/internal/tools/applypatch/apply_patch.go` | W3b |
 | `src/tools/bash.ts` | `go/internal/tools/bash/bash.go` | W3c |
@@ -105,32 +141,66 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/index.ts` | `go/internal/server/index.go` | W4i |
 | `src/dispatch.ts` | `go/internal/server/dispatch.go` | W4i |
 | `src/tool-list.ts` | `go/internal/server/tool_list.go` | W4i |
-| `src/profile.ts` | `go/internal/server/profile.go` | W4i |
+| `src/profile.ts` | `go/internal/server/profile.go` | W2k |
 | `src/daemon/server.ts` | `go/internal/daemon/server.go` | W4j |
-| `src/daemon/control.ts` | `go/internal/daemon/control.go` | W3j |
-| `src/daemon/paths.ts` | `go/internal/daemon/paths.go` | W3j |
+| `src/daemon/control.ts` | `go/internal/daemon/control.go` | W2k |
+| `src/daemon/paths.ts` | `go/internal/daemon/paths.go` | W2k |
 | `src/daemon-client.ts` | `go/internal/daemon/client.go` | W4j |
 | `src/cli.ts` | `go/internal/cli/cli.go` | W4k |
 | `src/cli-tools.ts` | `go/internal/cli/cli_tools.go` | W4k |
-| `src/status-ui.ts` | `go/internal/cli/status_ui.go` | W4k |
+| `src/status-ui.ts` | `go/internal/cli/status_ui.go` | W2k |
 
-`go/internal/cli` additionally holds three helpers that belong to the two CLI
-files above rather than separate TS modules: `status_summary.go` (the
+All 56 rows were checked against the tree at `02890a1` and again after the
+`d163dae` sync: every TS file exists, every Go target exists, and no
+`src/**/*.ts` file is missing from the table. The sync changed guidance text
+in `src/cli.ts`/`src/tools/bash.ts`, not the file mapping. The map itself is
+not proof of function coverage; see "Coverage and annotation audit".
+
+`go/internal/cli` additionally holds helpers that belong to the two CLI files
+above rather than separate TS modules: `status_summary.go` (the
 status/statusline half of `cli.ts`), `cli_raw.go` and `cli_platform_*.go` (raw
-shell execution and Win32 `cmd.exe` quoting), and `integration.go` /
-`bindings_*.go` (the server/daemon seams `cli-tools.ts` reaches through its
-lazy imports).
+shell execution and Win32 `cmd.exe` quoting), `integration.go` and
+`bindings_{server,daemon}.go` (the server/daemon seams `cli-tools.ts` reaches
+through its lazy imports).
 
-`src/cli.ts` maps to `go/internal/cli/cli.go`, not to the binary: `cmd/cave-tools-go/main.go`
-is the OS entry point and only forwards `os.Args[1:]`, stdout and stderr to
-`cli.Run`. That keeps the TS file ↔ Go file pairing exact and makes the CLI
-testable without spawning a process.
+`src/cli.ts` maps to `go/internal/cli/cli.go`, not to the binary:
+`cmd/cave-tools-go/main.go` is the OS entry point and only forwards
+`os.Args[1:]`, stdin, stdout and stderr to `cli.Run`. That keeps the TS file ↔
+Go file pairing exact and makes the CLI testable without spawning a process.
 
-Non-Go files under `src/` (`src/plugins/**`) are not ported.
+### Non-TS adapter files
 
-`go/internal/jsre` has no TS counterpart: it is the helper that makes ported
-regexes and whitespace helpers behave like JavaScript (see
-"Regex and whitespace rule" below).
+`src/plugins/**` is intentionally not ported. These files adapt external agents
+to the CLI/MCP surface and are orthogonal to the implementation switch:
+
+- `src/plugins/opencode/index.js`, `src/plugins/opencode/plugin.js`,
+  `src/plugins/opencode/package.json`, `src/plugins/opencode/commands/cave-tools.md`
+- `src/plugins/hermes/__init__.py`, `src/plugins/hermes/plugin.yaml`
+
+`go/internal/jsre` also has no single TS counterpart: it is the helper that
+makes ported regexes and whitespace helpers behave like JavaScript (see
+"Regex and whitespace rule").
+
+### Go-only glue
+
+These files have no one-to-one TS file. They are process wiring, JavaScript
+semantics helpers or platform splits, not extra product features:
+
+| Go-only path | Purpose |
+| --- | --- |
+| `go/cmd/cave-tools-go/main.go` | argv/stdio/version wiring and the `__job-worker` selector. |
+| `go/internal/types/tool.go` | `ToolDefinition` shape shared by every tool package and the server. |
+| `go/internal/jsre/jsre.go` | ECMAScript regex/whitespace translation. |
+| `go/internal/runtime/cmdline.go`, `go/internal/runtime/locale.go` | Node `cmd.exe` command-line construction; ICU-like collation for names (printable ASCII). |
+| `go/internal/runtime/process_unix.go`, `process_windows.go`, `bins_unix.go`, `bins_windows.go`, `tool_errors_unix.go`, `tool_errors_windows.go` | OS branches mirrored from TS `process.platform`. |
+| `go/internal/compression/utils_unix.go`, `utils_windows.go` | OS-specific path/volume helpers. |
+| `go/internal/daemon/paths_unix.go`, `paths_windows.go`, `transport_unix.go`, `transport_windows.go` | Unix socket vs Windows named-pipe transport and socket-directory rules. |
+| `go/internal/cli/status_summary.go`, `cli_raw.go`, `cli_platform_unix.go`, `cli_platform_windows.go`, `integration.go`, `bindings_server.go`, `bindings_daemon.go` | status/statusline, raw shell, Win32 quoting, and the CLI ↔ server/daemon seams. |
+| `args.go` in the `bash`, `bashstart`, `bashstatus`, `bashstop`, `find`, `grep`, `invalidate` and `ls` tool packages | Shared JS argument coercion for those handlers. |
+| `go/internal/tools/bash/signal_unix.go`, `go/internal/tools/bash/signal_windows.go` | Signal naming/exit-code mapping. |
+| `go/internal/tools/read/jsutil.go`, `go/internal/tools/read/path.go`, `go/internal/tools/read/path_unix.go`, `go/internal/tools/read/path_windows.go` | JS `String`/`Number`/locale and Node path semantics used by `read.ts`. |
+| `go/parity/` | TS ↔ Go parity harness (no TS module). |
+| `go/internal/tools/webfetch/known-gaps.md` | Brotli/stacked-encoding limitation record. |
 
 ### Durable job worker
 
@@ -146,14 +216,8 @@ cave-tools-go __job-worker <jobId> <logPath> <resultPath> <shell> <command>
 `runtime.JobWorkerCommand` is the selector (`"__job-worker"`). `jobs.StartJob`
 passes it as `StartDurableBackgroundOptions.WorkerPath` to
 `runtime.StartDurableBackgroundCommand`, which invokes the current executable
-with `WorkerPath` first. `cmd/cave-tools-go/main.go` must check for it before
-any flag parsing (W4k wiring):
-
-```go
-if len(os.Args) > 1 && os.Args[1] == runtime.JobWorkerCommand {
-    os.Exit(runtime.RunJobWorker(os.Args[2:]))
-}
-```
+with `WorkerPath` first. `cmd/cave-tools-go/main.go` checks for it before any
+flag parsing and calls `runtime.RunJobWorker(os.Args[2:])`.
 
 The worker writes the same log header, `[cave-job exit=N signal=SIG]` marker
 and `<jobId>.result.json` sidecar as TS, so both implementations can adopt
@@ -162,28 +226,86 @@ each other's running jobs.
 ## Package boundaries
 
 ```
-types     <- nobody (leaf)
-runtime   <- types, storage, jsre
-storage   <- jsre (stdlib + modernc.org/sqlite otherwise; data-dir is SQLite-free)
-jsre      <- nobody (leaf; stdlib only)
-compression <- types, runtime, storage, jsre
-tools     <- types, runtime, storage, compression
-server    <- types, runtime, storage, compression, tools
-daemon    <- types, runtime, storage, compression, tools
-cli       <- everything (entry layer)
-cmd/cave-tools-go <- cli
+types        <- nobody (leaf)
+jsre         <- nobody (leaf; stdlib only)
+storage      <- jsre
+runtime      <- types, storage, jsre
+compression  <- types, runtime, storage, jsre
+tools        <- types, runtime, jsre          (shared helpers only)
+tools/<tool> <- types, runtime, compression, jsre, shared tools (some add storage)
+server       <- types, runtime, compression, daemon, tools/<tool>
+daemon       <- types, runtime, storage, compression, jsre
+cli          <- everything (entry layer; wiring through hooks/bindings)
+cmd          <- cli, runtime
 ```
 
 Rules:
 
 - No import cycles. If two packages need the same helper, the lower one owns it.
-- `server`, `daemon` and `cli` are entry layers: nothing imports them.
+- `daemon` must never import `server` or a tool package. It receives the tool
+  registry and dispatch callback from its caller (`StartDaemon`, below), which
+  is what breaks the cycle.
+- `server` imports the daemon client to make daemon-first calls; `cli` imports
+  both and wires them in `bindings_server.go` / `bindings_daemon.go`. Only
+  `cmd/cave-tools-go` is a true process entry point; "entry layer" for
+  `server`, `daemon` and `cli` means no lower package imports them, not that
+  they cannot import each other in this direction.
 - `storage` must not import `runtime`/`compression`; it only reads env vars and
   the filesystem (matching `data-dir.ts`'s "kept free of SQLite" split, with
   `data_dir.go` importing no SQLite at all).
 - Don't create a package that the map above does not list. If a port needs
   something from a package that does not exist yet, declare the smallest
   interface in the importing package and report it.
+
+### Daemon callback and shared protocol
+
+`daemon.StartDaemon` accepts the registry and dispatch function rather than
+importing the server:
+
+```go
+func StartDaemon(
+    ctx context.Context,
+    tools []types.ToolDefinition,
+    callTool func(context.Context, string, map[string]any, *runtime.CallContext) (types.ToolResult, error),
+) error
+```
+
+`cli/bindings_server.go` supplies `server.AllTools` and `server.CallTool`;
+tests inject fixture tools and callbacks. The daemon serves NDJSON methods
+`hello`, `list`, `call` and `shutdown` over the shared socket name.
+
+Stable exported API used across packages:
+
+- `server`: `ToolNames`, `AllTools`, `IsToolName`, `LoadTool`, `CallTool`,
+  `ListedTools`, `StartServer(ctx, version, in, out, errout)`.
+- `daemon`: `HelloOptions`, `CallOutcome{Sent,Result}`,
+  `DaemonEnabled(env ...map[string]string)`, `GetDaemonClient`,
+  `(*DaemonClient).Call`, `(*DaemonClient).List`, `(*DaemonClient).Close`,
+  `ConnectionLostText`, `StartDaemon`.
+
+Socket/protocol interop is a requirement, not an option:
+
+- Both implementations derive the same 12-hex-character daemon key from
+  `buildId` (package version + every compiled `.js` name/size/mtime),
+  `CAVE_TOOLS_DATA_DIR` and `CLAUDE_CONFIG_DIR`; the Unix socket is
+  `$XDG_RUNTIME_DIR/cave-tools/daemon-<key>.sock` (or
+  `<dataDir>/run/daemon-<key>.sock`; owner-only temp dir when the path would
+  exceed `sun_path`), and the Windows named pipe is
+  `\\.\pipe\cave-tools-<key>`.
+- The Go client locates the repository `dist/` (walking up from the executable
+  and cwd, or via `CAVE_TOOLS_GO_DIST_DIR` passed to a re-executed daemon), so
+  it derives the same key as a TS daemon. A standalone Go binary outside the
+  repository with neither path available cannot derive the key and stays
+  in-process; that is recorded under limitations.
+- `daemon/client_test.go` has both directions: `TestClientToTSDaemon` runs a
+  real TS daemon and calls it with the Go client; `TestTSClientToGoDaemon`
+  runs the Go daemon and calls it with `dist/daemon-client.js`. Both skip when
+  `node` or `dist/` is missing, and both skip on Windows.
+- Because the socket, key and NDJSON protocol are shared, switching the CLI
+  implementation does not require stopping a running daemon that was built
+  from the same `dist/`. After either side is rebuilt the build id changes and
+  the existing reconnect/spawn behavior applies; stopping the daemon is not a
+  protocol requirement.
 
 ## Naming
 
@@ -197,13 +319,15 @@ Rules:
   in Go style and **JSON tags identical to the TS property names** (camelCase).
   The tags are load-bearing: legacy JSON files and the `*_json` columns are
   shared with TS.
-- Optional TS fields become pointers (`maxChars?: number` → `*int64`), TS
+- Optional TS fields become pointers (`maxChars?: number` → `*float64`), TS
   `number` becomes `int64` unless the value is a rate (`hitRate` → `float64`),
-  TS `T | null` becomes `*T`.
-- Optional parameters with defaults: variadic (`markSessionEnded(pid, endedAt?)`
-  → `MarkSessionEnded(pid int64, endedAtMillis ...int64)`) or an explicit
-  argument when a variadic bool would be unreadable (`listSessionStats(true)` →
-  `ListSessionStats(includeEnded bool)`).
+  TS `T | null` becomes `*T`. Budget values are the deliberate exception:
+  `BudgetConfig` stores them as `float64` so fractional budgets survive
+  (see "Review fixes worth keeping").
+- Optional parameters with defaults: variadic
+  (`markSessionEnded(pid, endedAt?)` → `MarkSessionEnded(pid int64, endedAtMillis ...int64)`)
+  or an explicit argument when a variadic bool would be unreadable
+  (`listSessionStats(true)` → `ListSessionStats(includeEnded bool)`).
 - Go files are `snake_case.go`; Go tests are `snake_case_test.go` in the same
   package (white-box), because several assertions read unexported state such as
   the DB singleton.
@@ -314,9 +438,10 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
 `~/.cache/cave-tools`), the `cave-tools.db` file, `archives/`, `jobs/`,
 `sessions/`, `lifetime.json` and `$CLAUDE_CONFIG_DIR/cave-tools/read-registry.txt`.
 
-- Schema text, table/index names, column order and defaults are byte-identical
-  to `src/storage/db.ts`; `user_version` stays untouched (TS never sets it) and
-  the `legacy_migration_v1` meta marker is the migration guard.
+- Schema text, table/index names, column order and defaults follow
+  `src/storage/db.ts`; tests pin table/index names and the key `sessions`
+  columns. `user_version` stays untouched (TS never sets it) and the
+  `legacy_migration_v1` meta marker is the migration guard.
 - Pragmas: `journal_mode = WAL`, `synchronous = NORMAL`, `busy_timeout = 5000`.
   TS applies them once after open; Go applies them through the driver DSN so
   every pooled connection gets them. Observable DB state is the same.
@@ -326,6 +451,9 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
 - Legacy JSON (`lifetime.json`, `sessions/*.json`, `archive_meta` sidecars,
   `read-registry.txt`) is parsed with the TS property names. Keep the JSON tags
   in sync if a TS shape changes.
+- Interop is mandatory for storage: `go/internal/storage/interop_test.go`
+  writes with Go and reads with `dist/storage/db.js`, then the reverse. It
+  skips when `dist/` is missing.
 
 ## Test conventions
 
@@ -339,174 +467,215 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
 - The storage singleton is process-wide like TS's module-level `db`; tests
   reset it through the unexported `db` variable (`resetDB` helper in
   `internal/storage/db_test.go`).
-- Interop is mandatory for storage: `go/internal/storage/interop_test.go`
-  writes with Go and reads with `dist/storage/db.js`, then the reverse. It skips
-  with a clear message when `dist/` is missing.
-- Parity cases live in `go/parity/parity_test.go` (build tag `parity`, run with
+- Parity cases live in `go/parity/parity_test.go` and
+  `go/parity/integration_test.go` (build tag `parity`, run with
   `go test -tags parity ./parity/`). Add a case for every CLI-reachable
-  behaviour; cases are `{name, args, stdin, env}` and compare stdout, stderr
-  and exit code against `node dist/cli.js`. `knownDivergence` exists only for
-  the wave-0 stub and must be deleted when the port catches up.
+  behaviour; cases compare stdout, stderr and exit code against
+  `node dist/cli.js`. `knownDivergence` exists only for the intentional
+  `--version` Go probe; delete a divergence entry when the two sides agree.
+- Differential tests (edit/write/apply-patch, webfetch, websearch, storage,
+  daemon) call the built TS handlers from `dist/` and skip when `node` or
+  `dist/` is absent. They are the strongest per-behaviour evidence, but each
+  covers the cases it lists, not every function.
 - Done means: `cd go && go vet ./... && go test ./...` green, parity green, and
   `pnpm build && pnpm test` still green.
 
 ## Waves
 
-- W0 foundation (this task): go.mod, types, runtime/context, storage/data-dir + db, parity harness, contract doc.
-- W1 (parallel):
-  - a: compression leaves — aggressive, classify, codebook, diff, redact, repetition, signatures, snapshots
-  - b: runtime — path, process, bins, ripgrep, file-mutation, read-registry
-  - c: runtime jobs + job-worker; compression/archive
-- W2 (parallel):
-  - d: compression/utils + structured
-  - e: tools read + line-range
-  - f: tools edit + edit-match + replacers + write + apply-patch
-  - g: tools bash + bash-start + bash-status + bash-stop + grep + find + ls + invalidate
-  - h: tools webfetch + websearch + compress
-- W3 (parallel):
-  - e: tools status + configure; runtime/tool-errors + tool-errors-cli
-  - i: dispatch + tool-list + profile + index (MCP stdio server via go-sdk)
-  - j: daemon server/client/control/paths
-  - k (W4k): CLI — cli, cli-tools, status-ui (incl. raw, filter --json)
-- W4: integration — full parity suite, `CAVE_TOOLS_IMPL=go` switch in the launcher, docs.
+The waves below are the ones that actually ran; early plan labels were folded
+into W3. W5 is not finished.
+
+- **W0 foundation**: `go.mod`, `types`, `runtime/context`, `storage/data-dir`,
+  `storage/db`, the parity harness and this contract.
+- **W1 leaves + runtime**:
+  - W1a: compression leaves (`aggressive`, `classify`, `codebook`, `diff`,
+    `redact`, `repetition`, `signatures`, `snapshots`) plus `jsre`.
+  - W1b: `runtime/{path,process,bins,ripgrep,file-mutation,read-registry}`.
+  - W1c: `runtime/{jobs,job-worker}` and `compression/archive`.
+- **W2 utilities + independent helpers**:
+  - W2d: `compression/{utils,structured}`.
+  - W2e: shared tool helpers `tools/{line_range,edit_match,replacers}.go`.
+  - W2k: `status-ui`, `profile`, `daemon/{paths,control}`.
+- **W3 tools**:
+  - W3a: `read`.
+  - W3b: `edit`, `write`, `apply-patch`.
+  - W3c: `bash`, `bash-start`, `bash-status`, `bash-stop`, `grep`, `find`,
+    `ls`, `invalidate`.
+  - W3d: `webfetch`, `websearch`, `compress`.
+  - W3e: `status`, `configure`, `tool-errors`, `tool-errors-cli`.
+- **W4 surfaces**:
+  - W4i: MCP server (`index`, `dispatch`, `tool-list`) and dispatch integration.
+  - W4j: daemon server/client plus transport.
+  - W4k: CLI (`cli`, `cli-tools`) and the `cave-tools-go` executable wiring.
+- **W5 integration (partial)**: main sync completed at `d163dae` (shared
+  files zero diff vs `6cefd81`; two Go mirrors plus exact init/metadata tests).
+  Remaining: parity expansion, `CAVE_TOOLS_IMPL=go` switch, benchmark harness
+  and final docs/audit. W5 is not complete.
 
 ### Ownership per worker
 
-| Worker | Owns |
+| Worker | Owns (paths or package directories) |
 | --- | --- |
-| W0 | `go/` (all of it, this wave only), `docs/go-port.md` |
-| W1a | `go/internal/compression/{aggressive,classify,codebook,diff,redact,repetition,signatures,snapshots}.go` + tests |
-| W1a-jsre | `go/internal/jsre/` (new), the eight W1a compression files + tests, `docs/go-port.md` |
-| W1b | `go/internal/runtime/{path,process,bins,ripgrep,file_mutation,read_registry}.go` + tests |
-| W1c | `go/internal/runtime/{jobs,job_worker}.go`, `go/internal/compression/archive.go` + tests |
-| W2d | `go/internal/compression/{utils,structured}.go` + tests |
-| W2e | `go/internal/tools/{read,line_range}.go` + tests |
-| W2f | `go/internal/tools/{edit,edit_match,replacers,write,apply_patch}.go` + tests |
-| W2g | `go/internal/tools/{bash,bash_start,bash_status,bash_stop,grep,find,ls,invalidate}.go` + tests |
-| W2h | `go/internal/tools/{webfetch,websearch,compress}.go` + tests |
-| W3e | `go/internal/tools/{status,configure}.go`, `go/internal/runtime/{tool_errors,tool_errors_cli}.go` + tests |
-| W4i | `go/internal/server/*.go` + tests |
-| W3j | `go/internal/daemon/*.go` + tests |
-| W4k | `go/internal/cli/*.go`, `go/cmd/cave-tools-go/main.go` + tests |
-| W4 | integration, launcher switch, full parity suite |
+| W0 | `go/` scaffold (`go.mod`, types, runtime/context, storage, parity), `docs/go-port.md` |
+| W1a | `go/internal/jsre/`, compression leaves in `go/internal/compression/aggressive.go`, `classify.go`, `codebook.go`, `diff.go`, `redact.go`, `repetition.go`, `signatures.go`, `snapshots.go` + tests |
+| W1b | `go/internal/runtime/path.go`, `process.go`, `bins.go`, `ripgrep.go`, `file_mutation.go`, `read_registry.go` + platform/tests |
+| W1c | `go/internal/runtime/jobs.go`, `job_worker.go`, `go/internal/compression/archive.go` + tests |
+| W2d | `go/internal/compression/utils.go`, `structured.go` + tests |
+| W2e | `go/internal/tools/line_range.go`, `edit_match.go`, `replacers.go` + tests |
+| W2k | `go/internal/cli/status_ui.go`, `go/internal/server/profile.go`, `go/internal/daemon/paths*.go`, `go/internal/daemon/control*.go` + tests |
+| W3a | `go/internal/tools/read/` |
+| W3b | `go/internal/tools/edit/`, `go/internal/tools/write/`, `go/internal/tools/applypatch/` |
+| W3c | `go/internal/tools/bash/`, `bashstart/`, `bashstatus/`, `bashstop/`, `grep/`, `find/`, `ls/`, `invalidate/` |
+| W3d | `go/internal/tools/webfetch/`, `websearch/`, `compress/` |
+| W3e | `go/internal/tools/status/`, `configure/`, `go/internal/runtime/tool_errors*.go` |
+| W4i | `go/internal/server/index.go`, `dispatch.go`, `tool_list.go` + tests |
+| W4j | `go/internal/daemon/server.go`, `client.go`, `paths_*.go`, `transport_*.go` + tests |
+| W4k | `go/internal/cli/`, `go/cmd/cave-tools-go/` + tests |
+| W5 | main sync (done at `d163dae`), remaining parity expansion, launcher switch, benchmark, docs/audit |
 
 `go.mod` is W0-only: later waves must not add dependencies. If one is truly
 needed, ask the coordinator.
 
-## Easy switch (planned for W4, not implemented)
+## Implementations switch (W5, pending)
 
-Default stays TypeScript.
+Default stays TypeScript. The switch is **not integrated** at `d163dae`, so
+there is no tested `CAVE_TOOLS_IMPL=go` path yet. Planned contract:
 
-1. Build the Go binary next to the TS dist, never named `cave-tools`:
-   `cd go && go build -o bin/cave-tools-go ./cmd/cave-tools-go`.
-2. `src/cli.ts` gains a shim at the very top of the file, before any heavy
-   import: if `process.env.CAVE_TOOLS_IMPL === "go"`, resolve the Go binary
+1. `src/cli.ts` gets a shim before heavy imports: when
+   `process.env.CAVE_TOOLS_IMPL === "go"`, resolve the Go binary
    (`CAVE_TOOLS_GO_BIN` if set, else `go/bin/cave-tools-go` relative to the
-   package root) and re-exec it with the same argv, stdio inherited, propagating
-   the exit code and signals. Everything else — `mcp`, `status`, `raw`,
-   `filter`, daemon — is covered by that single re-exec, so the switch lives in
-   one place.
-3. Unset or any other value keeps the current TS behaviour, so `pnpm test` and
-   existing installs are untouched.
-4. Because both implementations share `CAVE_TOOLS_DATA_DIR` and the SQLite
-   schema, switching mid-session loses no stats, archives or jobs. The daemon
-   is per implementation: stop the TS daemon before switching
-   (`cave-tools daemon stop`) because the socket/protocol handshake is not
-   cross-compatible.
-5. W4 adds parity cases for the CLI surface and a test that runs the same
-   command with `CAVE_TOOLS_IMPL=go` and without it, diffing stdout/stderr/exit
-   code.
+   package root) and re-exec it with the same argv, stdio inherited,
+   propagating the exit code and signals. `mcp`, `status`, `raw`, `filter`,
+   daemon and tool subcommands are all covered by that one re-exec.
+2. A configured-but-missing binary fails with a clear non-zero error instead
+   of silently falling back to TS. The exact error text is part of the W5
+   switch change and must be tested there.
+3. Unset, empty or any other value keeps the current TS behaviour, so
+   `pnpm test` and existing installs are untouched.
+4. No install, no dependency and no PATH change: the user builds
+   `go/bin/cave-tools-go` locally. The binary is never named `cave-tools`.
+5. Both implementations share the data dir, SQLite schema, daemon key, socket
+   and NDJSON protocol. Switching does not require stopping a running daemon
+   built from the same `dist/`; the existing reconnect/spawn behavior applies
+   after a rebuild.
+6. W5 adds a CLI parity case that runs the same command with
+   `CAVE_TOOLS_IMPL=go` and without it, diffing stdout/stderr/exit code, plus
+   the missing-binary/error-path test. Until that lands and is run, no switch
+   claim is valid.
+7. Switch candidate `8fea696` adds the TS-only adapter `src/impl-switch.ts`
+   (present only on that candidate, not on this branch). It is **not
+   integrated** here. If merged, the inventory becomes 57 TS files: the same
+   56 mapped files plus this adapter-only helper, which must not get a fake Go
+   counterpart.
 
-## Known deviations from TS (all in W0 storage)
+## Review fixes worth keeping
 
-1. `budgets_json` key order: Go's `encoding/json` sorts map keys, TS's
+These are implemented behaviour, not deviations; they are easy to regress when
+touching budgets or status:
+
+- `storage.BudgetConfig` stores TS numbers as `float64`, so `max_chars: 12.7`
+  survives configure/status. Non-finite values serialize as `null`, and
+  `maxChars` stays omitted when TS holds `undefined`.
+- `truncateLines`/`truncateChars` keep fractional line/char budgets and coerce
+  to integers only inside slice operations, matching `ToIntegerOrInfinity`.
+- Status ordering follows TS `Object.entries` (integer-like keys ascending,
+  then insertion order) and per-extension `Map` order for bounce ties.
+- `TestHandlerParity` for `cave__status` runs in a fresh test-binary process
+  with a temp data dir, so the storage singleton cannot make it pass
+  incidentally.
+
+## Known deviations and limitations
+
+These are verified against the code and tests at `d163dae`. They are **not**
+blanket parity claims and none of them is labelled "accepted parity"; each
+needs a follow-up decision or stays a documented limit.
+
+### Storage and serialization
+
+1. `budgets_json` map key order: Go's `encoding/json` sorts map keys; TS's
    `JSON.stringify` preserves insertion order. The JSON is semantically equal
    and both sides parse it; no consumer depends on order.
 2. `isError` is omitted when false (Go `omitempty`). TS never sets it to false,
-   so the emitted results are identical.
+   so emitted results are identical.
 3. `GetCwd` returns `""` when the process cwd no longer exists; TS
    `process.cwd()` throws in that case.
 4. `ListSessionStats(bool)` and `MarkSessionEnded(pid, ...)` make TS's default
    parameters explicit/variadic; behaviour is unchanged.
+5. Legacy `lifetime.json` string-typed numbers (e.g. `"calls": "5"`) read as 0
+   in Go; TS lets SQLite coerce them to 5. This is a one-time import only.
 
-Accepted legacy-migration deviations (one-time import of pre-SQLite files; not worth statement-by-statement emulation):
+### Runtime and tools
 
-- String-typed numbers in legacy `lifetime.json` (e.g. `"calls": "5"`) read as 0 in Go; TS lets SQLite coerce them to 5.
+- `RunCommand` options `MaxBytes`/`MaxLines`/`ForceKillAfterMs` treat 0 as "use
+  the default"; TS `??` keeps an explicit 0. No TS caller passes 0.
+- `BinResolution` uses `""` for a missing binary where TS uses `null`. The CLI
+  prints `(missing)` for `""`, matching TS's null display.
+- `rtk rewrite` (`compression/utils.go` `runRtkRewrite`): TS calls `execFile`
+  with Node's default `maxBuffer`, so an oversized stdout can fail there and
+  leave only partial output; Go reads the full buffer. The 3s timeout normally
+  dominates, and no fix/test is claimed. This is separate from `rtk gain`,
+  which does implement the 2 MiB `limitedBuffer` cap. (W2k review, low.)
+- A job `.result.json` with a fractional `exitCode` (only reachable by
+  hand-editing the sidecar) is truncated to an integer in Go; TS keeps the
+  fraction.
+- Name collation matches ICU for printable ASCII and falls back to code-point
+  order outside it, so `find`/`read`/`ls` can differ from TS for non-ASCII
+  names. `GetRtkTopPassthrough` breaks equal-count ties in byte order where TS
+  uses `localeCompare`, so mixed-case tie order can differ as well.
 
-Accepted runtime deviations (W1b, Muse review):
+### Web transport
 
-- Fallback file finder (no rg/fd) sorts byte-wise; TS uses `localeCompare` (ICU), so mixed-case order can differ.
-- `RunCommand` options `MaxBytes`/`MaxLines`/`ForceKillAfterMs` treat 0 as "use default"; TS `??` keeps an explicit 0. No TS caller passes 0.
-- `BinResolution` uses `""` for a missing binary where TS uses `null`. W4k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
-- Job `.result.json` with a fractional `exitCode` (only reachable by hand-editing the sidecar) is truncated to an integer in Go; TS keeps the fraction.
+- **Brotli is unresolved.** Go standard library has no Brotli decoder and no
+  new dependency is allowed. Both tools send `Accept-Encoding: gzip, deflate`;
+  a forced `Content-Encoding: br` body passes through undecoded (TS/Node
+  decodes it). `go/internal/tools/webfetch/known-gaps.md` records the repro,
+  and `TestParityBrotliKnownGap` pins the difference. No Brotli parity claim.
+- **Stacked `Content-Encoding`** (e.g. `gzip, deflate`) is not decoded; the
+  decoder matches a single token and the body passes through unchanged. This
+  is rare and explicitly deferred; no parity claim.
+- `daemon-client` models only text/image/resource content. An unknown MCP
+  content-block type in a daemon reply is reported as connection-lost (never
+  retried) instead of being passed through as arbitrary JSON. No cave-tools
+  tool emits one.
+- A standalone Go binary run outside the repository with no `CAVE_TOOLS_GO_DIST_DIR`
+  cannot derive the dist-based daemon key and stays in-process.
 
-- `daemon/control` (Go `bins` run / CLI exec helpers): output above the TS `maxBuffer` is parsed in Go instead of rejected with a maxBuffer error (Muse W2k, low).
-- `daemon` (W4j): the daemon key is TS's dist-derived build id, so the Go client must locate the repository `dist/`. It walks up from the executable and cwd, and a spawning Go client passes `CAVE_TOOLS_GO_DIST_DIR` to the re-executed daemon (which starts in `$HOME` like TS). A standalone Go binary run outside the repository with neither path available cannot derive the key and stays in-process.
-- `daemon-client` (W4j): `types.Content` models text/image/resource only, so an unknown MCP content-block type in a daemon reply is reported as connection-lost (never retried) instead of being passed through as arbitrary JSON (no cave-tools tool emits one).
+### Server protocol
 
-Accepted server deviations (W4i):
+- `server` serves `tools/list` and `tools/call` through one receiving
+  middleware so tool order and content blocks stay exact; results are
+  semantically equal to TS and covered by the wire differential test.
+- `CallTool` takes a Go map, so absent `arguments` and explicit `null` are the
+  same nil map in-process. The MCP layer sees the raw JSON and rejects an
+  explicit `null` with the TS SDK's zod `record` error before dispatch.
+- Malformed `tools/call` `params.name` values (missing, null or non-string) are
+  decoded by the Go SDK's typed request parameters, so their protocol error
+  text differs from the TS SDK's zod text. Valid names, every tool schema,
+  argument-record validation and all tool results match.
 
-- `server` (W4i): `tools/list` and `tools/call` are served from one receiving
-  middleware. The SDK's tool set sorts entries by name and its content types
-  re-encode media; the middleware returns the TS tool order and the exact
-  `types.Content` blocks instead. The JSON-RPC results are semantically equal
-  to TS (verified by the wire differential test).
-- `server` (W4i): `CallTool` takes a Go map, so an absent `arguments` value and
-  an explicit `null` are the same nil map. Direct/in-process calls treat nil as
-  undefined (what TS dispatch receives when a caller omits it); the MCP layer
-  sees the raw JSON and rejects an explicit `null` with the TS SDK's zod
-  `record` error before dispatch, never reaching the handler.
-- `server` (W4i): malformed `tools/call` `params.name` values (missing, null or
-  non-string) are decoded by the Go SDK's typed request parameters, so their
-  protocol error text differs from the TS SDK's zod text. Valid names, every
-  tool schema, arguments-record validation and all tool results match.
+### Compression
 
-Accepted compression deviations (W2d, Muse review):
-
-- Lone-surrogate JSON escapes (`"\uD800"`) decode to U+FFFD in Go, because Go
-  strings cannot hold a lone surrogate; TS keeps the surrogate code unit. Only
-  reachable with deliberately malformed JSON text.
+- Lone-surrogate JSON escapes (`"\uD800"`) decode to U+FFFD in Go because Go
+  strings cannot hold a lone code unit; TS keeps the surrogate. This is
+  reachable only with deliberately malformed JSON text. Go raw UTF-8 file
+  writes and JSON output are not claimed to be identical to TS for lone
+  surrogates.
 - `compressXML` returns `nil` for every error. TS has exactly one error today
   (`errUnparseableXML`), so callers observe the same results; a future TS error
-  path would need a matching Go branch.
+  path needs a matching Go branch.
 - `buildStats` returns a copy of `savingsByTool` where TS aliases the live
-  `byTool` object. Nothing mutates a snapshot after it is returned, so the
-  emitted rows are identical.
-- `GetRtkTopPassthrough` breaks equal-count ties in byte order; TS uses
-  `localeCompare` (ICU), so mixed-case/prefix order can differ for tied counts.
+  `byTool` object. Nothing mutates a snapshot after it is returned, so emitted
+  rows are identical.
 
-### W3e Muse-review fixes (budgets and status ordering)
+## TS bugs found while porting
 
-The W3e review found three gaps. They are fixed on the Go side; TS is unchanged
-and remains the reference.
-
-- `storage.BudgetConfig` stores TS numbers as `float64` (the old shared
-  `int64` API truncated `max_chars: 12.7` to `12`). `configure` prints and
-  stores the same number, `status` prints it with ECMAScript
-  `Number::toString`, and `Number()` accepts JS binary/octal literals
-  (`0b11`, `0o17`). Non-finite budget fields serialize as `null`, exactly like
-  `JSON.stringify`; `maxChars` stays omitted when TS holds `undefined`.
-- `truncateLines`/`truncateChars` keep fractional `maxLines`/`headLines`/
-  `tailLines`/`maxChars` and the omitted/dropped marker arithmetic. Numbers are
-  coerced to integers only inside `Array.prototype.slice`/
-  `String.prototype.slice`, matching `ToIntegerOrInfinity`; `Infinity`,
-  negative values and empty-string filtering follow TS.
-- Status no longer approximates ordering with alphabetical sorts. Budget names
-  follow `Object.entries` (integer-like keys ascending first, then insertion
-  order) and bounce ties keep the per-extension `Map` insertion order.
-- `TestHandlerParity` for `cave__status` runs the Go handler in a fresh
-  test-binary process pinned to a temp data dir, so a cached storage singleton
-  or the real user cache cannot make it pass incidentally. The configure parity
-  case also compares `configure` → `status` → `applyBudget` output against TS.
-
-### TS bugs found while porting
-
-The port found these in the TS implementation. All are fixed in TS on `main`
-(commit `ebe616e` "fix: TS bugs found by the Go port", `1b3fbbc` for the
-daemon, and `7c81d32` for the strict edit proofs) and the Go side now mirrors
-the fixed behaviour. The regression cases
-live in `scripts/test-port-bugs.mjs` (plus the single-group redaction block in
-`test.mjs`) and are ported to the matching `*_test.go`.
+The port found these in the TS implementation. They are fixed in TS on `main`
+(`ebe616e` "fix: TS bugs found by the Go port", `1b3fbbc` for the daemon,
+`7c81d32` for the strict edit proofs, `9ee4fb1` for the webfetch HTML fix and
+`e840aad` for the websearch stream cap). The Go side mirrors the fixed
+behaviour on this branch. Main `6cefd81` is synced as `d163dae`; the only Go
+changes it required were the CLI instruction text and bash tool metadata, not
+new handler behaviour.
 
 | # | Bug | Fixed in TS | Mirrored in Go |
 | --- | --- | --- | --- |
@@ -519,10 +688,12 @@ live in `scripts/test-port-bugs.mjs` (plus the single-group redaction block in
 | 7 | `src/runtime/bins.ts` `binDir` read `process.env`, ignoring the call env. | uses `getEnv()` with `HOME`/`USERPROFILE`/`LOCALAPPDATA` and falls back to `homedir()`. | `BinDir(ctx)` / `CachedBinPath(ctx, tool)`. |
 | 8 | `src/runtime/ripgrep.ts` `Number(event.data?.line_number)` was `NaN` when rg omitted the field, and per-chunk UTF-8 decoding could split a multibyte char. | `Number.isFinite(...) ? ... : 0`; decode once from the concatenated buffers. | `line_number` decoded as a JSON number (else 0); Go already decoded once. |
 | 9 | `src/compression/signatures.ts` ran the const pattern before the arrow pattern, so `const f = (a) => …` was reported as a const and its async flag read the wrong group. | arrow pattern first; `isAsync` from group 5 for arrows. | same order and group selection in `signatures.go`. |
-| 10 | `src/compression/classify.ts` `/^aws\s+.*\b--output\s+json\b/i` never matched: `\b` between a space and `-` is not a word boundary. | `/^aws\s.*\s--output(?:\s+|=)json\b/i`. | same source through `jsre`. |
+| 10 | `src/compression/classify.ts` `/^aws\s+.*\b--output\s+json\b/i` never matched: `\b` between a space and `-` is not a word boundary. | `/^aws\s.*\s--output(?:\s+\|=)json\b/i`. | same source through `jsre`. |
 | 11 | `src/compression/redact.ts` dropped the private-key END marker and the database URL's `@`, and missed `postgresql`, `mongodb+srv`, `rediss` URLs and empty users. | 3-group patterns keep the delimiters; scheme variants added. | same patterns and `${1}…${3}` replacements. |
 | 12 | `src/daemon/control.ts` `rpc` parsed every reply line with an unguarded `JSON.parse`, so one malformed line crashed `daemon status`/`stop`. | `try/catch` + `continue` (`1b3fbbc`). | `daemon/control.go` already skipped malformed lines; the stale comment was updated. |
 | 13 | `src/tools/edit.ts` strict proof gates stringified `null`/numbers/booleans, so `expected_hash: null` passed strict mode and the edit was written without any proof verification (found in W3b review). | `hasProofValue` requires a nonempty string in the single and batch range/move gates; the batch keeps the legacy top-level hash for its multi-file error but passes the string-only proof to `applyEditsToContent` (`7c81d32`). | `hasProofValue` in `edit.go`; `scripts/test-port-bugs.mjs` cases 18-21 are ported as `TestEditStrictProofValues`. |
+| 14 | `src/tools/webfetch.ts` handled list/blockquote tags after the generic block check, so `<li>`, `<ul>` and `<blockquote>` markers were dropped; and `HEADING_TAGS[tag]` read inherited object keys, so `<constructor>`/`<toString>` were treated as headings (`9ee4fb1`). | `li`/`blockquote` handled before the generic block branch; `Object.hasOwn(HEADING_TAGS, tag)` for headings. | `webfetch.go` handles `blockquote`/`ul`/`ol`/`li` before the generic block branch and uses a Go map lookup (no prototype chain). `TestPortBugs16ListMarkers` / `TestPortBugs17InheritedObjectKeys` port cases 16-17. |
+| 15 | `src/tools/websearch.ts` `collectBoundedResponse` buffered `await response.arrayBuffer()` and only checked the cap afterwards, so a chunked/streamed response was read in full (`e840aad`). | stream the body with `getReader()`, count bytes, cancel and throw at `MAX_RESPONSE_BYTES`; null body falls back to `arrayBuffer()`. | `collectBoundedResponse` reads through `io.LimitReader(body, MaxResponseBytes+1)` and rejects above the cap without buffering the rest; streaming/declared-length/null-body/split-UTF-8 cases 22-25 are ported in `websearch_differential_test.go`. |
 
 Independently of the table, the W3b review found Go's edit handlers rejecting
 an explicit `null` line number where TS's `Number(null) === 0`: Go now
@@ -531,3 +702,91 @@ single and batch range/move and the batch `delete:true` path, preserving the
 shape gates. The batch planners also stringify a present
 `expected_range_checksum` like TS (`String(null)` is `"null"`), so an explicit
 null fails verification instead of being skipped.
+
+Differential testing also found Go-only mismatches that were not TS bugs:
+`fa5d968` mirrors JavaScript `String()` for off-schema
+`expected_hash`/`expected_range_checksum` values (objects, arrays with null
+slots, large floats, `-0`, and the 1e-6/1e-7/1e20/1e21 boundaries). It adds 18
+cases; before the fix, enforce differed on 15 of 18 new cases and strict on 6
+hash cases. The TS side was already correct.
+
+## Coverage and annotation audit
+
+- The map above covers all 56 `src/**/*.ts` files and every target exists.
+- An ad-hoc static audit checked exported TS function/const-arrow names against
+  Go source; no missing exported callable was found. It is name-level only, its
+  extraction regex is not committed, and it is not proof that each function
+  body was compared or tested. No count is asserted.
+- Provenance annotations are non-test `// port of src/<file>.ts:<symbol>`
+  comments. To reproduce the line count (not a coverage measure):
+
+  ```sh
+  grep -rn "// port of src/" go --include='*.go' --exclude='*_test.go' | wc -l
+  ```
+
+  The scope matters: `// port of` including test files is larger and must not
+  be compared with the non-test count. No numeric count is asserted here
+  because the pending `scanJob` annotation normalization will change it.
+  Counts per file are not evidence of completeness either: some TS types,
+  constants and module-level state are annotated under their Go names, and a
+  few helpers are referenced only in prose.
+- Known annotation gap (report only, no Go edit in W5c): `storage.scanJob` is
+  annotated with prose "This is the Go form of
+  `src/storage/db.ts:jobFromRow`" rather than the canonical
+  `// port of src/storage/db.ts:jobFromRow`. The implementation exists and is
+  exercised. Coordinator is normalising the comment in `go-w3d`; followup stays
+  pending until the exact SHA and evidence are supplied.
+- `src/plugins/**` is adapter code listed above and is not expected to have a
+  Go counterpart.
+
+## Verification status
+
+Evidence recorded for this document. Do not turn any line into a broader claim
+than it states.
+
+- Run on this docs branch before the sync merge (tip `6d64a7a`, code baseline
+  `02890a1`):
+  - `go test ./internal/tools/edit -run TestDifferentialAgainstTypeScript -count=1`
+    → enforce and strict: 94 cases, 3 schemas, 0 result mismatches, 90 files
+    identical in each mode.
+  - `go test ./internal/tools/webfetch ./internal/tools/websearch -run 'TestPortBugs16ListMarkers|TestPortBugs17InheritedObjectKeys|TestStreamingResponseStopsAtCapAndCloses|TestStreamingDeclaredOversizeDoesNotRead|TestCollectBoundedResponseStopsAtCap' -count=1`
+    → 5 tests passed in 2 packages (targeted HTML/cap mirrors).
+  - Map/path audit: 56/56 rows, all TS and Go target files present; rechecked
+    after merging `d163dae`.
+- W5 main sync at `d163dae` (coordinator evidence, not rerun in this docs
+  task):
+  - `src/`, `claude/`, `scripts/`, `rules/`, `AGENTS.md` and `CLAUDE.md` have
+    zero diff against `main` `6cefd81`.
+  - Two Go mirrors: the CLI instruction constant in `internal/cli/cli.go` and
+    the `cave__bash` description/schema in `internal/tools/bash/bash.go`.
+    `TestInitInstructionsMatchTypeScript` runs `node dist/cli.js init` and
+    byte-compares `CLAUDE.md`/`AGENTS.md`; bash `TestToolMetadata` pins the
+    exact description and full input schema, and the CLI help golden pins the
+    user-visible description.
+  - `pnpm build && pnpm test` → 13 suites, plus gofmt/diffcheck PASS;
+    job `jmvmt2rg9e72051`.
+  - After that build: full offline Go vet/test, parity scope `./parity` plus
+    `webfetch`, `websearch` and `compress`, race on `cli`/`bash`/`edit`, and
+    Windows+Darwin vet all PASS; job `jmvmt3fh0d37266`.
+  - Job `jmvmt2rgb996949` was deliberately canceled during a concurrent TS
+    build and is superseded by `jmvmt3fh0d37266`; it is not evidence.
+- Coordinator evidence for W4 (not rerun in this docs task): final combined
+  offline gate at `ba8d079` — gofmt, vet, full tests, parity with
+  coordinator-reported 430 web+CLI/daemon roundtrip comparisons (count not
+  re-derived in this docs task), race packages, Windows/darwin vet;
+  job `jobjmvm1wsiz04fecf`. Treat the job id as a pointer, not a substitute for
+  rerunning at release.
+- TypeScript reference: `main` at `6cefd81`, synced as `d163dae`, passed
+  `pnpm build && pnpm test` with 13 suites and gofmt/diffcheck (job
+  `jmvmt2rg9e72051`). The port-bug script still declares 25 cases.
+- Not verified / pending:
+  - `CAVE_TOOLS_IMPL=go` integration, missing-binary behaviour, and the
+    switch parity case (W5 switch worktree; no claim here).
+  - W5 parity expansion and benchmark harness; the sync gate above ran the
+    existing parity scopes, not the final expanded suite.
+  - Brotli and stacked `Content-Encoding` parity (unresolved/deferred).
+  - Windows runtime behavior: only `GOOS=windows go vet` is claimed. The
+    Unix-socket daemon interop tests skip on Windows, so named-pipe interop is
+    not proven by tests.
+  - Full function-by-function equivalence for every TS function; only the
+    mapped files, differential/parity cases and listed tests are evidence.
