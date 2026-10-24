@@ -52,6 +52,8 @@ per-session isolation defect:
 
 The earlier smoke-side mismatch had TS full and Go `stub` for the **same**
 validation session, which is what happens when both clients reach one daemon.
+A different-session stub was not reproducible: every daemon/client pair
+returned a full read for fresh session B (see the four-case test above).
 The current harness keys (TS `2bdf…`, Go with `CAVE_TOOLS_GO_DIST_DIR` `6788…`)
 differ, so the fixed harness does not share a socket. One test-harness detail
 matters: long temp paths push the socket path over `sun_path`, and both sides
