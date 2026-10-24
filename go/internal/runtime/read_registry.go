@@ -211,7 +211,7 @@ func seedKnown(state *registryState, registry string) {
 			break
 		}
 	}
-	raw := decodeUTF8Replace(buffer[:read])
+	raw := DecodeUTF8Replace(buffer[:read])
 	for _, line := range strings.Split(raw, "\n") {
 		path := jsre.Trim(line)
 		if path == "" {

@@ -744,14 +744,15 @@ func formatResult(result types.ToolResult) string {
 	return strings.Join(parts, "\n")
 }
 
-// readAllStdin reads stdin as UTF-8, replacing invalid sequences the way
-// Node's setEncoding("utf8") does.
+// readAllStdin reads stdin the way TS does with process.stdin.setEncoding("utf8"):
+// invalid UTF-8 becomes U+FFFD once per maximal invalid subpart, matching
+// Node's StringDecoder for both whole-buffer and chunk-split input.
 func readAllStdin(stdin io.Reader) (string, error) {
 	data, err := io.ReadAll(stdin)
 	if err != nil {
 		return "", err
 	}
-	return strings.ToValidUTF8(string(data), "\uFFFD"), nil
+	return rt.DecodeUTF8Replace(data), nil
 }
 
 // finish is the controlled CLI exit funnel: persist the last tool failure
@@ -943,6 +944,63 @@ func marshalJS(value any) ([]byte, error) {
 	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
 }
 
+// v8JSONNumber converts one JSON number token to the float64 JSON.parse
+// yields. V8 never throws on magnitude: overflow becomes ±Inf and underflow
+// becomes ±0, so strconv.ErrRange is the expected result, not a failure.
+func v8JSONNumber(number json.Number) float64 {
+	value, err := strconv.ParseFloat(string(number), 64)
+	if err != nil {
+		var numErr *strconv.NumError
+		if errors.As(err, &numErr) && numErr.Err == strconv.ErrRange {
+			return value
+		}
+		return 0
+	}
+	return value
+}
+
+// convertV8JSONNumbers rewrites every json.Number in a decoded document to the
+// float64 JSON.parse would have produced.
+func convertV8JSONNumbers(value any) any {
+	switch typed := value.(type) {
+	case json.Number:
+		return v8JSONNumber(typed)
+	case []any:
+		for i := range typed {
+			typed[i] = convertV8JSONNumbers(typed[i])
+		}
+		return typed
+	case map[string]any:
+		for key := range typed {
+			typed[key] = convertV8JSONNumbers(typed[key])
+		}
+		return typed
+	default:
+		return value
+	}
+}
+
+// parseV8JSON decodes JSON with JSON.parse's acceptance rules: numbers keep
+// their float64 semantics (UseNumber defers the conversion so an out-of-range
+// literal cannot fail the decode), and, like JSON.parse/json.Unmarshal, exactly
+// one top-level value is allowed.
+func parseV8JSON(text string) (any, error) {
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = errors.New("unexpected data after top-level value")
+		}
+		return nil, err
+	}
+	return convertV8JSONNumbers(value), nil
+}
+
 // runFilterCommand ports `cave-tools filter --json [--session <id>]`: reads
 // {command, stdout, stderr, exitCode?} on stdin, runs the cave__bash post-run
 // pipeline (nothing is executed), writes {stdout, stderr} JSON. Any failure
@@ -970,11 +1028,10 @@ func runFilterCommand(ctx context.Context, argv []string, stdin io.Reader, stdou
 	if err != nil {
 		return finish(stderr, "cave-tools filter: "+err.Error(), 1)
 	}
-	var parsed any
-	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+	parsed, err := parseV8JSON(text)
+	if err != nil {
 		// TS surfaces JSON.parse's V8 SyntaxError text; reproduce it instead
-		// of encoding/json's wording. The validator only runs on the error
-		// path, so successful decoding is unchanged.
+		// of encoding/json's wording.
 		message := err.Error()
 		if v8Message := jsjson.SyntaxErrorMessage(text); v8Message != "" {
 			message = v8Message
@@ -996,7 +1053,13 @@ func runFilterCommand(ctx context.Context, argv []string, stdin io.Reader, stdou
 	}
 	var exitCode *int
 	if value, ok := input["exitCode"].(float64); ok {
-		converted := int(value)
+		// TS keeps every number, including ±Infinity, and the pipeline
+		// ignores this field. Avoid Go's implementation-defined float→int
+		// conversion for out-of-range values.
+		converted := 0
+		if !math.IsInf(value, 0) && !math.IsNaN(value) && value >= math.MinInt && value < math.MaxInt {
+			converted = int(value)
+		}
 		exitCode = &converted
 	}
 	output := rt.RunWithContext(ctx, rt.LocalContext(sessionID), func(ctx context.Context) bash.FilteredShellOutput {

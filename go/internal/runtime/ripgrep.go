@@ -364,7 +364,7 @@ func ReadLineWindow(filePath string, line float64, lineContext float64) ([]LineW
 	if err != nil {
 		return nil, err
 	}
-	text := decodeUTF8Replace(content)
+	text := DecodeUTF8Replace(content)
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
 	lines := strings.Split(text, "\n")
