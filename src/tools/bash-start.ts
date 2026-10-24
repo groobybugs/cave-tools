@@ -9,7 +9,7 @@ export const bashStartTool: Tool & {
 } = {
   name: "cave__bash_start",
   description:
-    "Run a command over ~2 min (builds, tests, installs) detached; returns a jobId, output goes to a log file. Poll with cave__bash_status, stop with cave__bash_stop. Never sleep-poll in cave__bash.",
+    "Run a long command (builds, tests, installs) detached when its final output should be compressed; returns a jobId, output goes to a log file. Poll with cave__bash_status, stop with cave__bash_stop. Never sleep-poll. Servers/watchers: native background shell.",
   inputSchema: {
     type: "object",
     properties: {

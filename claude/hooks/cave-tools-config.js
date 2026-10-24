@@ -195,16 +195,16 @@ function extractCompactRuleset(skillContent, mode) {
 // found. test.mjs asserts it matches the SKILL.md block.
 function fallbackRuleset(mode) {
   return filterModeRows(
-    'Use cave tools instead of built-ins (same results, fewer tokens):\n' +
-    '- Read→`cave__read`, Grep→`cave__grep`, Glob→`cave__find`, ls→`cave__ls`, Bash→`cave__bash`, WebSearch/WebFetch→`cave__websearch`/`cave__webfetch`.\n' +
-    '- Never prefix `rtk` inside `cave__bash`; use `workdir`, not `cd`.\n' +
-    '- Jobs over ~2 min: `cave__bash_start`, poll `cave__bash_status` (`wait` ≤60s), stop `cave__bash_stop`. Never sleep-poll.\n' +
+    'Prefer cave tools over built-ins (same results, fewer tokens):\n' +
+    '- Read→`cave__read`, Grep→`cave__grep`, Glob→`cave__find`, ls→`cave__ls`, WebSearch/WebFetch→`cave__websearch`/`cave__webfetch`.\n' +
+    '- Native Bash auto-compressed (failures: `cave__bash`); never prefix `cave-tools`/`rtk`.\n' +
+    '- Background for servers/watchers; long jobs: `cave__bash_start`/`_status` (`wait` ≤60s). No sleep-poll.\n' +
+    '- `[cave: full output … at <path>]`: `cave__read`/`cave__grep` it.\n' +
     '- Edit: `cave__edit` old_string/new_string, or line range after `cave__read` `line_numbers=true` (pass `expected_hash`/`expected_range_checksum`). `cave__write` whole files, `cave__apply_patch` multi-file.\n' +
-    '- After editing outside Cave Tools, call `cave__invalidate`.\n' +
-    '- Read before edit, never in parallel. No write tools in Plan Mode.\n' +
+    '- `cave__invalidate` after outside edits. Read before edit, never parallel. No writes in Plan Mode.\n' +
     '| **hint** | Advisory; built-ins allowed. |\n' +
     '| **enforce** | Built-in Read/Grep/Glob/WebFetch/WebSearch are blocked. |\n' +
-    '| **strict** | Also blocks Bash (background jobs/monitors OK); Edit/Write need prior cave__read; range/move need a hash proof. |',
+    '| **strict** | Also blocks native Bash (background/monitors OK); Edit/Write need prior cave__read; range/move need hash. |',
     mode
   );
 }
@@ -243,7 +243,141 @@ function buildRuleset(mode) {
   return fallbackRuleset(mode);
 }
 
+// ── Native Bash wrapping ──────────────────────────────────────────────────
+// Shared by the Claude Code PreToolUse hook (cave-tools-bash-wrap.js) and the
+// opencode plugin: rewrite a native shell command to run through
+// `cave-tools bash`, so the agent keeps its own shell tool (background jobs,
+// permissions UI) while output still gets cave's compression.
+
+const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+// POSIX single-quote escaping, same rules as joinCommandArgs in src/cli-tools.ts.
+function shellQuote(arg) {
+  const s = String(arg);
+  return SHELL_SAFE.test(s) ? s : "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+const ENV_PREFIX = String.raw`(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*`;
+const ALREADY_WRAPPED = new RegExp('^\\s*' + ENV_PREFIX + '(?:rtk\\s+(?:proxy\\b|cave-tools\\b)|cave-tools\\b)');
+const INTERACTIVE_CMDS = new Set(['vim', 'nvim', 'vi', 'nano', 'less', 'more', 'man', 'top', 'htop', 'ssh']);
+
+// First word of each command segment (split on ; & | && || and newlines),
+// skipping env assignments plus sudo/env/exec/rtk prefixes.
+function segmentHeads(command) {
+  const heads = [];
+  for (const seg of command.split(/[;&|\n]+|\$\(|`/)) {
+    const words = seg.trim().replace(/^[({\s]+/, '').split(/\s+/).filter(Boolean);
+    let i = 0;
+    while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]) || ['sudo', 'env', 'exec', 'command', 'rtk'].includes(words[i]))) i++;
+    if (i < words.length) heads.push({ head: path.basename(words[i]), rest: words.slice(i + 1) });
+  }
+  return heads;
+}
+
+function isInteractiveCommand(command) {
+  if (/<</.test(command)) return true; // heredoc / here-string stdin
+  for (const { head, rest } of segmentHeads(command)) {
+    if (INTERACTIVE_CMDS.has(head)) return true;
+    if (head === 'docker' && (rest[0] === 'run' || rest[0] === 'exec')) {
+      const short = rest.filter((w) => /^-[a-zA-Z]+$/.test(w)).join('');
+      if ((short.includes('i') || rest.includes('--interactive')) && (short.includes('t') || rest.includes('--tty'))) return true;
+    }
+    if (head === 'git' && rest[0] === 'rebase' && rest.some((w) => w === '-i' || w === '--interactive')) return true;
+    if (head === 'git' && rest[0] === 'add' && rest.some((w) => w === '-p' || w === '--patch' || w === '-i' || w === '--interactive')) return true;
+  }
+  return false;
+}
+
+function isOnPath(bin, env) {
+  const dirs = String((env && env.PATH) || '').split(path.delimiter).filter(Boolean);
+  const exts = process.platform === 'win32' ? ['', '.cmd', '.exe', '.bat'] : [''];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      try {
+        fs.accessSync(path.join(dir, bin + ext), fs.constants.X_OK);
+        return true;
+      } catch (e) {
+        // keep looking
+      }
+    }
+  }
+  return false;
+}
+
+// Returns the reason to leave the command alone, or null when it should be
+// wrapped. opts: { runInBackground, mode, env }.
+function bashWrapSkipReason(command, opts) {
+  const o = opts || {};
+  const env = o.env || process.env;
+  if (typeof command !== 'string' || !command.trim()) return 'empty';
+  // Opt-in: rewriting the command stops permission allow/deny rules matching.
+  if (env.CAVE_TOOLS_WRAP_BASH !== '1') return 'not-enabled';
+  if (o.mode === 'off') return 'mode-off';
+  if (o.runInBackground === true) return 'background';
+  if (ALREADY_WRAPPED.test(command) || /CAVE_RAW/.test(command)) return 'already-wrapped';
+  if (isInteractiveCommand(command)) return 'interactive';
+  if (!isOnPath('cave-tools', env)) return 'no-cave-tools';
+  return null;
+}
+
+function wrapBashCommand(command, sessionId) {
+  const session = sessionId ? ' --session ' + shellQuote(sessionId) : '';
+  return 'cave-tools bash' + session + ' -- ' + "'" + command.replace(/'/g, "'\\''") + "'";
+}
+
+// ── Native Bash output filtering (default) ────────────────────────────────
+// After a native shell call, hand its output to `cave-tools filter --json`
+// and show the model the compressed result. Unlike the wrap, the command
+// itself is never changed, so permission allow/deny rules keep matching.
+
+// Below ~2 KB (~500 tokens) the pipeline rarely saves anything, and a node
+// spawn per call (~100-200 ms) would cost more than it saves.
+const FILTER_MIN_BYTES = 2048;
+const FILTER_TIMEOUT_MS = 5000;
+
+function bashFilterSkipReason(command, combined, opts) {
+  const o = opts || {};
+  const env = o.env || process.env;
+  if (env.CAVE_TOOLS_FILTER_BASH === '0') return 'opt-out';
+  if (o.mode === 'off') return 'mode-off';
+  const cmd = typeof command === 'string' ? command : '';
+  if (ALREADY_WRAPPED.test(cmd) || /CAVE_RAW/.test(cmd)) return 'already-wrapped';
+  if (Buffer.byteLength(String(combined || ''), 'utf8') < FILTER_MIN_BYTES) return 'small';
+  return null;
+}
+
+// Returns {stdout, stderr} from the CLI, or null on any failure/timeout so
+// callers keep the original output. Calls the binary, never dist/ directly.
+function runCaveFilter(payload, sessionId, env) {
+  const { spawnSync } = require('child_process');
+  const args = ['filter', '--json'];
+  if (sessionId) args.push('--session', String(sessionId));
+  try {
+    const r = spawnSync('cave-tools', args, {
+      input: JSON.stringify(payload),
+      encoding: 'utf8',
+      env: env || process.env,
+      timeout: FILTER_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    if (r.error || r.status !== 0 || !r.stdout) return null;
+    const out = JSON.parse(r.stdout);
+    if (!out || typeof out.stdout !== 'string' || typeof out.stderr !== 'string') return null;
+    return out;
+  } catch (e) {
+    return null;
+  }
+}
+
 module.exports = {
+  FILTER_MIN_BYTES,
+  bashFilterSkipReason,
+  runCaveFilter,
+  shellQuote,
+  isInteractiveCommand,
+  bashWrapSkipReason,
+  wrapBashCommand,
   VALID_MODES,
   DEFAULT_MODE,
   MAX_FLAG_BYTES,

@@ -2829,6 +2829,9 @@ process.exit(1);
       assert.equal(compact, config.fallbackRuleset(mode), `${mode}: fallback in sync with SKILL.md`);
       assert.equal(config.buildRuleset(mode), compact, `${mode}: buildRuleset uses compact block`);
       assert.ok(Buffer.byteLength(compact, "utf8") <= 900, `${mode}: compact ruleset <= 900 bytes`);
+      assert.match(compact, /never prefix `cave-tools`\/`rtk`/, `${mode}: native shell rule`);
+      assert.match(compact, /\[cave: full output/, `${mode}: archive-line rule`);
+      assert.doesNotMatch(compact, /Jobs over ~2 min/, `${mode}: old blanket job rule gone`);
       assert.match(compact, new RegExp(`\\*\\*${mode}\\*\\*`), `${mode}: keeps active mode row`);
       for (const other of ["hint", "enforce", "strict"].filter((m) => m !== mode)) {
         assert.doesNotMatch(compact, new RegExp(`\\*\\*${other}\\*\\*`), `${mode}: drops ${other} row`);
@@ -3657,6 +3660,346 @@ process.exit(1);
       rmSync(root, { recursive: true, force: true });
     }
     console.log("permission hardening tests passed\n");
+  }
+
+  {
+    console.log("Testing redaction of single-group secret patterns:");
+    const cases = [
+      ["export GH ghp_abcdefghijklmnopqrstuvwxyz0123456789 done", "export GH [REDACTED:GitHub token] done"],
+      ["my key sk-ant-abcdefghijklmnopqrstuvwxyz12345 end", "my key [REDACTED:Anthropic key] end"],
+      ["id AKIAABCDEFGHIJKLMNOP x", "id [REDACTED:AWS key] x"],
+      ["token=ghp_abcdefghijklmnopqrstuvwxyz0123456789", "token=[REDACTED:API key param]"],
+    ];
+    for (const [input, expected] of cases) {
+      assert.equal(redactSecrets(input), expected, input);
+    }
+    console.log("single-group redaction tests passed\n");
+  }
+
+  {
+    console.log("Testing CLI bash exit codes, stderr, raw, -- separator:");
+    const cliPath = join(process.cwd(), "dist", "cli.js");
+    const root = mkdtempSync("/tmp/ctb-");
+    const env = { ...process.env, CAVE_TOOLS_DATA_DIR: join(root, "data"), CAVE_TOOLS_DAEMON: "0" };
+    delete env.CAVE_RAW;
+    const cli = (args, extra = {}) =>
+      spawnSync(process.execPath, [cliPath, ...args], { encoding: "utf8", cwd: root, env: { ...env, ...extra } });
+    try {
+      let r = cli(["bash", "echo out; exit 3"]);
+      assert.equal(r.status, 3, "real exit code passes through");
+      assert.match(r.stdout, /out/);
+      r = cli(["bash", "--timeout", "300", "sleep 5"]);
+      assert.equal(r.status, 124, "timeout exits 124");
+      r = cli(["bash", "kill -TERM $$"]);
+      assert.equal(r.status, 143, "signal exits 128+n");
+      r = cli(["bash", "echo o; echo e >&2"]);
+      assert.equal(r.status, 0);
+      assert.doesNotMatch(r.stdout, /stderr:/, "stderr not folded into stdout");
+      assert.doesNotMatch(r.stdout, /\be\b/);
+      assert.match(r.stdout, /o/);
+      assert.match(r.stderr, /e/, "stderr goes to fd 2");
+      r = cli(["bash", "echo token=ghp_abcdefghijklmnopqrstuvwxyz0123456789 >&2"]);
+      assert.doesNotMatch(r.stderr, /ghp_abcdefghijklmnopqrstuvwxyz0123456789/, "stderr redacted");
+      // -- separator: everything after is the command, flags included.
+      r = cli(["bash", "--session", "s1", "--", "echo hi"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout.trim(), "hi");
+      r = cli(["bash", "--session", "s1", "--", "echo", "--timeout"]);
+      assert.equal(r.stdout.trim(), "--timeout");
+      // raw: no rewriting, inherited stdio, exit code passthrough.
+      r = cli(["raw", "echo x; echo y >&2; exit 4"]);
+      assert.equal(r.status, 4);
+      assert.equal(r.stdout, "x\n");
+      assert.equal(r.stderr, "y\n");
+      r = cli(["raw", "--", "printf", "%s|", "a b"]);
+      assert.equal(r.stdout, "a b|");
+      r = cli(["bash", "echo raw; exit 5"], { CAVE_RAW: "1" });
+      assert.equal(r.status, 5);
+      assert.equal(r.stdout, "raw\n", "CAVE_RAW=1 is verbatim passthrough");
+      // CLI mode runs bashisms in the agent's bash/zsh, not /bin/sh (dash).
+      r = cli(["bash", "[[ 1 == 1 ]] && echo bashism-ok"], { SHELL: "/bin/bash" });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /bashism-ok/);
+      r = cli(["raw", "[[ 1 == 1 ]] && echo raw-bashism-ok"], { SHELL: "/bin/bash" });
+      assert.equal(r.stdout, "raw-bashism-ok\n");
+      // MCP output unchanged: stderr folded, exit note inline.
+      const { bashTool } = await import("./dist/tools/bash.js");
+      const m = await bashTool.handler({ command: "echo o; echo e >&2; exit 3", description: "t" });
+      assert.equal(m.isError, true);
+      assert.match(m.content[0].text, /stderr:\ne/);
+      assert.match(m.content[0].text, /\[exit: 3\]/);
+      assert.equal(m._meta, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    console.log("CLI bash passthrough tests passed\n");
+  }
+
+  {
+    console.log("Testing native Bash wrap hooks (Claude + opencode):");
+    const root = mkdtempSync("/tmp/ctw-");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "cave-tools"), "#!/bin/sh\n");
+    chmodSync(join(bin, "cave-tools"), 0o755);
+    const claudeDir = join(root, "claude");
+    mkdirSync(claudeDir);
+    const hookPath = join(process.cwd(), "claude", "hooks", "cave-tools-bash-wrap.js");
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CLAUDE_CONFIG_DIR: claudeDir, CAVE_TOOLS_WRAP_BASH: "1" };
+    const hook = (toolInput, extra = {}) => {
+      const r = spawnSync(process.execPath, [hookPath], {
+        encoding: "utf8",
+        input: JSON.stringify({ session_id: "sess-1", tool_name: "Bash", tool_input: toolInput }),
+        env: { ...env, ...extra },
+      });
+      assert.equal(r.status, 0, r.stderr);
+      return r.stdout ? JSON.parse(r.stdout) : null;
+    };
+    try {
+      const out = hook({ command: "echo it's ok", description: "d", timeout: 5000 });
+      assert.equal(out.hookSpecificOutput.hookEventName, "PreToolUse");
+      assert.equal(out.hookSpecificOutput.permissionDecision, undefined, "never sets permissionDecision");
+      assert.deepEqual(out.hookSpecificOutput.updatedInput, {
+        command: "cave-tools bash --session sess-1 -- 'echo it'\\''s ok'",
+        description: "d",
+        timeout: 5000,
+      });
+      // The quoted command round-trips through the shell unchanged.
+      const echoed = spawnSync("/bin/sh", ["-c", `printf %s ${out.hookSpecificOutput.updatedInput.command.split(" -- ")[1]}`], { encoding: "utf8" });
+      assert.equal(echoed.stdout, "echo it's ok");
+
+      const skips = [
+        [{ command: "sleep 9", run_in_background: true }],
+        [{ command: "cave-tools bash ls" }],
+        [{ command: "rtk proxy git log" }],
+        [{ command: "rtk cave-tools bash ls" }],
+        [{ command: "CAVE_RAW=1 make" }],
+        [{ command: "vim a.txt" }], [{ command: "git diff | less" }], [{ command: "man ls" }],
+        [{ command: "ssh host" }], [{ command: "htop" }], [{ command: "docker run -it ubuntu bash" }],
+        [{ command: "docker exec -ti c sh" }], [{ command: "git rebase -i HEAD~3" }], [{ command: "git add -p" }],
+        [{ command: "cat <<EOF > f\nx\nEOF" }],
+        [{ command: "ls" }, { CAVE_TOOLS_WRAP_BASH: "0" }],
+        [{ command: "ls" }, { CAVE_TOOLS_WRAP_BASH: "" }],
+        [{ command: "ls" }, { PATH: "/nonexistent" }],
+      ];
+      for (const [input, extra] of skips) assert.equal(hook(input, extra), null, `skip: ${input.command}`);
+      writeFileSync(join(claudeDir, ".cave-tools-active"), "off");
+      assert.equal(hook({ command: "ls" }), null, "mode off skips");
+      writeFileSync(join(claudeDir, ".cave-tools-active"), "hint");
+      assert.ok(hook({ command: "ls" }), "hint mode still wraps");
+      assert.ok(hook({ command: "docker run --rm ubuntu ls" }), "non-interactive docker wraps");
+
+      // rtk hook ordering: rtk first, then cave wraps -> cave-tools bash peels rtk.
+      const { parseToolArgs } = await import("./dist/cli-tools.js");
+      const { loadTool } = await import("./dist/dispatch.js");
+      const bashDef = await loadTool("cave__bash");
+      const wrapped = hook({ command: "rtk git status" }).hookSpecificOutput.updatedInput.command;
+      const argv = spawnSync("/bin/sh", ["-c", `for a in ${wrapped.slice("cave-tools ".length)}; do printf '%s\\0' "$a"; done`], { encoding: "utf8" })
+        .stdout.split("\0").filter(Boolean);
+      const parsed = await parseToolArgs(bashDef, argv.slice(1), async () => "");
+      assert.equal(parsed.sessionId, "sess-1");
+      assert.equal(parsed.args.command, "rtk git status");
+      assert.deepEqual(stripLeadingRtk(parsed.args.command), { command: "git status", stripped: true });
+      // cave first, then rtk prefixes the wrapper: hook must not re-wrap, and peeling rtk yields the wrapper.
+      const caveFirst = hook({ command: "git status" }).hookSpecificOutput.updatedInput.command;
+      assert.equal(hook({ command: `rtk ${caveFirst}` }), null, "rtk-prefixed wrapper not re-wrapped");
+      assert.deepEqual(stripLeadingRtk(`rtk ${caveFirst}`), { command: caveFirst, stripped: true });
+
+      // opencode plugin: same rewrite in tool.execute.before (V1 hook map).
+      const xdg = join(root, "xdg");
+      mkdirSync(xdg);
+      const pluginUrl = new URL("./src/plugins/opencode/plugin.js", import.meta.url).href;
+      const oc = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        const { default: p } = await import(${JSON.stringify(pluginUrl)});
+        const hooks = await p.server({});
+        const run = async (tool, args) => { await hooks['tool.execute.before']({ tool, sessionID: 'ses_9' }, { args }); return args.command; };
+        console.log(JSON.stringify([
+          await run('bash', { command: 'ls -la' }),
+          await run('bash', { command: 'vim x' }),
+          await run('webfetch', { command: 'ls' }),
+        ]));`], { encoding: "utf8", env: { ...env, XDG_CONFIG_HOME: xdg, CAVE_TOOLS_MODE: "enforce" } });
+      assert.equal(oc.status, 0, oc.stderr);
+      assert.deepEqual(JSON.parse(oc.stdout.trim().split("\n").pop()), [
+        "cave-tools bash --session ses_9 -- 'ls -la'",
+        "vim x",
+        "ls",
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    console.log("native Bash wrap tests passed\n");
+  }
+
+  {
+    console.log("Testing native Bash output filter (cave-tools filter, Claude PostToolUse, opencode):");
+    const root = mkdtempSync("/tmp/ctf-");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const cliPath = join(process.cwd(), "dist", "cli.js");
+    writeFileSync(join(bin, "cave-tools"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(cliPath)} "$@"\n`);
+    chmodSync(join(bin, "cave-tools"), 0o755);
+    const failBin = join(root, "failbin");
+    mkdirSync(failBin);
+    writeFileSync(join(failBin, "cave-tools"), "#!/bin/sh\necho partial; exit 1\n");
+    chmodSync(join(failBin, "cave-tools"), 0o755);
+    const claudeDir = join(root, "claude");
+    mkdirSync(claudeDir);
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, CLAUDE_CONFIG_DIR: claudeDir, CAVE_TOOLS_DATA_DIR: join(root, "data") };
+    delete env.CAVE_TOOLS_FILTER_BASH;
+    delete env.CAVE_TOOLS_WRAP_BASH;
+    const big = Array.from({ length: 400 }, () => "same noisy line").join("\n") + "\n";
+    try {
+      // filter CLI: compresses, redacts stderr, never executes.
+      let r = spawnSync(process.execPath, [cliPath, "filter", "--json", "--session", "s1"], {
+        encoding: "utf8", env,
+        input: JSON.stringify({ command: "touch SHOULD_NOT_EXIST; make", stdout: big, stderr: "token=ghp_abcdefghijklmnopqrstuvwxyz0123456789", exitCode: 0 }),
+        cwd: root,
+      });
+      assert.equal(r.status, 0, r.stderr);
+      let out = JSON.parse(r.stdout);
+      assert.ok(out.stdout.length < big.length / 4, "stdout compressed");
+      assert.doesNotMatch(out.stderr, /ghp_abcdefghijklmnopqrstuvwxyz0123456789/);
+      assert.equal(existsSync(join(root, "SHOULD_NOT_EXIST")), false, "filter runs nothing");
+      for (const input of ["not json", JSON.stringify({ stdout: "x" })]) {
+        r = spawnSync(process.execPath, [cliPath, "filter", "--json"], { encoding: "utf8", env, input });
+        assert.notEqual(r.status, 0);
+        assert.equal(r.stdout, "", "no stdout on failure");
+      }
+      r = spawnSync(process.execPath, [cliPath, "filter"], { encoding: "utf8", env, input: "{}" });
+      assert.equal(r.status, 2, "--json required");
+
+      // Claude PostToolUse hook.
+      const hookPath = join(process.cwd(), "claude", "hooks", "cave-tools-bash-filter.js");
+      const resp = (extra = {}) => ({ stdout: big, stderr: "", interrupted: false, isImage: false, noOutputExpected: false, ...extra });
+      const hook = (toolResponse, command = "make", extra = {}) => {
+        const h = spawnSync(process.execPath, [hookPath], {
+          encoding: "utf8", env: { ...env, ...extra },
+          input: JSON.stringify({ session_id: "sess-1", hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command }, tool_response: toolResponse }),
+        });
+        assert.equal(h.status, 0, h.stderr);
+        return h.stdout ? JSON.parse(h.stdout) : null;
+      };
+      const res = hook(resp({ returnCodeInterpretation: "ok" }));
+      assert.equal(res.hookSpecificOutput.hookEventName, "PostToolUse");
+      const upd = res.hookSpecificOutput.updatedToolOutput;
+      assert.ok(upd.stdout.length < big.length / 4);
+      assert.equal(upd.stderr, "");
+      assert.equal(upd.interrupted, false);
+      assert.equal(upd.isImage, false);
+      assert.equal(upd.noOutputExpected, false);
+      assert.equal(upd.returnCodeInterpretation, "ok", "other fields spread through");
+      const passes = [
+        [resp({ interrupted: true })],
+        [resp({ isImage: true })],
+        [resp({ stdout: "", backgroundTaskId: "b1" })],
+        [resp({ backgroundTaskId: "b1" })],
+        [resp({ persistedOutputPath: "/tmp/x" })],
+        [resp(), "cave-tools bash -- 'make'"],
+        [resp(), "rtk proxy make"],
+        [resp({ stdout: "small\n" })],
+        [resp(), "make", { CAVE_TOOLS_FILTER_BASH: "0" }],
+        [resp(), "make", { PATH: `${failBin}:${process.env.PATH}` }],
+        [resp(), "make", { PATH: "/nonexistent" }],
+      ];
+      for (const [tr, cmd, extra] of passes) assert.equal(hook(tr, cmd, extra), null, JSON.stringify([cmd, extra, Object.keys(tr)]));
+      writeFileSync(join(claudeDir, ".cave-tools-active"), "off");
+      assert.equal(hook(resp()), null, "mode off passes");
+      rmSync(join(claudeDir, ".cave-tools-active"));
+      // Wrap is opt-in now: PreToolUse leaves the command alone by default.
+      const wrap = spawnSync(process.execPath, [join(process.cwd(), "claude", "hooks", "cave-tools-bash-wrap.js")], {
+        encoding: "utf8", env, input: JSON.stringify({ session_id: "s", tool_name: "Bash", tool_input: { command: "ls" } }),
+      });
+      assert.equal(wrap.stdout, "", "wrap off by default");
+
+      // opencode: V1 tool.execute.after and V2 execute.after.
+      const xdg = join(root, "xdg");
+      mkdirSync(xdg);
+      const pluginUrl = new URL("./src/plugins/opencode/plugin.js", import.meta.url).href;
+      const oc = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        const { default: p } = await import(${JSON.stringify(pluginUrl)});
+        const big = ${JSON.stringify(big)};
+        const hooks = await p.server({});
+        const v1 = async (tool, command, text) => {
+          const output = { title: command, output: text, metadata: { exit: 0, output: text } };
+          await hooks['tool.execute.after']({ tool, sessionID: 'ses_9', callID: 'c', args: { command } }, output);
+          return output;
+        };
+        const meta = '<bash_metadata>\\nbash tool terminated command after exceeding timeout 1000 ms\\n</bash_metadata>';
+        const a = await v1('bash', 'make', big);
+        const b = await v1('bash', 'make', big + '\\n\\n' + meta);
+        const c = await v1('bash', 'make', 'tiny');
+        const d = await v1('read', 'make', big);
+        let after = null;
+        let before = null;
+        await p.setup({ tool: {
+          hook: async (name, cb) => { if (name === 'execute.after') after = cb; if (name === 'execute.before') before = cb; return { dispose() {} }; },
+        } });
+        const e = { status: 'completed', tool: 'shell', sessionID: 'ses_9', input: { command: 'make' }, result: { output: { exit: 0 }, content: big, metadata: { x: 1 } } };
+        after(e);
+        const f = { status: 'completed', tool: 'shell', input: { command: 'make', background: true }, result: { content: big } };
+        after(f);
+        const ptr = '\\n\\n[showing lines 319-1424 of 1424; full output saved to /home/u/.local/share/opencode/shell/abc/sh_1.out]';
+        // Real opencode2 2.1.4 shell payload (captured): content is an array of
+        // text parts, output is {exit, truncated, output, status}.
+        const g = { tool: 'shell', sessionID: 'ses_9', agent: 'build', messageID: 'm', id: 'call_1',
+          input: { command: 'rtk git log -n 200 --stat .' }, status: 'completed',
+          result: { output: { exit: 0, truncated: true, output: big + ptr, status: 'completed' },
+            content: [{ type: 'text', text: big + ptr }], metadata: { status: 'completed', truncated: true, exit: 0 } } };
+        after(g);
+        const w = { tool: 'shell', input: { command: 'ls' } };
+        before(w);
+        console.log(JSON.stringify({
+          a: a.output.length, aMeta: a.metadata.exit, b: b.output.endsWith(meta), bLen: b.output.length,
+          c: c.output, d: d.output.length, e: e.result.content.length, eMeta: e.result.metadata.x, eOut: e.result.output.exit,
+          f: f.result.content.length, w: w.input.command,
+          g: g.result.content.length, gType: g.result.content[0].type, gLen: g.result.content[0].text.length,
+          gMeta: g.result.metadata.truncated, gOut: g.result.output.exit,
+          gPtr: g.result.content[0].text.endsWith(ptr.trim()), gOutText: g.result.output.output.length,
+          gOutPtr: g.result.output.output.endsWith(ptr.trim()), gSame: g.result.output.output === g.result.content[0].text,
+        }));`], { encoding: "utf8", env: { ...env, XDG_CONFIG_HOME: xdg, CAVE_TOOLS_MODE: "enforce" } });
+      assert.equal(oc.status, 0, oc.stderr);
+      const o = JSON.parse(oc.stdout.trim().split("\n").pop());
+      assert.ok(o.a < big.length / 4, "V1 output compressed");
+      assert.equal(o.aMeta, 0, "V1 metadata untouched");
+      assert.equal(o.b, true, "bash_metadata block kept");
+      assert.ok(o.bLen < big.length / 2);
+      assert.equal(o.c, "tiny");
+      assert.equal(o.d, big.length, "non-bash untouched");
+      assert.ok(o.e < big.length / 4, "V2 content compressed");
+      assert.equal(o.eMeta, 1);
+      assert.equal(o.eOut, 0);
+      assert.equal(o.f, big.length, "V2 background untouched");
+      assert.equal(o.w, "ls", "V2 wrap off by default");
+      assert.equal(o.g, 1, "V2 real shape: one text part");
+      assert.equal(o.gType, "text");
+      assert.ok(o.gLen < big.length / 4, "V2 real shape compressed");
+      assert.equal(o.gMeta, true, "V2 metadata untouched");
+      assert.equal(o.gOut, 0, "V2 exit kept");
+      assert.equal(o.gPtr, true, "opencode full-output pointer kept in content");
+      assert.ok(o.gOutText < big.length / 4, "V2 result.output.output compressed too (model reads it)");
+      assert.equal(o.gOutPtr, true, "pointer kept in output.output");
+      assert.equal(o.gSame, true, "content and output.output agree");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    console.log("native Bash filter tests passed\n");
+  }
+
+  {
+    console.log("Testing agent instruction sources for shell integration:");
+    const sources = [
+      "claude/skills/cave-tools/SKILL.md", "rules/cave-tools-kiro.md", "rules/cave-tools-hermes.md",
+      "scripts/install-agent-instructions.mjs", "src/cli.ts", "src/plugins/opencode/plugin.js", "src/tools/bash-start.ts",
+    ];
+    for (const f of sources) {
+      const text = readFileSync(join(process.cwd(), f), "utf8");
+      assert.doesNotMatch(text, /exceed ~2-3min|Jobs over ~2 min|Commands >2-3min|over ~2 min/, `${f}: stale blanket long-job rule`);
+    }
+    const installer = readFileSync(join(process.cwd(), "scripts", "install-agent-instructions.mjs"), "utf8");
+    assert.match(installer, /this host does not compress native shell output/, "no-hook hosts told to use cave__bash");
+    assert.match(installer, /native shell output is auto-compressed after it runs/, "opencode block describes filter");
+    assert.match(installer, /CAVE_TOOLS_WRAP_BASH=1/);
+    console.log("agent instruction tests passed\n");
   }
 
   console.log("All tests passed!");

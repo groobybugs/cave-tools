@@ -1,6 +1,6 @@
 {
   "name": "@groobybugs/cave-tools",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "A caveman needs their tools. Token-optimized MCP server providing drop-in replacements for any agent.",
   "type": "module",
   "main": "./dist/index.js",
@@ -32,6 +32,7 @@
     "remove:agents": "node scripts/remove-agent-instructions.mjs",
     "prepack": "pnpm run build",
     "measure": "node scripts/measure-overhead.mjs",
+    "bench:edit-invocation": "pnpm run build && node scripts/bench-edit-invocation.mjs",
     "usage": "node scripts/analyze-usage.mjs"
   },
   "keywords": [

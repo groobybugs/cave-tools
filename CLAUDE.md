@@ -148,7 +148,7 @@ built-ins.
 ## Tools
 - `cave__read` instead of Read — dedup cache + line budgets.
 - `cave__grep`, `cave__find`, `cave__ls` instead of Grep/Glob/shell `ls`.
-- `cave__bash` instead of Bash — RTK + structured extraction + line budgets.
+- Native Bash is auto-compressed after it runs (successful commands; never prefix `cave-tools`/`rtk`). `cave__bash` — RTK + structured extraction + line budgets — also compresses failures.
 - `cave__write` to create/overwrite a single file; `cave__edit` for fuzzy string replacement.
 - `cave__apply_patch` for multi-file add/update/delete/move patches.
 - `cave__invalidate` to refresh the read dedup cache after external edits.

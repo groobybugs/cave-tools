@@ -64,13 +64,16 @@ export function redactSecrets(input: string): string {
   let result = input;
 
   for (const pattern of PATTERNS) {
-    result = result.replace(pattern.regex, (match, prefix, secret, suffix) => {
+    result = result.replace(pattern.regex, (...args: unknown[]) => {
       redactionCount++;
-      const after = suffix || "";
-      if (prefix) {
-        return `${prefix}[REDACTED:${pattern.label}]${after}`;
-      }
-      return `[REDACTED:${pattern.label}]`;
+      // replace() passes (match, ...groups, offset, input): keep only the
+      // capture groups. One group is the secret itself; with two or more the
+      // first is a prefix to keep and the third an optional suffix.
+      const groups = args.slice(1, args.findIndex((a, i) => i > 0 && typeof a === "number"));
+      if (groups.length < 2) return `[REDACTED:${pattern.label}]`;
+      const prefix = (groups[0] as string | undefined) ?? "";
+      const after = (groups[2] as string | undefined) ?? "";
+      return `${prefix}[REDACTED:${pattern.label}]${after}`;
     });
   }
 

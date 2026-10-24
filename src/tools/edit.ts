@@ -236,21 +236,39 @@ function isToolResult(v: unknown): v is ToolResult {
   );
 }
 
+// Requirements shared by single edits and batch items. Handlers still validate
+// semantic conflicts, proof freshness, and bounds against the actual file.
+const editModeRequirements = {
+  anyOf: [
+    { required: ["old_string", "new_string"], properties: { old_string: { minLength: 1 } } },
+    { required: ["start_line", "end_line", "content"] },
+    { required: ["start_line", "end_line", "delete"], properties: { delete: { const: true } } },
+    { required: ["start_line", "end_line", "insert_before"] },
+  ],
+};
+const editOperationKeys = [
+  "old_string", "new_string", "replace_all", "start_line", "end_line",
+  "content", "delete", "insert_before", "expected_range_checksum",
+];
+
+
 export const editTool: Tool & {
   handler: (args: Record<string, unknown>) => Promise<ToolResult>;
 } = {
   name: "cave__edit",
   description:
-    "Edit by fuzzy old_string→new_string, or by inclusive 1-based line range from cave__read line_numbers=true " +
+    "Edit a file; always supply file_path explicitly (never inferred from prior reads). " +
+    "String edit: {file_path, old_string, new_string}; empty new_string deletes. " +
+    "Or use inclusive 1-based lines from cave__read line_numbers=true " +
     "(start_line/end_line + content, delete, or insert_before to move). " +
     "expected_hash/expected_range_checksum reject stale edits; strict mode requires one for range/move. " +
-    "Batch via edits[]; order ranges high→low.",
+    "Batch via edits[] with a top-level file_path default or explicit per-item paths; order ranges high→low.",
   inputSchema: {
     type: "object",
     properties: {
       file_path: {
         type: "string",
-        description: "Absolute path; default for edits[] items",
+        description: "Required for single edits; default target for batch items",
       },
       old_string: {
         type: "string",
@@ -258,16 +276,17 @@ export const editTool: Tool & {
       },
       new_string: {
         type: "string",
+        description: "Replacement text; an explicit empty string deletes the match",
       },
       replace_all: {
         type: "boolean",
         description: "Replace all, not just a unique match",
       },
       start_line: {
-        type: "number",
+        type: "integer",
       },
       end_line: {
-        type: "number",
+        type: "integer",
         description: "start_line-1 with content inserts before start_line",
       },
       content: {
@@ -276,11 +295,11 @@ export const editTool: Tool & {
       },
       delete: {
         type: "boolean",
-        description: "Delete the range",
+        description: "When true, delete the range regardless of content",
       },
       insert_before: {
-        type: "number",
-        description: "Move range before this line (lineCount+1 = end)",
+        type: "integer",
+        description: "Move range before this line (lineCount+1 = end); takes precedence over content/delete",
       },
       expected_hash: {
         type: "string",
@@ -292,6 +311,7 @@ export const editTool: Tool & {
       },
       edits: {
         type: "array",
+        minItems: 1,
         items: {
           type: "object",
           properties: {
@@ -299,19 +319,39 @@ export const editTool: Tool & {
             old_string: { type: "string" },
             new_string: { type: "string" },
             replace_all: { type: "boolean" },
-            start_line: { type: "number" },
-            end_line: { type: "number" },
+            start_line: { type: "integer" },
+            end_line: { type: "integer" },
             content: { type: "string" },
             delete: { type: "boolean" },
-            insert_before: { type: "number" },
+            insert_before: { type: "integer" },
             expected_hash: { type: "string" },
             expected_range_checksum: { type: "string" },
           },
+          ...editModeRequirements,
         },
-        description: "Batch; items may set file_path",
+        description: "Non-empty batch; each item needs a target and an edit mode",
       },
     },
-    required: [],
+    anyOf: [
+      {
+        required: ["file_path"],
+        not: { required: ["edits"] },
+        properties: { file_path: { minLength: 1 } },
+        ...editModeRequirements,
+      },
+      {
+        required: ["edits"],
+        not: { anyOf: editOperationKeys.map((key) => ({ required: [key] })) },
+        anyOf: [
+          { required: ["file_path"], properties: { file_path: { minLength: 1 } } },
+          {
+            properties: {
+              edits: { items: { required: ["file_path"], properties: { file_path: { minLength: 1 } } } },
+            },
+          },
+        ],
+      }
+    ],
   },
   handler: async (args) => {
     if (!isRecord(args)) {
@@ -321,6 +361,9 @@ export const editTool: Tool & {
       return err("edits must be an array of edit objects");
     }
     if (Array.isArray(args.edits)) {
+      if (editOperationKeys.some((key) => args[key] !== undefined)) {
+        return err("batch operation fields belong inside edits[]; only file_path and expected_hash are top-level defaults");
+      }
       return handleBatchEdits(args);
     }
 
@@ -331,7 +374,7 @@ export const editTool: Tool & {
       }
       filePath = args.file_path;
     }
-    if (!filePath) return err("file_path is required");
+    if (!filePath) return err("file_path is required for a single edit; supply it explicitly (never inferred from a prior read). String edits use file_path, old_string, new_string.");
 
     const fieldErr = checkFieldTypes(args, "");
     if (fieldErr) return fieldErr;

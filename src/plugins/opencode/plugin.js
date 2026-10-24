@@ -46,7 +46,7 @@ function loadConfig() {
   return mod.exports;
 }
 const config = loadConfig();
-const { getDefaultMode, safeWriteFlag, readFlag, VALID_MODES } = config;
+const { getDefaultMode, safeWriteFlag, readFlag, VALID_MODES, bashWrapSkipReason, wrapBashCommand, bashFilterSkipReason, runCaveFilter } = config;
 
 function opencodeConfigDir() {
   if (process.env.XDG_CONFIG_HOME) {
@@ -56,6 +56,11 @@ function opencodeConfigDir() {
 }
 
 const flagPath = path.join(opencodeConfigDir(), '.cave-tools-active');
+let reloadToolRegistry = null;
+// V1 has no per-request tool catalog. V2 sets this from the context hook so a
+// native read is not blocked before its Cave replacement is actually offered.
+let sawContextTools = false;
+let generationReady = new Set();
 
 function readRegistryPath() {
   const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
@@ -64,16 +69,19 @@ function readRegistryPath() {
 
 function reinforcementLine(mode) {
   const base = 'CAVE-TOOLS MODE ACTIVE (' + mode + '). ' +
-    'Prefer cave__read / cave__bash / cave__grep / cave__find / cave__ls over built-ins. ' +
-    'Call cave__invalidate after external edits; never run `rtk <cmd>` inside cave__bash (auto-peels one wrap, then rewrites once). ' +
-    'Commands >2-3min: cave__bash_start + poll cave__bash_status wait=60; never sleep-poll. ' +
+    'Prefer cave__read / cave__grep / cave__find / cave__ls over built-ins. ' +
+    'Native shell output is auto-compressed after it runs (cave__bash also fine); never prefix cave-tools or rtk yourself. ' +
+    'Background shell for servers/watchers (uncompressed); cave__bash_start + cave__bash_status wait=60 when a long job\'s final output matters; never sleep-poll. ' +
+    '[cave: full output … at <path>]: cave__read/cave__grep that path, do not re-run. Unfiltered: cave-tools raw <cmd>. ' +
+    'Call cave__invalidate after external edits. ' +
+    'String edit: cave__edit with explicit file_path, old_string, new_string (never infer target). ' +
     'Medium+ edits: cave__read line_numbers=true → cave__edit start_line/end_line/content ' +
     '(+ expected_hash or expected_range_checksum); delete:true / insert_before for move.';
   if (mode === 'strict') {
-    return base + ' STRICT: built-in edit/write need prior cave__read; range/move need hash or range_checksum.';
+    return base + ' STRICT: built-in edit/write need prior cave__read; range/move need hash or range_checksum. Text reads use cave__read.';
   }
   if (mode === 'enforce') {
-    return base + ' ENFORCE: built-in read/grep/glob/list blocked — use cave__* equivalents.';
+    return base + ' ENFORCE: text reads use cave__read, not read. grep/glob/list blocked.';
   }
   return base;
 }
@@ -125,10 +133,7 @@ function parseModeChange(promptRaw) {
 
 function applyModeChange(mode) {
   if (!mode) return;
-  if (mode === 'off') {
-    try { if (existsSync(flagPath)) unlinkSync(flagPath); } catch (e) {}
-    return;
-  }
+  // Persist explicit off so execution guards cannot fall back to enforce.
   safeWriteFlag(flagPath, mode);
 }
 
@@ -196,6 +201,173 @@ function denyMessage(tool) {
   }
 }
 
+const NATIVE_TO_CAVE = Object.freeze({
+  edit: 'cave__edit',
+  write: 'cave__write',
+  patch: 'cave__apply_patch',
+  apply_patch: 'cave__apply_patch',
+  read: 'cave__read',
+});
+
+const MAX_ERROR_FIELDS = 5;
+
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function isCaveToolName(toolName) {
+  const id = String(toolName || '');
+  return /^cave__[A-Za-z0-9_]+$/.test(id) ||
+    /^cave-tools_cave__[A-Za-z0-9_]+$/.test(id) ||
+    /^mcp__cave-tools__cave__[A-Za-z0-9_]+$/.test(id);
+}
+
+function caveReplacement(tools, replacement) {
+  for (const id of [replacement, 'cave-tools_' + replacement, 'mcp__cave-tools__' + replacement]) {
+    if (hasOwn(tools, id) && tools[id] != null) return id;
+  }
+  return null;
+}
+
+function filterNativeTools(event, mode) {
+  if (mode !== 'enforce' && mode !== 'strict') return;
+  const tools = event && event.tools;
+  if (!tools || typeof tools !== 'object' || Array.isArray(tools)) return;
+  for (const native of Object.keys(NATIVE_TO_CAVE)) {
+    if (!hasOwn(tools, native)) continue;
+    if (!caveReplacement(tools, NATIVE_TO_CAVE[native])) continue;
+    try { delete tools[native]; } catch (e) {}
+  }
+}
+
+function listedToolIds(editor) {
+  if (!editor || typeof editor.list !== 'function') return new Set();
+  let listed = [];
+  try { listed = editor.list() || []; } catch (e) { return new Set(); }
+  if (!Array.isArray(listed)) return new Set();
+  const ids = new Set();
+  for (const tool of listed) {
+    if (!tool) continue;
+    const id = typeof tool === 'string' ? tool : tool.id || tool.name;
+    if (id) ids.add(String(id));
+  }
+  return ids;
+}
+
+function replacementListed(ids, replacement) {
+  return ids.has(replacement) ||
+    ids.has('cave-tools_' + replacement) ||
+    ids.has('mcp__cave-tools__' + replacement);
+}
+
+// Context-hook deletion only changes that prompt's tool map. Execution uses the
+// registry, so replaced natives must also be removed there or the model can
+// still call them and hit the execution guard.
+function noteGenerationTools(tools) {
+  sawContextTools = true;
+  const ready = new Set();
+  if (tools && typeof tools === 'object' && !Array.isArray(tools)) {
+    if (caveReplacement(tools, 'cave__read')) ready.add('read');
+    if (caveReplacement(tools, 'cave__grep')) ready.add('grep');
+    if (caveReplacement(tools, 'cave__find') || caveReplacement(tools, 'cave__ls')) ready.add('glob');
+  }
+  generationReady = ready;
+}
+
+function hideReplacedNatives(editor, mode) {
+  if (mode !== 'enforce' && mode !== 'strict') return;
+  if (!editor || typeof editor.remove !== 'function') return;
+  const ids = listedToolIds(editor);
+  for (const native of Object.keys(NATIVE_TO_CAVE)) {
+    if (!replacementListed(ids, NATIVE_TO_CAVE[native])) continue;
+    try { editor.remove(native); } catch (e) {}
+  }
+}
+
+function missingTargetMessage(toolName) {
+  const raw = String(toolName || '').toLowerCase();
+  if (raw === 'write' || raw === 'write_file') {
+    return 'STRICT: write target missing - pass path/file_path explicitly (never inferred) or use cave__write with file_path and content.';
+  }
+  return 'STRICT: edit target missing - pass path/file_path explicitly (never inferred) or use cave__edit with file_path, old_string, new_string.';
+}
+
+const EDIT_INPUT_FIELDS = new Set([
+  'root', 'path', 'filePath', 'file_path', 'oldString', 'newString', 'replaceAll',
+  'old_string', 'new_string', 'replace_all', 'start_line', 'end_line', 'content',
+  'delete', 'insert_before', 'expected_hash', 'expected_range_checksum', 'edits', 'patchText',
+]);
+
+function safeFieldPath(raw) {
+  const value = String(raw || '').trim();
+  if (/^edits\[\d{1,6}\]$/.test(value)) return value;
+  const field = value.replace(/^edits\[\d{1,6}\]\./, '');
+  return EDIT_INPUT_FIELDS.has(field) ? value : 'argument';
+}
+
+function safeIssueReason(raw) {
+  const text = String(raw || '').toLowerCase();
+  if (/^(?:missing key|required\b)/.test(text)) return 'Missing key';
+  const expected = /^expected (string|number|boolean|object|array|null)\b/.exec(text);
+  if (expected) return 'Expected ' + expected[1];
+  if (/^unrecognized key/.test(text)) return 'Unrecognized key';
+  if (/^invalid (option|enum|value)/.test(text)) return 'Invalid option';
+  if (/^(?:too (small|big)|out of range)/.test(text)) return 'Out of range';
+  return 'Invalid value';
+}
+
+function parseValidationIssues(body) {
+  const issues = [];
+  let total = 0;
+  for (const line of String(body || '').split('\n')) {
+    const match = /^- (.+?): (.*)$/.exec(line);
+    if (!match) continue;
+    total += 1;
+    if (issues.length >= MAX_ERROR_FIELDS) continue;
+    issues.push({ field: safeFieldPath(match[1]), reason: safeIssueReason(match[2]) });
+  }
+  return { issues, total };
+}
+
+function compactInputValidationError(event) {
+  if (!event || event.status !== 'error') return;
+  const error = event.error;
+  if (!error || typeof error !== 'object' || typeof error.message !== 'string') return;
+  const tool = String(event.tool || '');
+  if (!tool) return;
+  const header = 'Invalid arguments for tool "' + tool + '":\n';
+  const message = error.message;
+  if (!message.startsWith(header)) return;
+
+  const argsMarker = '\n\nArguments provided:\n';
+  const footer = '\n\nUpdate the arguments and call the tool again.';
+  const argsAt = message.indexOf(argsMarker, header.length);
+  if (argsAt < 0) return;
+  const footerAt = message.lastIndexOf(footer);
+  if (footerAt < argsAt || message.slice(footerAt + footer.length).trim()) return;
+
+  const { issues, total } = parseValidationIssues(message.slice(header.length, argsAt));
+  const lines = issues.map((issue) => '- ' + issue.field + ': ' + issue.reason);
+  if (total > issues.length) {
+    const more = total - issues.length;
+    lines.push('- ...and ' + more + ' more ' + (more === 1 ? 'issue' : 'issues'));
+  }
+  const missingTarget = issues.some((issue) =>
+    (issue.field === 'path' || issue.field === 'filePath') && issue.reason === 'Missing key');
+
+  let next;
+  if (missingTarget && tool === 'edit') {
+    next = 'Supply path explicitly (never inferred), or use cave__edit with file_path, old_string, and new_string.';
+  } else if (missingTarget && tool === 'write') {
+    next = 'Supply path explicitly (never inferred), or use cave__write with file_path and content.';
+  } else {
+    next = 'Fix the arguments and call the tool again.';
+  }
+  const compact = header + (lines.length ? lines.join('\n') : '- argument: Invalid value') + '\n\n' + next;
+  if (compact.length >= message.length) return;
+  try { error.message = compact; } catch (e) {}
+}
+
 function promptText(event) {
   if (!event) return '';
   if (typeof event.prompt === 'string') return event.prompt;
@@ -222,27 +394,106 @@ function denyBuiltin(toolName, args) {
   const active = readFlag(flagPath) || getDefaultMode();
   if (!active || active === 'off' || active === 'hint') return;
 
-  if (String(toolName || '').includes('cave__')) return;
+  if (isCaveToolName(toolName)) return;
 
   const tool = normalizeBuiltin(toolName);
-  if (!tool || tool === 'bash') return; // bash stays escape-hatch
+  if (!tool || tool === 'bash') return; // bash stays escape-hatch: never denied (wrapBuiltinBash only reroutes its output)
 
   if (active === 'enforce' || active === 'strict') {
     if (tool === 'read') {
+      if (sawContextTools && !generationReady.has('read')) return;
       const fp = extractFilePath(args);
       if (isImagePath(fp)) return; // rare image passthrough
       throw new Error(denyMessage('read'));
     }
-    if (tool === 'grep') throw new Error(denyMessage('grep'));
-    if (tool === 'glob') throw new Error(denyMessage('glob'));
+    if (tool === 'grep') {
+      if (sawContextTools && !generationReady.has('grep')) return;
+      throw new Error(denyMessage('grep'));
+    }
+    if (tool === 'glob') {
+      if (sawContextTools && !generationReady.has('glob')) return;
+      throw new Error(denyMessage('glob'));
+    }
   }
 
   if (active === 'strict' && tool === 'edit') {
+    // Legacy patch aliases carry their targets inside patchText, not path.
+    if (String(toolName || '').toLowerCase() === 'apply_patch') return;
     const fp = extractFilePath(args);
-    if (!fp) return;
+    if (!fp) throw new Error(missingTargetMessage(toolName));
     if (wasReadViaCave(fp)) return;
     throw new Error(denyMessage('edit'));
   }
+}
+
+// Rewrite the native bash/shell command to run through `cave-tools bash`, so
+// output gets cave's compression while opencode keeps its own shell tool.
+// Skip rules are shared with the Claude hook (bashWrapSkipReason).
+function wrapBuiltinBash(toolName, args, sessionId) {
+  if (normalizeBuiltin(toolName) !== 'bash' || !args || typeof args !== 'object') return;
+  const skip = bashWrapSkipReason(args.command, {
+    runInBackground: args.run_in_background === true || args.background === true,
+    mode: readFlag(flagPath) || getDefaultMode(),
+    env: process.env,
+  });
+  if (skip) return;
+  args.command = wrapBashCommand(args.command, sessionId);
+}
+
+// Compress native bash/shell output after it ran (default; the command is
+// untouched, so permission rules keep matching). Text is opencode's combined
+// stdout+stderr; a trailing <bash_metadata> block (V1 timeout/abort notes) is
+// kept verbatim, and exit code / metadata live outside the text untouched.
+// Returns the new text, or null to keep the original.
+// Trailing notes opencode appends and the model needs verbatim: V1's
+// <bash_metadata> block, V2's "[showing lines …; full output saved to …]".
+const BASH_TRAILERS = [
+  /\n*<bash_metadata>[\s\S]*<\/bash_metadata>\s*$/,
+  /\n*\[showing lines [^\]\n]*full output saved to [^\]\n]*\]\s*$/,
+];
+
+function filterBashText(text, command, sessionId) {
+  if (typeof text !== 'string') return null;
+  let body = text;
+  for (const re of BASH_TRAILERS) {
+    const m = re.exec(body);
+    if (m) { body = body.slice(0, m.index); break; }
+  }
+  const meta = text.slice(body.length).replace(/^\n+/, '');
+  const mode = readFlag(flagPath) || getDefaultMode();
+  if (bashFilterSkipReason(command, body, { mode, env: process.env })) return null;
+  const out = runCaveFilter({ command: String(command || ''), stdout: body, stderr: '' }, sessionId, process.env);
+  if (!out || out.stdout.length >= body.length) return null;
+  return out.stdout.replace(/\s*$/, '') + (meta ? '\n\n' + meta : '');
+}
+
+// V2 (opencode2 2.1.4): a completed shell result carries the text twice —
+// result.output.output (what the model reads) and result.content, an array
+// of text parts (a plain string is accepted too). Both get the same filtered
+// text; exit, truncated, status and metadata are left alone. When opencode
+// already truncated (full output saved to a file), the preview is filtered
+// and its "[showing lines …; full output saved to …]" pointer kept.
+// Background launches (input.background, or a still-running result) pass.
+function filterV2BashResult(event) {
+  if (!event || event.status !== 'completed' || normalizeBuiltin(event.tool || event.name) !== 'bash') return;
+  const input = event.input || event.args || {};
+  const result = event.result;
+  if (!result || input.background === true) return;
+  const out = result.output && typeof result.output === 'object' ? result.output : null;
+  if (out && out.status === 'running') return;
+  const parts = Array.isArray(result.content) ? result.content : null;
+  // Only all-text content; anything else (images, files) is left as is.
+  if (parts && (parts.length === 0 || !parts.every((p) => p && p.type === 'text' && typeof p.text === 'string'))) return;
+  const text = out && typeof out.output === 'string'
+    ? out.output
+    : parts ? parts.map((p) => p.text).join('\n') : result.content;
+  const next = filterBashText(text, input.command, event.sessionID || event.sessionId);
+  if (next === null) return;
+  const updated = { ...result };
+  if (out && typeof out.output === 'string') updated.output = { ...out, output: next };
+  if (parts) updated.content = [{ ...parts[0], text: next }];
+  else if (typeof result.content === 'string') updated.content = next;
+  event.result = updated;
 }
 
 function eventType(event) {
@@ -250,6 +501,7 @@ function eventType(event) {
   return String(event.type || (event.event && event.event.type) || '');
 }
 
+// V1 has no context tool-list hook; native-tool filtering is V2-only.
 function v1HookMap() {
   return {
     event: async ({ event } = {}) => {
@@ -287,6 +539,14 @@ function v1HookMap() {
 
     'tool.execute.before': async (input, output) => {
       denyBuiltin(input && input.tool, output && output.args);
+      wrapBuiltinBash(input && input.tool, output && output.args, input && input.sessionID);
+    },
+
+    'tool.execute.after': async (input, output) => {
+      if (!input || normalizeBuiltin(input.tool) !== 'bash' || !output) return;
+      const command = input.args && input.args.command;
+      const next = filterBashText(output.output, command, input.sessionID);
+      if (next !== null) output.output = next;
     },
   };
 }
@@ -306,6 +566,14 @@ async function setup(ctx) {
     if (reg && typeof reg.dispose === 'function') registrations.push(reg);
     return reg;
   };
+  reloadToolRegistry = ctx && ctx.tool && typeof ctx.tool.reload === 'function'
+    ? () => ctx.tool.reload()
+    : null;
+  if (ctx && ctx.tool && typeof ctx.tool.transform === 'function') {
+    remember(await ctx.tool.transform((editor) => {
+      hideReplacedNatives(editor, readFlag(flagPath) || getDefaultMode());
+    }));
+  }
 
   if (ctx && ctx.session && typeof ctx.session.hook === 'function') {
     remember(await ctx.session.hook('prompt', (event) => {
@@ -313,9 +581,15 @@ async function setup(ctx) {
       if (change) applyModeChange(change);
     }));
 
-    remember(await ctx.session.hook('context', (event) => {
+    remember(await ctx.session.hook('context', async (event) => {
       const active = readFlag(flagPath);
-      if (active && active !== 'off') pushSystem(event, reinforcementLine(active));
+      if (!active || active === 'off') return;
+      if ((active === 'enforce' || active === 'strict') && reloadToolRegistry) {
+        try { await reloadToolRegistry(); } catch (e) {}
+      }
+      noteGenerationTools(event && event.tools);
+      filterNativeTools(event, active);
+      pushSystem(event, reinforcementLine(active));
     }));
 
     remember(await ctx.session.hook('compaction', (event) => {
@@ -335,6 +609,13 @@ async function setup(ctx) {
       const toolName = event && (event.tool || event.name);
       const args = (event && (event.input || event.args)) || {};
       denyBuiltin(toolName, args);
+      wrapBuiltinBash(toolName, args, event && (event.sessionID || event.sessionId));
+    }));
+
+    remember(await ctx.tool.hook('execute.after', (event) => {
+      const active = readFlag(flagPath);
+      if (active && active !== 'off') compactInputValidationError(event);
+      filterV2BashResult(event);
     }));
   }
 

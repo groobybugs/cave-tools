@@ -176,6 +176,15 @@ cave-tools help grep                  # params generated from the tool schema
 - Output goes to stdout. Tool errors go to stderr with exit 1; usage errors exit 2.
 - Each call gets a fresh session (no dedup stubs or diffs). `--session <id>` reuses read state across separate CLI calls only with the daemon on (`CAVE_TOOLS_DAEMON=1`); without it each process starts empty.
 - `cave-tools status` stays the savings report; the `cave__status` tool runs as `cave-tools tool status`. `cave-tools tool <name> ...` works for every tool.
+- `cave-tools bash` mirrors the child: it exits with the real exit code (124 on timeout, 128+n on signal) and writes the child's stderr (redacted, budgeted) to fd 2. `--` ends flags: `cave-tools bash --session s1 -- 'cmd'`.
+
+### Native shell integration
+
+Agents keep their own shell tool (background jobs, permission UI); cave-tools compresses what it prints.
+
+- **Default: post-process.** A Claude Code `PostToolUse` hook (`claude/hooks/cave-tools-bash-filter.js`) and the opencode plugin (`tool.execute.after`) pipe native Bash output through `cave-tools filter --json`, which runs the `cave__bash` pipeline (redact, structured extraction, repetition collapse, budget, archive) without executing anything. The command is never changed, so permission allow/deny rules keep matching. Skipped for background launches, interrupted or image results, output under 2 KB, `cave-tools`/`rtk proxy`/`CAVE_RAW` commands, mode `off`, and whenever the filter fails or takes over ~5 s (the original output is kept). Failed commands (non-zero exit) reach Claude through `PostToolUseFailure`, which can't replace output, so they're shown uncompressed. `CAVE_TOOLS_FILTER_BASH=0` turns it off.
+- **Opt-in: wrap.** `CAVE_TOOLS_WRAP_BASH=1` rewrites native commands before they run to `cave-tools bash --session <id> -- '<cmd>'` (also rtk-rewrites them). Tradeoffs: permission rules are matched against the rewritten command, so allow rules like `Bash(git status:*)` stop matching and, worse, deny rules like `Bash(rm:*)` no longer catch `cave-tools bash -- 'rm …'`; a `cd` inside the command doesn't persist to the next call. Interactive (vim, less, ssh, `docker run -it`, `git add -p`, heredocs…) and background commands are never wrapped.
+- **Raw.** `cave-tools raw <command...>` runs a command with no rewrite or compression, inherited stdio and the real exit code (the `rtk proxy` equivalent). `CAVE_RAW=1 cave-tools bash ...` does the same.
 
 ### Error diagnostics (`cave-tools errors`)
 
@@ -183,7 +192,9 @@ Tool calls that return `isError` or throw are recorded in a local,
 best-effort error log at the shared dispatch layer. Successful calls are
 never recorded, logging never changes tool results or throws, and there is
 no guarantee every failure is durably recorded (a busy or unwritable store
-only drops records).
+only drops records). This covers calls reaching Cave's dispatch, not native
+OpenCode tools, plugin denials, or host-side argument validation. Error counts
+are not failure rates: successful calls and model identity are not recorded.
 
 ```bash
 cave-tools errors              # recent errors + counts by code and tool
@@ -436,7 +447,7 @@ grok inspect
 
 ### opencode (`~/.config/opencode/`)
 
-opencode has no Claude-style `hooks.json`, but it **does** have a native plugin system ([docs](https://opencode.ai/docs/plugins/)). cave-tools installs the same shape as caveman:
+opencode has no Claude-style `hooks.json`, but it **does** have a native plugin system ([V2 docs](https://opencode.ai/v2/docs/build/plugins)). cave-tools installs the same shape as caveman:
 
 | Piece | Path | Role |
 |-------|------|------|
@@ -451,9 +462,23 @@ Plugin hooks (OpenCode 2; V1 `server()` hooks still exported):
 
 - `setup` / `session.created` → write mode flag (default `enforce`, overridable via `CAVE_TOOLS_MODE` or `~/.config/cave-tools/config.json`)
 - `session.hook("prompt")` → parse `/cave-tools …` and natural-language on/off
-- `session.hook("context")` → per-turn reinforcement (Claude `UserPromptSubmit` twin)
+- `session.hook("context")` and `tool.transform` → in V2 `enforce`/`strict`, hide native `read`/`edit`/`write`/`patch` before generation only when the corresponding Cave tool is registered. A native read is not blocked until that request actually offers `cave__read`, so an early turn before MCP connects is not a hard error. Image/PDF/SVG passthrough stays while native `read` is visible. Native fallback stays visible if its replacement is absent; `hint`/`off` do not filter tools.
 - `session.hook("compaction")` → keep rules across compaction
-- `tool.hook("execute.before")` → block built-in `read`/`grep`/`glob`/`list` in `enforce`/`strict` (throw with `cave__*` redirect); `strict` also requires prior `cave__read` before `edit`/`write`/`apply_patch`. `bash` stays an escape hatch.
+- `tool.hook("execute.before")` → block built-in `read`/`grep`/`glob`/`list` in `enforce`/`strict` (throw with `cave__*` redirect); `strict` also requires an explicit target and prior `cave__read` before native edits. `bash` stays an escape hatch. V1 retains execution-time guards, not V2's pre-request filtering.
+- `tool.hook("execute.after")` → shorten recognized V2 argument-validation errors without reflecting replacement code or argument values; preserve error status/type and unrelated failures.
+
+Every single-file edit must include its target, even immediately after a read:
+
+```json
+{"file_path":"/absolute/project/file.ts","old_string":"before","new_string":"after"}
+```
+
+These are `cave__edit` arguments, not native `edit`'s `path`/`oldString`/`newString`.
+The schema checks per-mode requirements and non-empty batches. A batch may omit
+top-level `file_path` when every item supplies its own target; empty replacement
+strings remain valid deletions. Batch operation fields belong inside `edits[]`,
+not alongside it (`file_path` and `expected_hash` may be top-level defaults).
+Targets are never inferred from conversation.
 
 The installer writes an **absolute** plugin path. Relative `./plugins/cave-tools/plugin.js` fails when Orca remaps `OPENCODE_CONFIG_DIR` to `~/.config/orca/opencode-hooks/shared`.
 
@@ -519,6 +544,29 @@ pnpm run remove:agents -- --agent opencode
 ```
 
 Restart opencode after install so the plugin loads (V2 also auto-reloads on config changes). Verify: `plugin` array contains the absolute `.../plugins/cave-tools` directory, `index.js` + `plugin.js` exist inside it, `opencode.log` shows `loading plugin id=.../plugins/cave-tools entrypoint=.../index.js`, and a new session writes `~/.config/opencode/.cave-tools-active`.
+
+### Edit invocation benchmark (opt-in)
+
+```bash
+pnpm run bench:edit-invocation --help
+pnpm run bench:edit-invocation
+# Smaller pilot:
+pnpm run bench:edit-invocation --models opencode-go/mimo-v2.6-pro --profiles native-only,cave-only
+```
+
+This Linux live-model pilot runs MiMo 2.6 Pro, DeepSeek 4.1 Flash, and Muse 1.3
+Contributor against native-only, mixed, and Cave-only tool profiles (nine trials
+by default). It makes real model requests using normal OpenCode authentication
+and creates labeled benchmark sessions in ordinary history. Fixtures, config,
+and Cave state live in temporary directories; cleanup stops only processes the
+benchmark starts. It never extracts credentials or directly accesses the live DB.
+`--db` can select a separately authenticated benchmark DB through OpenCode itself.
+
+JSONL output records correct-file completion, unexpected-change counts, edit
+attempts/errors, first-edit success, observed argument validity, tokens, and
+latency. Unknown values remain `null`; a matcher error is not called a schema
+rejection. Pilot results are not proof of a general reliability or speed gain.
+`pnpm test` runs deterministic parser/ownership tests, never these model calls.
 
 ### Antigravity 2.0 / Gemini CLI
 

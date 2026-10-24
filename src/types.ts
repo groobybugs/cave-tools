@@ -21,4 +21,5 @@ export type ResourceContent = {
 export interface ToolResult {
   content: Array<TextContent | ImageContent | ResourceContent>;
   isError?: boolean;
+  _meta?: Record<string, unknown>;
 }

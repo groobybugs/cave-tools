@@ -51,9 +51,29 @@
             "timeout": 3
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v cave-node >/dev/null 2>&1; then exec cave-node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-bash-wrap.js\"; else exec node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-bash-wrap.js\"; fi",
+            "timeout": 3
+          }
+        ]
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v cave-node >/dev/null 2>&1; then exec cave-node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-bash-filter.js\"; else exec node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-bash-filter.js\"; fi",
+            "timeout": 8
+          }
+        ]
+      },
       {
         "matcher": "mcp__cave-tools__.*",
         "hooks": [

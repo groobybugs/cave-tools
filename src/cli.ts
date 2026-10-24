@@ -265,8 +265,9 @@ fewer tokens. Prefer these over built-ins.
 ## Tools
 - \`cave__read\` instead of Read — optimized drop-in replacement (dedup cache + line budgets).
 - \`cave__grep\`, \`cave__find\`, \`cave__ls\` instead of shell/Glob/Grep.
-- \`cave__bash\` instead of Bash for every command — optimized drop-in replacement (RTK + structured extraction + line budgets). Max timeout 10min.
-- \`cave__bash_start\` for commands expected to exceed ~2-3min — runs detached, returns a jobId immediately; poll with \`cave__bash_status\` (\`wait\` up to 60s), stop with \`cave__bash_stop\`. \`cave-tools jobs\` lists/kills jobs from a terminal.
+- Shell: on Claude Code / opencode native shell output is auto-compressed after it runs (Claude: successful commands only) — never prefix \`cave-tools\` or \`rtk\` yourself. Other hosts: use \`cave__bash\` (RTK + structured extraction + line budgets, max 10min), or \`cave-tools bash -- '<cmd>'\` from the shell if MCP is down.
+- Long jobs: native background for servers/watchers (uncompressed); \`cave__bash_start\` when a long job's final output should be compressed — poll \`cave__bash_status\` (\`wait\` up to 60s), stop \`cave__bash_stop\`. \`cave-tools jobs\` lists/kills jobs from a terminal.
+- \`[cave: full output … at <path>]\`: \`cave__read\` offset/limit or \`cave__grep\` that path instead of re-running. Unfiltered: \`cave-tools raw <cmd>\` / \`CAVE_RAW=1\`. \`CAVE_TOOLS_FILTER_BASH=0\` disables the native filter; \`CAVE_TOOLS_WRAP_BASH=1\` wraps commands before they run (changes which permission/deny rules match).
 - \`cave__compress\` to optimize large pasted or tool-produced text down to fewer tokens.
 - \`cave__status\` to inspect savings, cache hit rate, reduction % + budgets.
 - \`cave__write\` to create/overwrite a single file; \`cave__edit\` for fuzzy string replacement.
@@ -275,8 +276,8 @@ fewer tokens. Prefer these over built-ins.
 ## Rules
 - Do not double-wrap: never run \`rtk <cmd>\` inside \`cave__bash\` (it already prepends rtk).
 - Pass raw file paths / patterns / commands — do not wrap tools in extra scripts.
-- Never \`sleep\`-poll inside \`cave__bash\` to wait for long tasks: use \`cave__bash_start\` + \`cave__bash_status { wait: 60 }\` instead.
-- Fall back to built-in Bash only for stream monitors or hook-sensitive stdin.
+- Never \`sleep\`-poll to wait for long tasks.
+- Interactive commands (vim, less, ssh) and hook-sensitive stdin: native shell.
 
 ## Savings
 Run \`cave-tools status\` (CLI) or \`cave__status\` (MCP) for reduction % and an
@@ -448,12 +449,16 @@ if (args[0] === "mcp" || args.length === 0) {
   );
 } else if (args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
   void import("./cli-tools.js").then(({ runHelpCommand }) => runHelpCommand(args[1]));
+} else if (args[0] === "raw") {
+  void import("./cli-tools.js").then(({ runRawCommand }) => runRawCommand(args.slice(1)));
+} else if (args[0] === "filter") {
+  void import("./cli-tools.js").then(({ runFilterCommand }) => runFilterCommand(args.slice(1)));
 } else if (args[0] === "tool") {
   // Explicit form; the only way to reach the status tool, since `status` is the savings report above.
   void import("./cli-tools.js").then(({ runToolCommand }) => runToolCommand(args[1], args.slice(2)));
 } else if (isToolName(`cave__${args[0]}`)) {
   void import("./cli-tools.js").then(({ runToolCommand }) => runToolCommand(args[0], args.slice(1)));
 } else {
-    console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]|errors [--limit N]|jobs [kill <id> [signal]|log <id> [lines]]|bins|daemon [start|stop|status]|help [tool]|<tool> [args...]|tool <tool> [args...]]");
+    console.error("Usage: cave-tools [mcp|bench|install-agent|init|status [--emit-statusline|--verbose]|errors [--limit N]|jobs [kill <id> [signal]|log <id> [lines]]|bins|daemon [start|stop|status]|raw <command...>|filter --json [--session <id>]|help [tool]|<tool> [args...]|tool <tool> [args...]]");
   process.exit(2);
 }

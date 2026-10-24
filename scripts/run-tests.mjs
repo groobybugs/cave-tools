@@ -28,6 +28,9 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const DEDICATED_SUITE = [
   { name: "edit-reliability", script: "scripts/test-edit-reliability.mjs" },
+  { name: "edit-schema", script: "scripts/test-edit-schema.mjs" },
+  { name: "opencode-invocation", script: "scripts/test-opencode-invocation.mjs" },
+  { name: "edit-benchmark", script: "scripts/test-edit-benchmark.mjs" },
   { name: "read-registry", script: "scripts/test-read-registry.mjs" },
   { name: "tool-errors", script: "scripts/test-tool-errors.mjs" },
   { name: "edit-v2", script: "scripts/test-edit-v2.mjs" },

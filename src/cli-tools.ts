@@ -1,8 +1,12 @@
 import { randomBytes } from "crypto";
+import { spawn } from "child_process";
+import { constants as osConstants } from "os";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { callTool, isToolName, loadTool, TOOL_NAMES, type ToolDefinition } from "./dispatch.js";
 import { flushStats, suppressSubagentEnvLog } from "./compression/utils.js";
 import { flushToolErrorQueue } from "./runtime/tool-errors.js";
+import { cliShell, filterShellOutput } from "./tools/bash.js";
+import { localContext, runWithContext } from "./runtime/context.js";
 import { daemonEnabled, getDaemonClient, type CallOutcome } from "./daemon-client.js";
 
 // `cave-tools <tool> [positional...] [--prop value...]`: runs one MCP tool
@@ -227,7 +231,7 @@ export async function generalHelp(): Promise<string> {
   lines.push(
     "",
     "The status tool runs as `cave-tools tool status` (`cave-tools status` is the savings report).",
-    "Other commands: mcp, status, jobs, bins, init.",
+    "Other commands: mcp, status, jobs, bins, init, raw <command...> (no rewrite or compression), filter --json (compress given output).",
   );
   return lines.join("\n");
 }
@@ -286,6 +290,14 @@ export async function runToolCommand(short: string | undefined, argv: string[]):
     finish(process.stdout, toolHelp(tool), 0);
     return;
   }
+  if (name === "cave__bash") {
+    // CAVE_RAW=1: verbatim passthrough, same as `cave-tools raw`.
+    if (process.env.CAVE_RAW === "1") {
+      runRaw(String(parsed.args.command), parsed.args.workdir as string | undefined);
+      return;
+    }
+    parsed.args.__cli = true;
+  }
   const sessionId = parsed.sessionId ?? `cli-${process.pid}-${randomBytes(4).toString("hex")}`;
   let result: CallToolResult;
   // Only a call this process ran itself has local stats worth writing; a
@@ -310,8 +322,81 @@ export async function runToolCommand(short: string | undefined, argv: string[]):
     return;
   }
   if (ranLocally) flushStats();
+  const cliMeta = (result._meta as { caveCli?: { exitCode: number; stderr: string } } | undefined)?.caveCli;
+  if (cliMeta) {
+    if (cliMeta.stderr) process.stderr.write(cliMeta.stderr.endsWith("\n") ? cliMeta.stderr : `${cliMeta.stderr}\n`);
+    finish(process.stdout, formatResult(result), cliMeta.exitCode);
+    return;
+  }
   if (result.isError) finish(process.stderr, formatResult(result), 1);
   else finish(process.stdout, formatResult(result), 0);
+}
+
+// Run a shell command untouched: no rtk rewrite, no compression, inherited
+// stdio, shell-style exit status (128+n on signal).
+function runRaw(command: string, cwd?: string): void {
+  const shell = cliShell();
+  const shellArgs = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
+  const child = spawn(shell, shellArgs, { stdio: "inherit", cwd, windowsVerbatimArguments: true });
+  child.on("error", (error) => finish(process.stderr, `cave-tools raw: ${error.message}`, 127));
+  child.on("exit", (code, signal) =>
+    process.exit(signal ? 128 + (osConstants.signals[signal] ?? 0) : (code ?? 1)),
+  );
+}
+
+// `cave-tools raw [--] <command...>`: one arg runs verbatim as shell, several
+// are quoted individually (same rules as `cave-tools bash`).
+export function runRawCommand(argv: string[]): void {
+  const rest = argv[0] === "--" ? argv.slice(1) : argv;
+  if (rest.length === 0) {
+    finish(process.stderr, "usage: cave-tools raw [--] <command...>", 2);
+    return;
+  }
+  let command: string;
+  try {
+    command = rest.length === 1 ? rest[0] : joinCommandArgs(rest);
+  } catch (error) {
+    finish(process.stderr, `cave-tools raw: ${error instanceof Error ? error.message : String(error)}`, 2);
+    return;
+  }
+  runRaw(command);
+}
+
+// `cave-tools filter --json [--session <id>]`: reads {command, stdout, stderr,
+// exitCode?} on stdin, runs the cave__bash post-run pipeline (nothing is
+// executed), writes {stdout, stderr} JSON. Any failure exits non-zero with
+// empty stdout, so hook callers keep the original output.
+export async function runFilterCommand(argv: string[]): Promise<void> {
+  suppressSubagentEnvLog();
+  let json = false;
+  let sessionId = `cli-${process.pid}-${randomBytes(4).toString("hex")}`;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--json") json = true;
+    else if (argv[i] === "--session" && i + 1 < argv.length) sessionId = argv[++i];
+    else {
+      finish(process.stderr, `cave-tools filter: unexpected argument "${argv[i]}"\nusage: cave-tools filter --json [--session <id>]`, 2);
+      return;
+    }
+  }
+  if (!json) {
+    finish(process.stderr, "usage: cave-tools filter --json [--session <id>]", 2);
+    return;
+  }
+  try {
+    const input = JSON.parse(await readAllStdin()) as Record<string, unknown>;
+    if (!input || typeof input.command !== "string" || typeof input.stdout !== "string") {
+      throw new Error("stdin must be JSON {command, stdout, stderr?, exitCode?}");
+    }
+    const stderr = typeof input.stderr === "string" ? input.stderr : "";
+    const exitCode = typeof input.exitCode === "number" ? input.exitCode : null;
+    const out = await runWithContext(localContext(sessionId), () =>
+      filterShellOutput({ command: input.command as string, stdout: input.stdout as string, stderr, exitCode }),
+    );
+    flushStats();
+    finish(process.stdout, JSON.stringify(out), 0);
+  } catch (error) {
+    finish(process.stderr, `cave-tools filter: ${error instanceof Error ? error.message : String(error)}`, 1);
+  }
 }
 
 export async function runHelpCommand(short: string | undefined): Promise<void> {

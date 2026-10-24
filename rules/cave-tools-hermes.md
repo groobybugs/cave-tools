@@ -16,7 +16,9 @@ The `cave-tools` plugin blocks `read_file` and `search_files` at `enforce`, so r
 
 ## Rules
 
-- Long jobs (builds, test suites, installs) go to `cave__bash_start`: it returns a jobId immediately. Poll with `cave__bash_status` (`wait` up to 60s); stop with `cave__bash_stop`. Never `sleep`-poll inside `cave__bash`.
+- Hermes does not compress `terminal` output: run commands through `cave__bash`; if MCP is down, `cave-tools bash -- '<cmd>'` in `terminal`.
+- Long jobs: `cave__bash_start` (returns a jobId), poll `cave__bash_status` (`wait` up to 60s), stop `cave__bash_stop`; `terminal` background only for servers/watchers that must stream. Never `sleep`-poll.
+- `[cave: full output … at <path>]`: `cave__read` offset/limit or `cave__grep` that path; do not re-run. Unfiltered: `cave-tools raw <cmd>`.
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash`. The `rtk-rewrite` plugin already rewrites `terminal` commands, and `cave__bash` prepends `rtk` itself.
 - After editing a file outside Cave Tools, call `cave__invalidate` with the changed path(s) so the next `cave__read` returns fresh content.
 - Use `cave__compress` to shrink large pasted or tool-produced text; `cave__status` for RTK availability, cache state, and savings.

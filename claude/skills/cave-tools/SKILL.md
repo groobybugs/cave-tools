@@ -18,7 +18,7 @@ hooks:
           timeout: 3
 ---
 
-Prefer cave-tools over built-in Read/Grep/Glob/Bash and use Cave Tools for compact web search when available. They are optimized drop-in replacements that return the same results for fewer tokens (RTK rewriting + structured JSON/XML extraction + per-tool line budgets + read dedup cache).
+Prefer cave-tools over built-in Read/Grep/Glob (and Bash on hosts that don't compress native shell output) and use Cave Tools for compact web search when available. They are optimized drop-in replacements that return the same results for fewer tokens (RTK rewriting + structured JSON/XML extraction + per-tool line budgets + read dedup cache).
 
 ## Persistence
 
@@ -30,9 +30,11 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 
 - Use `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets). Since 0.2.0 also returns image files (png/jpg/jpeg/gif/webp/bmp/svg up to 5 MB) as MCP image blocks.
 - Use `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
-- Use `cave__bash` instead of Bash — optimized drop-in replacement. Tries `rtk rewrite <cmd>` when RTK available, then applies structured JSON/XML extraction + line budgets. Max timeout 10min.
-- Use `cave__bash_start` for anything expected to exceed ~2-3min (builds, test suites, installs): runs detached, returns a jobId immediately, output goes to a log file on disk. Poll with `cave__bash_status` (`wait` up to 60s — returns the moment the job exits); stop with `cave__bash_stop`. Jobs survive server restarts; `cave-tools jobs` lists/kills them from a terminal.
-- Never `sleep`-poll inside `cave__bash` to wait for a long task — that burns the 10min cap and whole turns. Start it in the background instead.
+- Shell, Claude Code / opencode: native Bash/shell is fine (not in `strict` on Claude). Its output is auto-compressed after it runs (Claude: successful commands only, via PostToolUse; opencode: via `execute.after`). Never prefix `cave-tools` or `rtk` yourself. `cave__bash` also works (RTK rewrite, compresses failures too, max timeout 10min).
+- Shell, other hosts (Codex, Grok, Gemini, Antigravity, Kiro, Hermes, Cursor, ZCode): native shell output is NOT compressed. Use `cave__bash`; if MCP is down, run `cave-tools bash -- '<cmd>'` in the native shell.
+- Long jobs: native background (`run_in_background`, Monitor) for servers, watchers and streams — its output is never compressed. Use `cave__bash_start` when a long job's final output should be compressed: returns a jobId, poll `cave__bash_status` (`wait` up to 60s), stop `cave__bash_stop`. Jobs survive server restarts; `cave-tools jobs` lists/kills them. Never `sleep`-poll.
+- `[cave: full output … at <path>]` means output was trimmed: `cave__read` offset/limit or `cave__grep` that path; don't re-run the command.
+- Unfiltered output: `cave-tools raw <cmd>` or `CAVE_RAW=1`. Turn the native filter off with `CAVE_TOOLS_FILTER_BASH=0`. `CAVE_TOOLS_WRAP_BASH=1` rewrites native commands to `cave-tools bash` before they run — warning: permission allow/deny rules then match the rewritten command.
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
 - Use `cave__write` to create/overwrite a single file; `cave__edit` for str-replace **or** line-range edits; `cave__apply_patch` for multi-file add/update/delete/move patches.
 - **Line-range (token-cheap):** `cave__read` with `line_numbers=true` (lines tagged `N:tag|`, footer has `file_hash` + `range_checksum`). Then `cave__edit` with `start_line`/`end_line`/`content` (new body only). Pass `expected_hash` and/or `expected_range_checksum`. `delete:true` removes lines; `insert_before` moves a block; batch `edits[]` may set per-item `file_path`. Insert before N: `end_line=start_line-1`. STRICT (`CAVE_TOOLS_MODE=strict`) requires a hash/checksum proof for range/move. Tiny one-liners may still use `old_string`/`new_string`.
@@ -42,7 +44,7 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 - Use `cave__compress` to optimize large pasted or tool-produced text down to fewer tokens.
 - Use `cave__status` to check RTK availability, cache state, savings %, budgets.
 - Pass raw file paths / patterns / commands. Do not wrap cave-tools calls in extra Python/shell scripts.
-- Fall back to built-in Bash only for stream monitors or hook-sensitive stdin.
+- Interactive commands (vim, less, ssh, `git add -p`) and hook-sensitive stdin: native shell.
 
 ## Intensity
 
@@ -67,8 +69,8 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 Not: `Read("/etc/hosts")`
 Yes: `cave__read({file_path: "/etc/hosts"})`
 
-Not: `Bash("git status && git diff")`
-Yes: `cave__bash({command: "git status && git diff"})`
+Not: `Bash("cave-tools bash -- 'git status'")` or `Bash("rtk git status")` on Claude Code / opencode
+Yes: `Bash("git status")` (auto-compressed) or `cave__bash({command: "git status"})`
 
 Not: `Grep("pattern", "src/")`
 Yes: `cave__grep({pattern: "pattern", path: "src/"})`
@@ -85,14 +87,14 @@ Run `cave-tools status` (CLI) or `cave__status` (MCP) for reduction %, hit rate,
 The hooks inject only the block below at SessionStart/SubagentStart (keep it short; it costs tokens every session).
 
 <!-- cave-tools-compact-begin -->
-Use cave tools instead of built-ins (same results, fewer tokens):
-- Read→`cave__read`, Grep→`cave__grep`, Glob→`cave__find`, ls→`cave__ls`, Bash→`cave__bash`, WebSearch/WebFetch→`cave__websearch`/`cave__webfetch`.
-- Never prefix `rtk` inside `cave__bash`; use `workdir`, not `cd`.
-- Jobs over ~2 min: `cave__bash_start`, poll `cave__bash_status` (`wait` ≤60s), stop `cave__bash_stop`. Never sleep-poll.
+Prefer cave tools over built-ins (same results, fewer tokens):
+- Read→`cave__read`, Grep→`cave__grep`, Glob→`cave__find`, ls→`cave__ls`, WebSearch/WebFetch→`cave__websearch`/`cave__webfetch`.
+- Native Bash auto-compressed (failures: `cave__bash`); never prefix `cave-tools`/`rtk`.
+- Background for servers/watchers; long jobs: `cave__bash_start`/`_status` (`wait` ≤60s). No sleep-poll.
+- `[cave: full output … at <path>]`: `cave__read`/`cave__grep` it.
 - Edit: `cave__edit` old_string/new_string, or line range after `cave__read` `line_numbers=true` (pass `expected_hash`/`expected_range_checksum`). `cave__write` whole files, `cave__apply_patch` multi-file.
-- After editing outside Cave Tools, call `cave__invalidate`.
-- Read before edit, never in parallel. No write tools in Plan Mode.
+- `cave__invalidate` after outside edits. Read before edit, never parallel. No writes in Plan Mode.
 | **hint** | Advisory; built-ins allowed. |
 | **enforce** | Built-in Read/Grep/Glob/WebFetch/WebSearch are blocked. |
-| **strict** | Also blocks Bash (background jobs/monitors OK); Edit/Write need prior cave__read; range/move need a hash proof. |
+| **strict** | Also blocks native Bash (background/monitors OK); Edit/Write need prior cave__read; range/move need hash. |
 <!-- cave-tools-compact-end -->
