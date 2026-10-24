@@ -36,11 +36,12 @@ type parityCase struct {
 	// that embed those paths stay byte-identical.
 	setup string
 
-	// knownDivergence, when set, explains why the two implementations cannot
-	// be compared byte-for-byte yet. In that mode wantTS / wantGo pin each
-	// side's expected output instead, so a change on either side still fails
-	// the harness. Remove it once the divergence is gone.
-	knownDivergence string
+	// goOnlyExtension marks a command the Go binary intentionally adds and
+	// the TypeScript reference does not implement. It is not a waiver: both
+	// sides are pinned to their own exact output (wantTS / wantGo), so a
+	// change on either implementation fails the harness. The only member is
+	// the Go-only `--version` probe; every other row must compare byte-for-byte.
+	goOnlyExtension string
 	wantTS          *outcome
 	wantGo          *outcome
 }
@@ -56,9 +57,9 @@ func parityCases(version string) []parityCase {
 		{
 			name: "version",
 			args: []string{"--version"},
-			knownDivergence: "Intentional compatibility harness: src/cli.ts has no --version " +
-				"branch, so node dist/cli.js --version prints the usage line to stderr and exits 2. " +
-				"The Go binary keeps the W0/W4k version probe (`cave-tools-go <version>`, exit 0).",
+			goOnlyExtension: "Go-only build probe: src/cli.ts has no --version branch, so the " +
+				"TypeScript reference prints the usage line to stderr and exits 2. The Go binary " +
+				"adds `cave-tools-go <version>` (exit 0) for build stamping; both outputs are pinned.",
 			wantTS: &outcome{stdout: "", stderr: tsUsageLine + "\n", code: 2},
 			wantGo: &outcome{stdout: "cave-tools-go " + version + "\n", stderr: "", code: 0},
 		},
@@ -178,10 +179,10 @@ func TestParity(t *testing.T) {
 			tsResult := runProcess(t, nodePath, []string{distCLI}, testCase, tsDir)
 			goResult := runProcess(t, goBinary, nil, testCase, goDir)
 
-			if testCase.knownDivergence != "" {
-				t.Logf("known divergence: %s", testCase.knownDivergence)
+			if testCase.goOnlyExtension != "" {
+				t.Logf("go-only extension: %s", testCase.goOnlyExtension)
 				if testCase.wantTS == nil || testCase.wantGo == nil {
-					t.Fatalf("case %q declares a divergence without pinned expectations", testCase.name)
+					t.Fatalf("case %q declares a Go-only extension without pinned expectations", testCase.name)
 				}
 				assertOutcome(t, "TS", tsResult, *testCase.wantTS)
 				assertOutcome(t, "Go", goResult, *testCase.wantGo)

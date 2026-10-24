@@ -29,12 +29,34 @@ Add one row to `parityCases` in `parity_test.go`:
 },
 ```
 
-Every row is `{name, args, stdin, env}` and is compared byte-for-byte. Use
-`knownDivergence` **only** while the Go side is still a stub: it pins each
-implementation to its own expected output (`wantTS` / `wantGo`) instead of
-comparing them, and the reason is printed with `-v`. Delete it once both sides
-agree.
+Every row is `{name, args, stdin, env}` and is compared byte-for-byte.
+`goOnlyExtension` is **not** a divergence waiver: it marks a command the Go
+binary intentionally adds (currently only `--version`, which `src/cli.ts` does
+not implement) and pins both the TypeScript reference output and the Go
+extension output, so a change on either side fails the harness.
 
 Cases must stay hermetic: never point `CAVE_TOOLS_DATA_DIR` or
 `CLAUDE_CONFIG_DIR` at the developer's real directories, and keep stdin finite
 (an MCP server case would block forever without `stdin` EOF).
+
+## Black-box suites (same build tag)
+
+The argv table above covers command routing. The following suites run the real
+binaries against twin fixture trees and compare stdout, stderr, exit codes and
+filesystem side effects:
+
+- `cli_blackbox_test.go` — every tool command, flag coercion, stdin values,
+  media, write/edit/patch/configure side effects, seeded jobs/errors, init,
+  raw/filter, statusline side effects and daemon-control output.
+- `mcp_blackbox_test.go` — MCP initialize, `tools/list` schemas/profile/order,
+  `tools/call` results including media and `_meta` sessions, error/argument
+  handling, stdout cleanliness and the error-log privacy switch.
+- `daemon_interop_test.go` — Go CLI/MCP clients against the TypeScript daemon
+  and TypeScript CLI/MCP clients against the Go daemon, including explicit CLI
+  sessions across processes, cwd/env, stats isolation and persisted budgets.
+- `state_interop_test.go` — durable jobs, archives, session stats and budget
+  rows produced by one implementation and consumed by the other.
+
+`sandbox_test.go` holds the twin-sandbox harness; `state_helpers_test.go` seeds
+rows through the TypeScript storage layer and reads state back through the
+shared schema.
