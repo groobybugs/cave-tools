@@ -25,6 +25,15 @@ import {
   renderStatusCli,
   type ToolBreakdown,
 } from "./status-ui.js";
+import { maybeRunGoImplementation } from "./impl-switch.js";
+
+// Static imports above always evaluate before this hook, so the switch cannot
+// literally precede them without splitting the entry file. This is still the
+// earliest executable point: no CLI command runs before a selected Go process
+// starts. Static module initialization from the imports above still runs;
+// lazy server/tool/daemon imports and command dispatch do not. Without the
+// switch it returns immediately and the TypeScript CLI below is unchanged.
+await maybeRunGoImplementation();
 
 interface SessionStats {
   pid: number;

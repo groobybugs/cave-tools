@@ -1408,8 +1408,8 @@ func collectJobs(rows *sql.Rows) ([]JobRecord, error) {
 // scanner is the shared shape of *sql.Row and *sql.Rows.
 type scanner interface{ Scan(dest ...any) error }
 
-// scanJob reads one job row in jobColumns order. This is the Go form of
-// src/storage/db.ts:jobFromRow: the row-to-record mapping happens here.
+// scanJob reads one job row in jobColumns order.
+// port of src/storage/db.ts:jobFromRow
 func scanJob(row scanner) (JobRecord, error) {
 	var (
 		job      JobRecord

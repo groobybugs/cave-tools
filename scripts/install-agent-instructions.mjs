@@ -760,6 +760,13 @@ const LAUNCHER_DIR = path.join(HOME, '.local', 'bin');
 const CAVE_NODE_LAUNCHER = path.join(LAUNCHER_DIR, 'cave-node');
 const CAVE_TOOLS_LAUNCHER = path.join(LAUNCHER_DIR, 'cave-tools');
 const LAUNCHER_MARKER = '# cave-tools launcher shim';
+const GO_BIN_DEFAULT = path.join(REPO_ROOT, 'go', 'bin', 'cave-tools-go');
+
+// Quote a value for POSIX sh single-quoted context, so paths with spaces,
+// quotes or other shell metacharacters are never reinterpreted.
+function posixShellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
 
 const CAVE_NODE_SHIM = `#!/bin/sh
 ${LAUNCHER_MARKER} — resolve a node >=20 regardless of PATH order or nvm churn.
@@ -789,7 +796,28 @@ exit 1
 
 const CAVE_TOOLS_SHIM = `#!/bin/sh
 ${LAUNCHER_MARKER} — single entry point for every agent and hook.
-exec "${CAVE_NODE_LAUNCHER}" "${CAVE_TOOLS_CLI}" "$@"
+# Opt-in Go implementation: select it before starting Node. A missing or
+# non-executable Go binary fails here instead of silently running TypeScript.
+if [ "\${CAVE_TOOLS_IMPL:-}" = "go" ]; then
+  if [ -n "\${CAVE_TOOLS_GO_BIN:-}" ]; then
+    cave_go_bin="$CAVE_TOOLS_GO_BIN"
+  else
+    cave_go_bin=${posixShellQuote(GO_BIN_DEFAULT)}
+  fi
+  # A bare relative name validates against the caller cwd above, but a
+  # slashless exec would search PATH instead. Prefix the cwd so the binary
+  # that passed the check is exactly the one executed.
+  case "$cave_go_bin" in
+    /*) ;;
+    *) cave_go_bin="\${PWD:-.}/$cave_go_bin" ;;
+  esac
+  if [ -f "$cave_go_bin" ] && [ -x "$cave_go_bin" ]; then
+    exec "$cave_go_bin" "$@"
+  fi
+  printf '%s\\n' "cave-tools: CAVE_TOOLS_IMPL=go but $cave_go_bin is missing or not executable" >&2
+  exit 127
+fi
+exec ${posixShellQuote(CAVE_NODE_LAUNCHER)} ${posixShellQuote(CAVE_TOOLS_CLI)} "$@"
 `;
 
 let launchersReady = null;
@@ -797,6 +825,10 @@ let launchersReady = null;
 function ensureLaunchers() {
   if (launchersReady !== null) return launchersReady;
   if (process.platform === 'win32') {
+    // Windows keeps using the package-manager launcher (a .cmd that runs
+    // Node); dist/cli.js still honors CAVE_TOOLS_IMPL before any command
+    // work. Generating a pre-Node .cmd shim here would need cmd.exe spawn
+    // semantics plus removal wiring, which this switch does not attempt.
     launchersReady = false;
     return false;
   }
@@ -1727,7 +1759,7 @@ function installCaveToolsClaudeHooks() {
   });
   upsertHookHandler(settings, 'SessionStart', null, {
     type: 'command',
-    command: `${caveToolsBin()} status --emit-statusline`,
+    command: `"${caveToolsBin()}" status --emit-statusline`,
     timeout: 3,
     async: true,
   });
@@ -1791,7 +1823,7 @@ function installCaveToolsClaudeHooks() {
 
   upsertHookHandler(settings, 'PostToolUse', 'mcp__cave-tools__.*', {
     type: 'command',
-    command: `${caveToolsBin()} status --emit-statusline`,
+    command: `"${caveToolsBin()}" status --emit-statusline`,
     timeout: 3,
     async: true,
   });

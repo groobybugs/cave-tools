@@ -3,6 +3,7 @@ package edit
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1264,6 +1265,47 @@ func TestEditSchemaJSON(t *testing.T) {
 	}
 	if name := Tool.Name; name != "cave__edit" {
 		t.Fatalf("name = %q", name)
+	}
+}
+
+// jsStringValue mirrors JS String() for the off-schema proof values that reach
+// hash/checksum verification: arrays join (null slots empty), objects print
+// [object Object], numbers use the JS shortest format.
+func TestJSStringValue(t *testing.T) {
+	cases := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{"null", nil, "null"},
+		{"true", true, "true"},
+		{"false", false, "false"},
+		{"string", "a,b", "a,b"},
+		{"large fixed", float64(12345678), "12345678"},
+		{"fraction", 1234.5, "1234.5"},
+		{"small fraction", 0.1, "0.1"},
+		{"negative fraction", -1234.5, "-1234.5"},
+		{"negative zero", math.Copysign(0, -1), "0"},
+		{"lower fixed boundary", 1e-6, "0.000001"},
+		{"sub-micro exponent", 1e-7, "1e-7"},
+		{"sub-micro fraction", 1.5e-7, "1.5e-7"},
+		{"upper fixed boundary", 1e20, "100000000000000000000"},
+		{"upper exponent", 1e21, "1e+21"},
+		{"negative exponent", -1e-7, "-1e-7"},
+		{"empty array", []any{}, ""},
+		{"empty object", map[string]any{}, "[object Object]"},
+		{"array join", []any{float64(1), float64(2)}, "1,2"},
+		{"null slot", []any{nil, "a"}, ",a"},
+		{"nested array", []any{[]any{float64(1), float64(2)}, nil}, "1,2,"},
+		{"object slot", []any{map[string]any{}}, "[object Object]"},
+		{"bool slot", []any{true, false}, "true,false"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := jsStringValue(tt.value); got != tt.want {
+				t.Fatalf("jsStringValue(%#v) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
 	}
 }
 

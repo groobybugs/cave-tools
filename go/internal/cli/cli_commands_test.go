@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
@@ -164,6 +165,45 @@ func TestInitWritesInstructions(t *testing.T) {
 	content, _ := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
 	if string(content) != "mine" {
 		t.Fatalf("existing file overwritten: %q", content)
+	}
+}
+
+// TestInitInstructionsMatchTypeScript pins init output to the TS reference.
+// Skips when node or the built dist/ tree is missing.
+func TestInitInstructionsMatchTypeScript(t *testing.T) {
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not found on PATH")
+	}
+	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsCLI := filepath.Join(root, "dist", "cli.js")
+	if _, err := os.Stat(tsCLI); err != nil {
+		t.Skip("dist/cli.js not built")
+	}
+	if _, err := os.Stat(filepath.Join(root, "node_modules")); err != nil {
+		t.Skip("node_modules not installed")
+	}
+	dir := t.TempDir()
+	cmd := exec.Command(nodePath, tsCLI, "init")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"CAVE_TOOLS_DATA_DIR="+t.TempDir(),
+		"CLAUDE_CONFIG_DIR="+t.TempDir(),
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node dist/cli.js init: %v\n%s", err, output)
+	}
+	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
+		tsContent, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read TS %s: %v", name, err)
+		}
+		if string(tsContent) != caveInstructions {
+			t.Fatalf("%s differs from src/cli.ts:CAVE_INSTRUCTIONS\nTS:\n%s\nGo:\n%s", name, tsContent, caveInstructions)
+		}
 	}
 }
 

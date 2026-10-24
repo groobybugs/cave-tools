@@ -1239,16 +1239,84 @@ func jsStringValue(value any) string {
 	case json.Number:
 		return v.String()
 	case float64:
-		return strconv.FormatFloat(v, 'g', -1, 64)
+		return jsNumberString(v)
 	case float32:
 		return strconv.FormatFloat(float64(v), 'g', -1, 32)
 	case int:
 		return strconv.Itoa(v)
 	case int64:
 		return strconv.FormatInt(v, 10)
+	case map[string]any:
+		return "[object Object]"
+	case []any:
+		return jsArrayString(v)
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// jsArrayString mirrors Array.prototype.toString: elements are joined by ","
+// where null/undefined slots render empty and nested values stringify
+// recursively (arrays join, objects print [object Object]).
+func jsArrayString(values []any) string {
+	parts := make([]string, len(values))
+	for i, value := range values {
+		if value != nil {
+			parts[i] = jsStringValue(value)
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// jsNumberString mirrors Number.prototype.toString(10) as used by String():
+// shortest round-trip digits, fixed notation for 1e-6 <= abs < 1e21, otherwise
+// a normalized exponent, and zero always prints as "0" (including -0).
+func jsNumberString(value float64) string {
+	switch {
+	case math.IsNaN(value):
+		return "NaN"
+	case math.IsInf(value, 0):
+		if value < 0 {
+			return "-Infinity"
+		}
+		return "Infinity"
+	case value == 0:
+		return "0"
+	}
+	sign := ""
+	if value < 0 {
+		sign = "-"
+		value = -value
+	}
+	mantissa, exponentText, found := strings.Cut(strconv.FormatFloat(value, 'e', -1, 64), "e")
+	if !found {
+		return sign + mantissa
+	}
+	exponent, err := strconv.Atoi(exponentText)
+	if err != nil {
+		return sign + mantissa + "e" + exponentText
+	}
+	digits := strings.ReplaceAll(mantissa, ".", "")
+	k := len(digits)
+	n := exponent + 1
+	switch {
+	case k <= n && n <= 21:
+		return sign + digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		return sign + digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		return sign + "0." + strings.Repeat("0", -n) + digits
+	}
+	exp := n - 1
+	expSign := "+"
+	if exp < 0 {
+		expSign = "-"
+		exp = -exp
+	}
+	if k == 1 {
+		return sign + digits + "e" + expSign + strconv.Itoa(exp)
+	}
+	return sign + digits[:1] + "." + digits[1:] + "e" + expSign + strconv.Itoa(exp)
 }
 
 // sliceHex is String.prototype.slice(0, n) for the ASCII hex strings the
