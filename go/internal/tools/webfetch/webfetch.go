@@ -3,6 +3,10 @@
 package webfetch
 
 import (
+	"bufio"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +14,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -36,8 +41,90 @@ type webFetchInput struct {
 	redactSecrets bool
 }
 
+// maxRedirects is Node fetch's redirect limit (undici follows 20 hops and
+// fails the request that would need a 21st).
+const maxRedirects = 20
+
+// acceptEncoding is the set Node fetch advertises. The standard library has no
+// Brotli decoder, so "br" is deliberately not advertised.
+const acceptEncoding = "gzip, deflate"
+
 // httpClient issues fetch requests. Tests may point it at a local server.
 var httpClient = &http.Client{}
+
+// doRequest applies the fetch redirect policy to the package client. Tests
+// replace httpClient, so the policy must be installed per request.
+func doRequest(request *http.Request) (*http.Response, error) {
+	client := *httpClient
+	client.CheckRedirect = checkRedirect
+	return client.Do(request)
+}
+
+// checkRedirect mirrors Node fetch: at most twenty followed redirects, and
+// Authorization is dropped when a hop changes origin (scheme, host or port).
+func checkRedirect(request *http.Request, via []*http.Request) error {
+	if len(via) > maxRedirects {
+		return errors.New("redirect count exceeded")
+	}
+	if len(via) > 0 && !sameOrigin(via[len(via)-1].URL, request.URL) {
+		request.Header.Del("Authorization")
+	}
+	return nil
+}
+
+// sameOrigin is the fetch "same origin" test (ports are part of the origin).
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+}
+
+// contentEncoding normalizes the Content-Encoding header; an empty result means
+// no decoding is needed.
+func contentEncoding(header http.Header) string {
+	value := strings.ToLower(strings.TrimSpace(header.Get("Content-Encoding")))
+	if value == "" || value == "identity" {
+		return ""
+	}
+	return value
+}
+
+// decodedBody wraps a response body with the matching standard-library
+// decompressor. Unsupported encodings (notably "br") pass through unchanged:
+// Brotli has no standard-library decoder and no new dependency is allowed.
+func decodedBody(body io.Reader, encoding string) (io.Reader, func(), error) {
+	switch encoding {
+	case "gzip", "x-gzip":
+		reader, err := gzip.NewReader(body)
+		if err != nil {
+			return nil, nil, err
+		}
+		return reader, func() { _ = reader.Close() }, nil
+	case "deflate":
+		buffered := bufio.NewReader(body)
+		header, _ := buffered.Peek(2)
+		if isZlibHeader(header) {
+			reader, err := zlib.NewReader(buffered)
+			if err != nil {
+				return nil, nil, err
+			}
+			return reader, func() { _ = reader.Close() }, nil
+		}
+		// HTTP "deflate" is zlib-wrapped by the spec, but raw DEFLATE is
+		// common; Node's fetch accepts both.
+		reader := flate.NewReader(buffered)
+		return reader, func() { _ = reader.Close() }, nil
+	default:
+		return body, func() {}, nil
+	}
+}
+
+// isZlibHeader recognizes the two-byte zlib wrapper (RFC 1950).
+func isZlibHeader(header []byte) bool {
+	if len(header) < 2 {
+		return false
+	}
+	cmf, flg := header[0], header[1]
+	return cmf&0x0F == 8 && (uint16(cmf)<<8|uint16(flg))%31 == 0
+}
 
 var (
 	errFetchFailed       = errors.New("fetch failed")
@@ -93,7 +180,12 @@ func parseInput(args map[string]any) webFetchInput {
 	}
 
 	timeout := defaultTimeoutSeconds
-	rawTimeout := jsNumber(args["timeout"])
+	// Missing is Number(undefined) = NaN; an explicit JSON null is Number(null)
+	// = 0. Both fall back to the default here, but keep the distinction local.
+	rawTimeout := math.NaN()
+	if value, present := args["timeout"]; present {
+		rawTimeout = jsNumber(value)
+	}
 	if !math.IsNaN(rawTimeout) && !math.IsInf(rawTimeout, 0) && rawTimeout > 0 {
 		timeout = int(math.Min(math.Trunc(rawTimeout), maxTimeoutSeconds))
 	}
@@ -137,8 +229,13 @@ func fetchBounded(ctx context.Context, url string, headers map[string]string, ti
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
+	// Set the header explicitly: net/http then leaves the body compressed and
+	// this package owns decoding, so the size cap counts decoded bytes.
+	if request.Header.Get("Accept-Encoding") == "" {
+		request.Header.Set("Accept-Encoding", acceptEncoding)
+	}
 
-	response, err := httpClient.Do(request)
+	response, err := doRequest(request)
 	if err != nil {
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
 			return fetchResult{}, fmt.Errorf("Request timed out after %ds", timeoutSeconds)
@@ -157,12 +254,27 @@ func fetchBounded(ctx context.Context, url string, headers map[string]string, ti
 		return fetchResult{}, fmt.Errorf("Request failed with status %d", response.StatusCode)
 	}
 
-	if declared := response.Header.Get("content-length"); declared != "" {
-		if parsed, ok := parseDecimalPrefix(declared); ok && isSafeInteger(parsed) && parsed > maxResponseBytes {
-			return fetchResult{}, errResponseTooLarge
+	// Node's fetch removes Content-Length once it decodes a response, so the
+	// declared check only applies to identity bodies.
+	encoding := contentEncoding(response.Header)
+	if encoding == "" {
+		if declared := response.Header.Get("content-length"); declared != "" {
+			if parsed, ok := parseDecimalPrefix(declared); ok && isSafeInteger(parsed) && parsed > maxResponseBytes {
+				return fetchResult{}, errResponseTooLarge
+			}
 		}
 	}
-	buffer, err := readBoundedBody(response.Body)
+	body := io.Reader(response.Body)
+	closeDecoder := func() {}
+	if encoding != "" {
+		decoded, closeFn, decodeErr := decodedBody(response.Body, encoding)
+		if decodeErr != nil {
+			return fetchResult{}, errFetchFailed
+		}
+		body, closeDecoder = decoded, closeFn
+	}
+	buffer, err := readBoundedBody(body)
+	closeDecoder()
 	if err != nil {
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
 			return fetchResult{}, fmt.Errorf("Request timed out after %ds", timeoutSeconds)
@@ -755,10 +867,12 @@ func jsTruthy(value any) bool {
 }
 
 // jsNumber is JavaScript's Number(value): NaN when the value is not numeric.
+// A nil value is JSON null (Number(null) === 0); callers that need
+// Number(undefined) check map presence before calling.
 func jsNumber(value any) float64 {
 	switch v := value.(type) {
 	case nil:
-		return math.NaN()
+		return 0
 	case bool:
 		if v {
 			return 1
@@ -780,6 +894,10 @@ func jsNumber(value any) float64 {
 		return number
 	case string:
 		return numberFromString(v)
+	case []any:
+		// Number(object) runs ToPrimitive: Array's toString is join(","), so
+		// [] and [null] become "" (0) and [1,2] becomes "1,2" (NaN).
+		return numberFromString(jsString(v))
 	default:
 		return math.NaN()
 	}

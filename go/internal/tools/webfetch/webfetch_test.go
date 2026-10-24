@@ -1,11 +1,13 @@
 package webfetch
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -132,6 +134,56 @@ func newFixtureServer(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/slow", func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(2 * time.Second)
 		_, _ = w.Write([]byte("late"))
+	})
+	mux.HandleFunc("/sleep", func(w http.ResponseWriter, request *http.Request) {
+		millis, _ := strconv.Atoi(request.URL.Query().Get("ms"))
+		time.Sleep(time.Duration(millis) * time.Millisecond)
+		w.Header().Set("content-type", "text/plain")
+		_, _ = w.Write([]byte("slept"))
+	})
+	mux.HandleFunc("/chain", func(w http.ResponseWriter, request *http.Request) {
+		n, _ := strconv.Atoi(request.URL.Query().Get("n"))
+		if n > 0 {
+			http.Redirect(w, request, fmt.Sprintf("/chain?n=%d", n-1), http.StatusFound)
+			return
+		}
+		w.Header().Set("content-type", "text/plain")
+		_, _ = w.Write([]byte("chain end"))
+	})
+	mux.HandleFunc("/gzip", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "gzip")
+		_, _ = w.Write(gzipBytes(t, []byte("hello gzip")))
+	})
+	mux.HandleFunc("/zlib", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "deflate")
+		_, _ = w.Write(zlibBytes(t, []byte("hello zlib")))
+	})
+	mux.HandleFunc("/rawdeflate", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "deflate")
+		_, _ = w.Write(rawDeflateBytes(t, []byte("hello raw")))
+	})
+	bigCompressed := bytes.Repeat([]byte("x"), maxResponseBytes+1024)
+	mux.HandleFunc("/gzip-big", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "gzip")
+		_, _ = w.Write(gzipBytes(t, bigCompressed))
+	})
+	mux.HandleFunc("/br", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "br")
+		_, _ = w.Write(brotliHelloBR)
+	})
+	mux.HandleFunc("/utf8", func(w http.ResponseWriter, request *http.Request) {
+		testCase, ok := malformedUTF8Cases[request.URL.Query().Get("case")]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("content-type", "text/plain")
+		_, _ = w.Write(testCase.bytes)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

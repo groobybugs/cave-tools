@@ -90,9 +90,26 @@ async function collectBoundedResponse(response: Response): Promise<string> {
   if (parsed !== undefined && Number.isSafeInteger(parsed) && parsed > MAX_RESPONSE_BYTES) {
     throw new Error(`websearch response exceeded ${MAX_RESPONSE_BYTES} bytes`);
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_RESPONSE_BYTES) throw new Error(`websearch response exceeded ${MAX_RESPONSE_BYTES} bytes`);
-  return bytes.toString("utf-8");
+  if (!response.body) {
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.byteLength > MAX_RESPONSE_BYTES) throw new Error(`websearch response exceeded ${MAX_RESPONSE_BYTES} bytes`);
+    return bytes.toString("utf-8");
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    size += value.byteLength;
+    if (size > MAX_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new Error(`websearch response exceeded ${MAX_RESPONSE_BYTES} bytes`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf-8");
 }
 
 async function callMcp(url: string, tool: string, args: unknown, headers: Record<string, string>, timeoutSeconds: number): Promise<string | undefined> {

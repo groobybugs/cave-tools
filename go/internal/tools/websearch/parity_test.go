@@ -263,6 +263,74 @@ func TestParityHandler(t *testing.T) {
 			args: map[string]any{"query": nil},
 		},
 		{
+			name:    "query singleton array",
+			args:    map[string]any{"query": []any{[]any{"abc"}}, "provider": "exa", "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("singleton query")},
+		},
+		{
+			name:    "query multi array",
+			args:    map[string]any{"query": []any{"a", "b"}, "provider": "exa", "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("multi query")},
+		},
+		{
+			name:    "query number",
+			args:    map[string]any{"query": float64(42), "provider": "exa", "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("number query")},
+		},
+		{
+			name:    "query boolean",
+			args:    map[string]any{"query": true, "provider": "exa", "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("boolean query")},
+		},
+		{
+			name:    "query object",
+			args:    map[string]any{"query": map[string]any{}, "provider": "exa", "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("object query")},
+		},
+		{
+			name: "query empty array",
+			args: map[string]any{"query": []any{}},
+		},
+		{
+			name: "query singleton null",
+			args: map[string]any{"query": []any{nil}},
+		},
+		{
+			name:    "num results singleton array",
+			args:    map[string]any{"query": "abc", "provider": "exa", "numResults": []any{float64(5)}, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("array numResults")},
+		},
+		{
+			name:    "num results nested singleton",
+			args:    map[string]any{"query": "abc", "provider": "exa", "numResults": []any{[]any{float64(5)}}, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("nested numResults")},
+		},
+		{
+			name:    "num results empty array",
+			args:    map[string]any{"query": "abc", "provider": "exa", "numResults": []any{}, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("empty numResults")},
+		},
+		{
+			name:    "num results multi array",
+			args:    map[string]any{"query": "abc", "provider": "exa", "numResults": []any{float64(1), float64(2)}, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("multi numResults")},
+		},
+		{
+			name:    "context singleton array",
+			args:    map[string]any{"query": "abc", "provider": "exa", "contextMaxCharacters": []any{float64(123)}, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("array context")},
+		},
+		{
+			name:    "context empty array",
+			args:    map[string]any{"query": "abc", "provider": "exa", "contextMaxCharacters": []any{}, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("empty array context")},
+		},
+		{
+			name:    "context multi array",
+			args:    map[string]any{"query": "abc", "provider": "exa", "contextMaxCharacters": []any{float64(1), float64(2)}, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("multi array context")},
+		},
+		{
 			// JSON.stringify leaves U+2028/U+2029 raw and only escapes C0
 			// controls; Go's encoder must match byte for byte.
 			name:    "jsonrpc string escaping",
@@ -415,5 +483,183 @@ func TestParityDefinition(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Fatalf("tool definition differs\n TS: %s\n Go: %s", want, got)
+	}
+}
+
+// TestParityContentEncoding compares forced gzip/zlib/raw-deflate responses and
+// the decoded-size cap with the real TS fetch implementation.
+func TestParityContentEncoding(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "dist", "tools", "websearch.js")); err != nil {
+		t.Skip("dist/tools/websearch.js missing; run pnpm build")
+	}
+	largePayload := directPayload(strings.Repeat("x", MaxResponseBytes+1024))
+	tests := []struct {
+		name     string
+		encoding string
+		body     []byte
+	}{
+		{"gzip", "gzip", gzipBytes(t, []byte(directPayload("gzip parity")))},
+		{"zlib deflate", "deflate", zlibBytes(t, []byte(directPayload("zlib parity")))},
+		{"raw deflate", "deflate", rawDeflateBytes(t, []byte(directPayload("raw parity")))},
+		{"gzip decoded too large", "gzip", gzipBytes(t, []byte(largePayload))},
+		{"zlib decoded too large", "deflate", zlibBytes(t, []byte(largePayload))},
+		{"raw deflate decoded too large", "deflate", rawDeflateBytes(t, []byte(largePayload))},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			transport := installFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("content-type", "application/json")
+				w.Header().Set("content-encoding", testCase.encoding)
+				_, _ = w.Write(testCase.body)
+			}))
+			tsURL := "http://" + transport.base.Host
+			args := map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)}
+			tsJSON, _ := runTS(t, root, args, nil, tsURL)
+
+			encoded, err := json.Marshal(args)
+			if err != nil {
+				t.Fatalf("args: %v", err)
+			}
+			var goArgs map[string]any
+			if err := json.Unmarshal(encoded, &goArgs); err != nil {
+				t.Fatalf("args: %v", err)
+			}
+			goResult := run(t, map[string]string{}, goArgs)
+			goJSON, err := json.Marshal(goResult)
+			if err != nil {
+				t.Fatalf("go marshal: %v", err)
+			}
+			var tsValue, goValue any
+			if err := json.Unmarshal([]byte(tsJSON), &tsValue); err != nil {
+				t.Fatalf("ts result: %v\n%s", err, tsJSON)
+			}
+			if err := json.Unmarshal(goJSON, &goValue); err != nil {
+				t.Fatalf("go result: %v", err)
+			}
+			if !reflect.DeepEqual(tsValue, goValue) {
+				t.Fatalf("TS and Go disagree\n TS: %s\n Go: %s", tsJSON, goJSON)
+			}
+		})
+	}
+}
+
+// TestParityRedirectChain compares the 20-redirect limit and POST-to-GET
+// rewrite for websearch with Node fetch.
+func TestParityRedirectChain(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "dist", "tools", "websearch.js")); err != nil {
+		t.Skip("dist/tools/websearch.js missing; run pnpm build")
+	}
+	tests := []struct {
+		name  string
+		limit int
+	}{
+		{"twenty redirects", 20},
+		{"twenty-one redirects", 21},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			limit := testCase.limit
+			handler := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				n := -1
+				if raw := request.URL.Query().Get("n"); raw != "" {
+					n, _ = strconv.Atoi(raw)
+				}
+				if n < limit-1 {
+					http.Redirect(w, request, "/mcp?n="+strconv.Itoa(n+1), http.StatusFound)
+					return
+				}
+				w.Header().Set("content-type", "application/json")
+				_, _ = io.WriteString(w, directPayload("redirected result"))
+			})
+			transport := installFixture(t, handler)
+			tsURL := "http://" + transport.base.Host
+			args := map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)}
+			tsJSON, _ := runTS(t, root, args, nil, tsURL)
+
+			encoded, err := json.Marshal(args)
+			if err != nil {
+				t.Fatalf("args: %v", err)
+			}
+			var goArgs map[string]any
+			if err := json.Unmarshal(encoded, &goArgs); err != nil {
+				t.Fatalf("args: %v", err)
+			}
+			goResult := run(t, map[string]string{}, goArgs)
+			goJSON, err := json.Marshal(goResult)
+			if err != nil {
+				t.Fatalf("go marshal: %v", err)
+			}
+			var tsValue, goValue any
+			if err := json.Unmarshal([]byte(tsJSON), &tsValue); err != nil {
+				t.Fatalf("ts result: %v\n%s", err, tsJSON)
+			}
+			if err := json.Unmarshal(goJSON, &goValue); err != nil {
+				t.Fatalf("go result: %v", err)
+			}
+			if !reflect.DeepEqual(tsValue, goValue) {
+				t.Fatalf("TS and Go disagree\n TS: %s\n Go: %s", tsJSON, goJSON)
+			}
+		})
+	}
+}
+
+// TestParityRedirectMethodAndBody observes the request the final hop receives
+// and compares it with Node fetch: 307 replays POST+body, 302 rewrites to GET
+// and drops the body (and its content type).
+func TestParityRedirectMethodAndBody(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "dist", "tools", "websearch.js")); err != nil {
+		t.Skip("dist/tools/websearch.js missing; run pnpm build")
+	}
+	tests := []struct {
+		name   string
+		status int
+	}{
+		{"temporary redirect", http.StatusTemporaryRedirect},
+		{"found", http.StatusFound},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/mcp" {
+					http.Redirect(w, request, "/final", testCase.status)
+					return
+				}
+				body, _ := io.ReadAll(request.Body)
+				observation := request.Method + "|" + request.Header.Get("Content-Type") + "|" + string(body)
+				w.Header().Set("content-type", "application/json")
+				_, _ = io.WriteString(w, directPayload(observation))
+			})
+			transport := installFixture(t, handler)
+			tsURL := "http://" + transport.base.Host
+			args := map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)}
+			tsJSON, _ := runTS(t, root, args, nil, tsURL)
+
+			encoded, err := json.Marshal(args)
+			if err != nil {
+				t.Fatalf("args: %v", err)
+			}
+			var goArgs map[string]any
+			if err := json.Unmarshal(encoded, &goArgs); err != nil {
+				t.Fatalf("args: %v", err)
+			}
+			goResult := run(t, map[string]string{}, goArgs)
+			goJSON, err := json.Marshal(goResult)
+			if err != nil {
+				t.Fatalf("go marshal: %v", err)
+			}
+			var tsValue, goValue any
+			if err := json.Unmarshal([]byte(tsJSON), &tsValue); err != nil {
+				t.Fatalf("ts result: %v\n%s", err, tsJSON)
+			}
+			if err := json.Unmarshal(goJSON, &goValue); err != nil {
+				t.Fatalf("go result: %v", err)
+			}
+			if !reflect.DeepEqual(tsValue, goValue) {
+				t.Fatalf("TS and Go disagree\n TS: %s\n Go: %s", tsJSON, goJSON)
+			}
+		})
 	}
 }
