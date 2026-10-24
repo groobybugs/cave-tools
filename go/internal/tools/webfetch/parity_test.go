@@ -163,6 +163,12 @@ func TestParityHandler(t *testing.T) {
 		{"forced zlib deflate", map[string]any{"url": base + "/zlib", "format": "text"}},
 		{"forced raw deflate", map[string]any{"url": base + "/rawdeflate", "format": "text"}},
 		{"gzip decoded too large", map[string]any{"url": base + "/gzip-big", "timeout": float64(10)}},
+		{"gzip lying content length", map[string]any{"url": base + "/gzip-lying-cl", "timeout": float64(10)}},
+		{"gzip empty body", map[string]any{"url": base + "/gzip-empty", "format": "text"}},
+		{"gzip one byte body", map[string]any{"url": base + "/gzip-onebyte", "format": "text"}},
+		{"gzip corrupt body", map[string]any{"url": base + "/gzip-corrupt", "format": "text"}},
+		{"gzip truncated body", map[string]any{"url": base + "/gzip-truncated", "format": "text"}},
+		{"gzip checksum body", map[string]any{"url": base + "/gzip-checksum", "format": "text"}},
 		{"url singleton array", map[string]any{"url": []any{base + "/text"}, "format": "text"}},
 		{"url empty array", map[string]any{"url": []any{}}},
 		{"url singleton null", map[string]any{"url": []any{nil}}},
@@ -582,4 +588,88 @@ func TestParityClosedPortFetchFailed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParityURLCredentials compares Node's fetch credential rejection with Go
+// for nonempty userinfo, and confirms empty userinfo is allowed without an
+// Authorization header.
+func TestParityURLCredentials(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "dist", "tools", "webfetch.js")); err != nil {
+		t.Skip("dist/tools/webfetch.js missing; run pnpm build")
+	}
+	type observation struct {
+		authorization string
+	}
+	var mu sync.Mutex
+	var seen []observation
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		seen = append(seen, observation{authorization: request.Header.Get("Authorization")})
+		mu.Unlock()
+		w.Header().Set("content-type", "text/plain")
+		_, _ = w.Write([]byte("echo"))
+	}))
+	t.Cleanup(server.Close)
+	take := func() []observation {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]observation(nil), seen...)
+	}
+	host := strings.TrimPrefix(server.URL, "http://")
+
+	credentials := []string{"user:pass", "user", ":pass", "", ":"}
+	for _, value := range credentials {
+		t.Run("credentials "+value, func(t *testing.T) {
+			url := "http://" + value + "@" + host + "/echo"
+			args := map[string]any{"url": url, "format": "text"}
+
+			before := len(take())
+			tsJSON := runTS(t, root, "dist/tools/webfetch.js", "webfetchTool", args, nil, "")
+			tsSeen := take()[before:]
+
+			before = len(take())
+			goResult, err := Tool.Handler(context.Background(), args)
+			if err != nil {
+				t.Fatalf("go handler: %v", err)
+			}
+			goJSON, err := json.Marshal(goResult)
+			if err != nil {
+				t.Fatalf("go marshal: %v", err)
+			}
+			goSeen := take()[before:]
+
+			if tsJSON != string(goJSON) {
+				t.Fatalf("TS and Go disagree\n TS: %s\n Go: %s", tsJSON, goJSON)
+			}
+			if len(tsSeen) != len(goSeen) {
+				t.Fatalf("request count TS=%d Go=%d", len(tsSeen), len(goSeen))
+			}
+			for index := range tsSeen {
+				if tsSeen[index].authorization != goSeen[index].authorization {
+					t.Fatalf("Authorization TS=%q Go=%q", tsSeen[index].authorization, goSeen[index].authorization)
+				}
+				if tsSeen[index].authorization != "" {
+					t.Fatalf("Authorization = %q, want empty", tsSeen[index].authorization)
+				}
+			}
+		})
+	}
+
+	t.Run("credential rejection without path", func(t *testing.T) {
+		url := "http://user:pass@" + host
+		args := map[string]any{"url": url, "format": "text"}
+		tsJSON := runTS(t, root, "dist/tools/webfetch.js", "webfetchTool", args, nil, "")
+		goResult, err := Tool.Handler(context.Background(), args)
+		if err != nil {
+			t.Fatalf("go handler: %v", err)
+		}
+		goJSON, err := json.Marshal(goResult)
+		if err != nil {
+			t.Fatalf("go marshal: %v", err)
+		}
+		if tsJSON != string(goJSON) {
+			t.Fatalf("TS and Go disagree\n TS: %s\n Go: %s", tsJSON, goJSON)
+		}
+	})
 }

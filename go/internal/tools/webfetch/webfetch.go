@@ -87,6 +87,31 @@ func contentEncoding(header http.Header) string {
 	return value
 }
 
+// supportedEncoding reports whether decodedBody can decode the encoding.
+func supportedEncoding(encoding string) bool {
+	switch encoding {
+	case "gzip", "x-gzip", "deflate":
+		return true
+	default:
+		return false
+	}
+}
+
+// tolerantGzipReader matches Node's zlib streaming: a body cut before the
+// trailer yields the decompressed prefix without an error, while checksum and
+// header errors still fail the read as "terminated".
+type tolerantGzipReader struct {
+	reader *gzip.Reader
+}
+
+func (reader *tolerantGzipReader) Read(buffer []byte) (int, error) {
+	count, err := reader.reader.Read(buffer)
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		err = io.EOF
+	}
+	return count, err
+}
+
 // decodedBody wraps a response body with the matching standard-library
 // decompressor. Unsupported encodings (notably "br") pass through unchanged:
 // Brotli has no standard-library decoder and no new dependency is allowed.
@@ -95,16 +120,21 @@ func decodedBody(body io.Reader, encoding string) (io.Reader, func(), error) {
 	case "gzip", "x-gzip":
 		reader, err := gzip.NewReader(body)
 		if err != nil {
-			return nil, nil, err
+			// Node treats an empty/incomplete gzip header as an empty body.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return strings.NewReader(""), func() {}, nil
+			}
+			return nil, nil, errTerminated
 		}
-		return reader, func() { _ = reader.Close() }, nil
+		tolerant := &tolerantGzipReader{reader: reader}
+		return tolerant, func() { _ = reader.Close() }, nil
 	case "deflate":
 		buffered := bufio.NewReader(body)
 		header, _ := buffered.Peek(2)
 		if isZlibHeader(header) {
 			reader, err := zlib.NewReader(buffered)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, errTerminated
 			}
 			return reader, func() { _ = reader.Close() }, nil
 		}
@@ -128,6 +158,7 @@ func isZlibHeader(header []byte) bool {
 
 var (
 	errFetchFailed       = errors.New("fetch failed")
+	errTerminated        = errors.New("terminated")
 	errResponseTooLarge  = errors.New("Response too large (exceeds 5MB limit)")
 	schemeRE             = jsre.MustCompile("^https?://", "i")
 	nbspEntityRE         = jsre.MustCompile("&nbsp;", "gi")
@@ -226,6 +257,19 @@ func fetchBounded(ctx context.Context, url string, headers map[string]string, ti
 		// Node's fetch rejects unparseable URLs before touching the network.
 		return fetchResult{}, fmt.Errorf("Failed to parse URL from %s", url)
 	}
+	if user := request.URL.User; user != nil {
+		username := user.Username()
+		password, _ := user.Password()
+		if username != "" || password != "" {
+			return fetchResult{}, fmt.Errorf(
+				"Request cannot be constructed from a URL that includes credentials: %s",
+				request.URL.String(),
+			)
+		}
+		// Node accepts empty userinfo but sends no Authorization header;
+		// net/http would otherwise build one.
+		request.URL.User = nil
+	}
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
@@ -254,22 +298,21 @@ func fetchBounded(ctx context.Context, url string, headers map[string]string, ti
 		return fetchResult{}, fmt.Errorf("Request failed with status %d", response.StatusCode)
 	}
 
-	// Node's fetch removes Content-Length once it decodes a response, so the
-	// declared check only applies to identity bodies.
-	encoding := contentEncoding(response.Header)
-	if encoding == "" {
-		if declared := response.Header.Get("content-length"); declared != "" {
-			if parsed, ok := parseDecimalPrefix(declared); ok && isSafeInteger(parsed) && parsed > maxResponseBytes {
-				return fetchResult{}, errResponseTooLarge
-			}
+	// The declared length is checked before any decoding: Node 24 keeps
+	// Content-Length on gzip responses and TS rejects it unconditionally.
+	if declared := response.Header.Get("content-length"); declared != "" {
+		if parsed, ok := parseDecimalPrefix(declared); ok && isSafeInteger(parsed) && parsed > maxResponseBytes {
+			return fetchResult{}, errResponseTooLarge
 		}
 	}
+	encoding := contentEncoding(response.Header)
+	decoding := supportedEncoding(encoding)
 	body := io.Reader(response.Body)
 	closeDecoder := func() {}
 	if encoding != "" {
 		decoded, closeFn, decodeErr := decodedBody(response.Body, encoding)
 		if decodeErr != nil {
-			return fetchResult{}, errFetchFailed
+			return fetchResult{}, decodeErr
 		}
 		body, closeDecoder = decoded, closeFn
 	}
@@ -278,6 +321,12 @@ func fetchBounded(ctx context.Context, url string, headers map[string]string, ti
 	if err != nil {
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
 			return fetchResult{}, fmt.Errorf("Request timed out after %ds", timeoutSeconds)
+		}
+		if errors.Is(err, errResponseTooLarge) {
+			return fetchResult{}, errResponseTooLarge
+		}
+		if decoding {
+			return fetchResult{}, errTerminated
 		}
 		return fetchResult{}, err
 	}

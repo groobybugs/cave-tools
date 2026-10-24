@@ -663,3 +663,106 @@ func TestParityRedirectMethodAndBody(t *testing.T) {
 		})
 	}
 }
+
+// TestParityGzipDeclaredLength proves the declared Content-Length check runs
+// before decoding: Node 24 preserves CL on gzip responses and TS rejects it.
+func TestParityGzipDeclaredLength(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "dist", "tools", "websearch.js")); err != nil {
+		t.Skip("dist/tools/websearch.js missing; run pnpm build")
+	}
+	transport := installFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Header().Set("content-encoding", "gzip")
+		w.Header().Set("content-length", strconv.Itoa(MaxResponseBytes+1))
+		_, _ = w.Write(gzipBytes(t, []byte(directPayload("compressed result"))))
+	}))
+	tsURL := "http://" + transport.base.Host
+	args := map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)}
+	tsJSON, _ := runTS(t, root, args, nil, tsURL)
+
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		t.Fatalf("args: %v", err)
+	}
+	var goArgs map[string]any
+	if err := json.Unmarshal(encoded, &goArgs); err != nil {
+		t.Fatalf("args: %v", err)
+	}
+	goResult := run(t, map[string]string{}, goArgs)
+	goJSON, err := json.Marshal(goResult)
+	if err != nil {
+		t.Fatalf("go marshal: %v", err)
+	}
+	var tsValue, goValue any
+	if err := json.Unmarshal([]byte(tsJSON), &tsValue); err != nil {
+		t.Fatalf("ts result: %v\n%s", err, tsJSON)
+	}
+	if err := json.Unmarshal(goJSON, &goValue); err != nil {
+		t.Fatalf("go result: %v", err)
+	}
+	if !reflect.DeepEqual(tsValue, goValue) {
+		t.Fatalf("TS and Go disagree\n TS: %s\n Go: %s", tsJSON, goJSON)
+	}
+}
+
+// TestParityGzipBodyErrors compares empty, one-byte, corrupt, truncated and
+// checksum-failing gzip bodies with Node fetch.
+func TestParityGzipBodyErrors(t *testing.T) {
+	root := repoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "dist", "tools", "websearch.js")); err != nil {
+		t.Skip("dist/tools/websearch.js missing; run pnpm build")
+	}
+	full := gzipBytes(t, []byte(directPayload("hello checksum gzip body")))
+	checksum := append([]byte(nil), full...)
+	checksum[len(checksum)-5] ^= 0xFF
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{"empty", nil},
+		{"one byte", []byte{0x1F}},
+		{"corrupt header", []byte("not gzip at all")},
+		{"truncated trailer", truncatedGzipHello},
+		{"bad checksum", checksum},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			body := append([]byte(nil), testCase.body...)
+			transport := installFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("content-type", "application/json")
+				w.Header().Set("content-encoding", "gzip")
+				if len(body) > 0 {
+					_, _ = w.Write(body)
+				}
+			}))
+			tsURL := "http://" + transport.base.Host
+			args := map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)}
+			tsJSON, _ := runTS(t, root, args, nil, tsURL)
+
+			encoded, err := json.Marshal(args)
+			if err != nil {
+				t.Fatalf("args: %v", err)
+			}
+			var goArgs map[string]any
+			if err := json.Unmarshal(encoded, &goArgs); err != nil {
+				t.Fatalf("args: %v", err)
+			}
+			goResult := run(t, map[string]string{}, goArgs)
+			goJSON, err := json.Marshal(goResult)
+			if err != nil {
+				t.Fatalf("go marshal: %v", err)
+			}
+			var tsValue, goValue any
+			if err := json.Unmarshal([]byte(tsJSON), &tsValue); err != nil {
+				t.Fatalf("ts result: %v\n%s", err, tsJSON)
+			}
+			if err := json.Unmarshal(goJSON, &goValue); err != nil {
+				t.Fatalf("go result: %v", err)
+			}
+			if !reflect.DeepEqual(tsValue, goValue) {
+				t.Fatalf("TS and Go disagree\n TS: %s\n Go: %s", tsJSON, goJSON)
+			}
+		})
+	}
+}

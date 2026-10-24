@@ -176,6 +176,38 @@ func newFixtureServer(t *testing.T) *httptest.Server {
 		w.Header().Set("content-encoding", "br")
 		_, _ = w.Write(brotliHelloBR)
 	})
+	mux.HandleFunc("/gzip-lying-cl", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "gzip")
+		w.Header().Set("content-length", strconv.Itoa(maxResponseBytes+1))
+		_, _ = w.Write(gzipBytes(t, []byte("hello gzip")))
+	})
+	mux.HandleFunc("/gzip-empty", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "gzip")
+	})
+	mux.HandleFunc("/gzip-onebyte", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "gzip")
+		_, _ = w.Write([]byte{0x1F})
+	})
+	mux.HandleFunc("/gzip-corrupt", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "gzip")
+		_, _ = w.Write([]byte("not gzip at all"))
+	})
+	mux.HandleFunc("/gzip-truncated", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "gzip")
+		_, _ = w.Write(truncatedGzipHello)
+	})
+	mux.HandleFunc("/gzip-checksum", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/plain")
+		w.Header().Set("content-encoding", "gzip")
+		body := gzipBytes(t, []byte("hello checksum gzip body"))
+		body[len(body)-5] ^= 0xFF
+		_, _ = w.Write(body)
+	})
 	mux.HandleFunc("/utf8", func(w http.ResponseWriter, request *http.Request) {
 		testCase, ok := malformedUTF8Cases[request.URL.Query().Get("case")]
 		if !ok {

@@ -40,3 +40,13 @@ Brotli parity.
 Resolution options for the coordinator: approve a Brotli dependency
 (`github.com/andybalholm/brotli` or equivalent) for both tool packages, or
 accept this documented divergence and keep `br` out of request negotiation.
+
+## Deferred review items (no full parity claim)
+
+- **F4 stacked Content-Encoding** (`Content-Encoding: gzip, deflate`,
+  `deflate, gzip`, and similar) is not implemented. `decodedBody` matches a
+  single encoding token only; a stacked header currently passes the body through
+  undecoded. This is rare in practice and was explicitly deferred to keep the W4
+  stop scope. No parity is claimed for stacked encodings.
+- **Brotli** stays deferred as described above: no dependency was added and
+  `br` is not advertised. Request negotiation remains `gzip, deflate`.

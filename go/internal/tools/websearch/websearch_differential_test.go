@@ -18,6 +18,15 @@ import (
 	"testing"
 )
 
+// truncatedGzipHello is Node's zlib.gzipSync("hello truncated gzip body") cut
+// before its trailer. Node returns the decompressed prefix without an error.
+var truncatedGzipHello = []byte{
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+	0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0x28, 0x29, 0x2a, 0xcd,
+	0x4b, 0x4e, 0x2c, 0x49, 0x4d, 0x51, 0x48, 0xaf, 0xca, 0x2c,
+	0x50, 0x48, 0xca,
+}
+
 func gzipBytes(t *testing.T, data []byte) []byte {
 	t.Helper()
 	var buffer bytes.Buffer
@@ -735,5 +744,77 @@ func TestStreamingSplitUTF8(t *testing.T) {
 	}
 	if got := resultText(t, result); got != "héllo ✓" {
 		t.Fatalf("text = %q, want %q", got, "héllo ✓")
+	}
+}
+
+// TestDeclaredLengthRejectsEncodedBodyWithoutReading pins Node's rule: the
+// declared Content-Length is checked before decoding. Node 24 keeps the header
+// on gzip responses.
+func TestDeclaredLengthRejectsEncodedBodyWithoutReading(t *testing.T) {
+	body := &streamingBody{chunks: [][]byte{gzipBytes(t, []byte(directPayload("compressed result")))}}
+	installStreamingResponse(t, http.Header{
+		"Content-Type":     []string{"application/json"},
+		"Content-Encoding": []string{"gzip"},
+		"Content-Length":   []string{strconv.Itoa(MaxResponseBytes + 1)},
+	}, body)
+
+	result := run(t, map[string]string{}, map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)})
+	if !result.IsError {
+		t.Fatalf("expected isError, got %q", resultText(t, result))
+	}
+	want := fmt.Sprintf("Unable to search the web for abc: websearch response exceeded %d bytes", MaxResponseBytes)
+	if got := resultText(t, result); got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+	if body.served != 0 || body.readCalls != 0 {
+		t.Fatalf("read %d bytes in %d calls, want zero", body.served, body.readCalls)
+	}
+}
+
+// TestGzipBodyErrors pins Node's body-read results for empty, one-byte,
+// corrupt, truncated and checksum-failing gzip bodies.
+func TestGzipBodyErrors(t *testing.T) {
+	full := gzipBytes(t, []byte(directPayload("hello truncated gzip body")))
+	checksum := append([]byte(nil), full...)
+	checksum[len(checksum)-5] ^= 0xFF
+
+	tests := []struct {
+		name    string
+		body    []byte
+		want    string
+		isError bool
+	}{
+		{"empty", nil, NoResults, false},
+		{"one byte", []byte{0x1F}, NoResults, false},
+		{"corrupt header", []byte("not gzip at all"), "terminated", true},
+		{"truncated trailer", truncatedGzipHello, NoResults, false},
+		{"bad checksum", checksum, "terminated", true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := &streamingBody{}
+			if test.body != nil {
+				body.chunks = [][]byte{test.body}
+			}
+			installStreamingResponse(t, http.Header{
+				"Content-Type":     []string{"application/json"},
+				"Content-Encoding": []string{"gzip"},
+			}, body)
+
+			result := run(t, map[string]string{}, map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)})
+			if result.IsError != test.isError {
+				t.Fatalf("isError = %v, want %v: %q", result.IsError, test.isError, resultText(t, result))
+			}
+			if test.isError {
+				want := "Unable to search the web for abc: " + test.want
+				if got := resultText(t, result); got != want {
+					t.Fatalf("text = %q, want %q", got, want)
+				}
+				return
+			}
+			if got := resultText(t, result); got != test.want {
+				t.Fatalf("text = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

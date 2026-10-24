@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -65,6 +66,16 @@ func rawDeflateBytes(t *testing.T, data []byte) []byte {
 // The standard library has no Brotli decoder, so this fixture documents the
 // unresolved gap rather than a supported encoding.
 var brotliHelloBR = []byte{0x8b, 0x03, 0x80, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x62, 0x72, 0x03}
+
+// truncatedGzipHello is Node's zlib.gzipSync("hello truncated gzip body") cut
+// before its trailer. Node returns the decompressed prefix
+// "hello truncated gzip b" for these exact bytes.
+var truncatedGzipHello = []byte{
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+	0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x57, 0x28, 0x29, 0x2a, 0xcd,
+	0x4b, 0x4e, 0x2c, 0x49, 0x4d, 0x51, 0x48, 0xaf, 0xca, 0x2c,
+	0x50, 0x48, 0xca,
+}
 
 // malformedUTF8Cases is the Node TextDecoder corpus for webfetch.
 var malformedUTF8Cases = map[string]struct {
@@ -558,5 +569,183 @@ func TestChainFixture(t *testing.T) {
 	body, _ := io.ReadAll(response.Body)
 	if string(body) != "chain end" {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+// fetchRoundTripFunc lets tests return a synthetic response.
+type fetchRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function fetchRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+// fetchTrackingBody records whether a rejected response was read at all.
+type fetchTrackingBody struct {
+	data   []byte
+	offset int
+	reads  int
+	closed bool
+}
+
+func (body *fetchTrackingBody) Read(buffer []byte) (int, error) {
+	if body.offset >= len(body.data) {
+		return 0, io.EOF
+	}
+	count := copy(buffer, body.data[body.offset:])
+	body.offset += count
+	body.reads++
+	return count, nil
+}
+
+func (body *fetchTrackingBody) Close() error {
+	body.closed = true
+	return nil
+}
+
+func installFetchResponse(t *testing.T, header http.Header, body io.ReadCloser) {
+	t.Helper()
+	previous := httpClient
+	httpClient = &http.Client{Transport: fetchRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			Status:     "200 OK",
+			StatusCode: http.StatusOK,
+			Header:     header,
+			Body:       body,
+			Request:    request,
+		}, nil
+	})}
+	t.Cleanup(func() { httpClient = previous })
+}
+
+// TestDeclaredLengthRejectsEncodedBodyWithoutReading pins Node's rule: the
+// declared Content-Length is checked before any decoding. Node 24 keeps the
+// header on gzip responses.
+func TestDeclaredLengthRejectsEncodedBodyWithoutReading(t *testing.T) {
+	body := &fetchTrackingBody{data: gzipBytes(t, []byte("hello gzip"))}
+	installFetchResponse(t, http.Header{
+		"Content-Type":     []string{"text/plain"},
+		"Content-Encoding": []string{"gzip"},
+		"Content-Length":   []string{fmt.Sprintf("%d", maxResponseBytes+1)},
+	}, body)
+
+	_, err := fetchBounded(context.Background(), "http://example.test/x", nil, 5)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if err.Error() != errResponseTooLarge.Error() {
+		t.Fatalf("error = %q, want %q", err.Error(), errResponseTooLarge.Error())
+	}
+	if body.reads != 0 || body.offset != 0 {
+		t.Fatalf("read %d times (%d bytes), want zero", body.reads, body.offset)
+	}
+}
+
+// TestGzipBodyErrors pins the Node body-read results for empty, one-byte,
+// corrupt, truncated and checksum-failing gzip bodies.
+func TestGzipBodyErrors(t *testing.T) {
+	full := gzipBytes(t, []byte("hello truncated gzip body"))
+	checksum := append([]byte(nil), full...)
+	checksum[len(checksum)-5] ^= 0xFF
+
+	tests := []struct {
+		name    string
+		body    []byte
+		want    string
+		isError bool
+	}{
+		{"empty", nil, "", false},
+		{"one byte", []byte{0x1F}, "", false},
+		{"corrupt header", []byte("not gzip at all"), "terminated", true},
+		{"truncated trailer", truncatedGzipHello, "hello truncated gzip b", false},
+		{"bad checksum", checksum, "terminated", true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("content-type", "text/plain")
+				w.Header().Set("content-encoding", "gzip")
+				_, _ = w.Write(test.body)
+			}))
+			t.Cleanup(server.Close)
+
+			result := run(t, map[string]any{"url": server.URL + "/gzip", "format": "text"})
+			if result.IsError != test.isError {
+				t.Fatalf("isError = %v, want %v: %q", result.IsError, test.isError, resultText(t, result))
+			}
+			if test.isError {
+				want := "Unable to fetch " + server.URL + "/gzip: " + test.want
+				if got := resultText(t, result); got != want {
+					t.Fatalf("text = %q, want %q", got, want)
+				}
+				return
+			}
+			if got := resultText(t, result); got != test.want {
+				t.Fatalf("text = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+// TestURLUserInfoCredentials mirrors Node fetch: nonempty username/password is
+// rejected before any request; empty userinfo is allowed and sends no
+// Authorization header.
+func TestURLUserInfoCredentials(t *testing.T) {
+	type observation struct {
+		authorization string
+	}
+	var mu sync.Mutex
+	var seen []observation
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		seen = append(seen, observation{authorization: request.Header.Get("Authorization")})
+		mu.Unlock()
+		w.Header().Set("content-type", "text/plain")
+		_, _ = w.Write([]byte("echo"))
+	}))
+	t.Cleanup(server.Close)
+
+	take := func() []observation {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]observation(nil), seen...)
+	}
+
+	for _, credentials := range []string{"user:pass", "user", ":pass"} {
+		t.Run("rejects "+credentials, func(t *testing.T) {
+			url := "http://" + credentials + "@" + strings.TrimPrefix(server.URL, "http://") + "/echo"
+			before := len(take())
+			result := run(t, map[string]any{"url": url, "format": "text"})
+			if !result.IsError {
+				t.Fatalf("expected isError, got %q", resultText(t, result))
+			}
+			want := "Unable to fetch " + url + ": Request cannot be constructed from a URL that includes credentials: " + url
+			if got := resultText(t, result); got != want {
+				t.Fatalf("text = %q, want %q", got, want)
+			}
+			if after := len(take()); after != before {
+				t.Fatalf("server received %d request(s), want zero", after-before)
+			}
+		})
+	}
+
+	for _, credentials := range []string{"", ":"} {
+		t.Run("allows empty "+credentials, func(t *testing.T) {
+			url := "http://" + credentials + "@" + strings.TrimPrefix(server.URL, "http://") + "/echo"
+			before := len(take())
+			result := run(t, map[string]any{"url": url, "format": "text"})
+			if result.IsError {
+				t.Fatalf("isError: %s", resultText(t, result))
+			}
+			if got := resultText(t, result); got != "echo" {
+				t.Fatalf("text = %q", got)
+			}
+			requests := take()[before:]
+			if len(requests) != 1 {
+				t.Fatalf("server requests = %d, want 1", len(requests))
+			}
+			if requests[0].authorization != "" {
+				t.Fatalf("Authorization = %q, want empty", requests[0].authorization)
+			}
+		})
 	}
 }

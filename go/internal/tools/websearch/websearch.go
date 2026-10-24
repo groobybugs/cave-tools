@@ -81,6 +81,7 @@ var (
 	// httpClient issues JSON-RPC requests. Tests may replace it.
 	httpClient          = &http.Client{}
 	errFetchFailed      = errors.New("fetch failed")
+	errTerminated       = errors.New("terminated")
 	errOperationAborted = errors.New("This operation was aborted")
 )
 
@@ -119,6 +120,31 @@ func contentEncoding(header http.Header) string {
 	return value
 }
 
+// supportedEncoding reports whether decodedBody can decode the encoding.
+func supportedEncoding(encoding string) bool {
+	switch encoding {
+	case "gzip", "x-gzip", "deflate":
+		return true
+	default:
+		return false
+	}
+}
+
+// tolerantGzipReader matches Node's zlib streaming: a body cut before the
+// trailer yields the decompressed prefix without an error, while checksum and
+// header errors still fail the read as "terminated".
+type tolerantGzipReader struct {
+	reader *gzip.Reader
+}
+
+func (reader *tolerantGzipReader) Read(buffer []byte) (int, error) {
+	count, err := reader.reader.Read(buffer)
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		err = io.EOF
+	}
+	return count, err
+}
+
 // decodedBody wraps a response body with the matching standard-library
 // decompressor. Unsupported encodings (notably "br") pass through unchanged:
 // Brotli has no standard-library decoder and no new dependency is allowed.
@@ -127,16 +153,21 @@ func decodedBody(body io.Reader, encoding string) (io.Reader, func(), error) {
 	case "gzip", "x-gzip":
 		reader, err := gzip.NewReader(body)
 		if err != nil {
-			return nil, nil, err
+			// Node treats an empty/incomplete gzip header as an empty body.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return strings.NewReader(""), func() {}, nil
+			}
+			return nil, nil, errTerminated
 		}
-		return reader, func() { _ = reader.Close() }, nil
+		tolerant := &tolerantGzipReader{reader: reader}
+		return tolerant, func() { _ = reader.Close() }, nil
 	case "deflate":
 		buffered := bufio.NewReader(body)
 		header, _ := buffered.Peek(2)
 		if isZlibHeader(header) {
 			reader, err := zlib.NewReader(buffered)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, errTerminated
 			}
 			return reader, func() { _ = reader.Close() }, nil
 		}
@@ -311,16 +342,15 @@ func ParseWebsearchResponse(body string) (string, bool) {
 // collectBoundedResponse reads the response body under the 256KB cap.
 // port of src/tools/websearch.ts:collectBoundedResponse
 func collectBoundedResponse(response *http.Response) (string, error) {
-	// Node's fetch removes Content-Length once it decodes a response, so the
-	// declared check only applies to identity bodies.
-	encoding := contentEncoding(response.Header)
-	if encoding == "" {
-		if declared := response.Header.Get("content-length"); declared != "" {
-			if parsed, ok := parseDecimalPrefix(declared); ok && isSafeInteger(parsed) && parsed > MaxResponseBytes {
-				return "", fmt.Errorf("websearch response exceeded %d bytes", MaxResponseBytes)
-			}
+	// The declared length is checked before any decoding: Node 24 keeps
+	// Content-Length on gzip responses and TS rejects it unconditionally.
+	if declared := response.Header.Get("content-length"); declared != "" {
+		if parsed, ok := parseDecimalPrefix(declared); ok && isSafeInteger(parsed) && parsed > MaxResponseBytes {
+			return "", fmt.Errorf("websearch response exceeded %d bytes", MaxResponseBytes)
 		}
 	}
+	encoding := contentEncoding(response.Header)
+	decoding := supportedEncoding(encoding)
 	// Node's Response can have a null body; treat it as empty so the caller
 	// returns NO_RESULTS instead of panicking.
 	if response.Body == nil {
@@ -337,11 +367,14 @@ func collectBoundedResponse(response *http.Response) (string, error) {
 	}
 	// Stop at cap+1 so an oversized body is never buffered in full.
 	data, err := io.ReadAll(io.LimitReader(body, MaxResponseBytes+1))
-	if err != nil {
-		return "", err
-	}
 	if len(data) > MaxResponseBytes {
 		return "", fmt.Errorf("websearch response exceeded %d bytes", MaxResponseBytes)
+	}
+	if err != nil {
+		if decoding {
+			return "", errTerminated
+		}
+		return "", err
 	}
 	return decodeNodeUTF8(data), nil
 }
