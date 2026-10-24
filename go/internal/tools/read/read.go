@@ -212,6 +212,11 @@ func suggestPaths(filePath string) string {
 	if err != nil {
 		return ""
 	}
+	// Node's readdir uses libuv's scandir, which sorts entries bytewise
+	// (strcmp) on POSIX; Go's File.ReadDir preserves filesystem order.
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
 
 	matches := make([]string, 0, 3)
 	for _, entry := range entries {

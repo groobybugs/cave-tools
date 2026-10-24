@@ -816,3 +816,47 @@ func TestJSONShape(t *testing.T) {
 		t.Fatalf("json = %s", encoded)
 	}
 }
+
+// TestSuggestPathsSortedBytewise pins the readdir ordering TS gets from
+// Node/libuv: entries come back sorted by strcmp on POSIX, so the first three
+// matches are chosen bytewise rather than in filesystem order.
+func TestSuggestPathsSortedBytewise(t *testing.T) {
+	dir := t.TempDir()
+	// Created out of order; uppercase sorts before lowercase bytewise, so the
+	// expected prefix is Bmatch.txt, Zmatch.txt, amatch.txt.
+	for _, name := range []string{"cmatch.txt", "Zmatch.txt", "amatch.txt", "Bmatch.txt", "nomatch.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	got := suggestPaths(filepath.Join(dir, "MATCH"))
+	want := "\n\nDid you mean one of these?\n" +
+		filepath.Join(dir, "Bmatch.txt") + "\n" +
+		filepath.Join(dir, "Zmatch.txt") + "\n" +
+		filepath.Join(dir, "amatch.txt")
+	if got != want {
+		t.Fatalf("suggestPaths = %q, want %q", got, want)
+	}
+}
+
+// TestSuggestPathsCases pins the unchanged single-match, no-match and
+// fewer-than-three-match paths around the ordering fix.
+func TestSuggestPathsCases(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"one.txt", "two.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	if got, want := suggestPaths(filepath.Join(dir, "one")), "\n\nDid you mean one of these?\n"+filepath.Join(dir, "one.txt"); got != want {
+		t.Fatalf("single match = %q, want %q", got, want)
+	}
+	if got := suggestPaths(filepath.Join(dir, "zzz")); got != "" {
+		t.Fatalf("no match = %q, want empty", got)
+	}
+	if got := suggestPaths(filepath.Join(dir, "nomatchdir", "x")); got != "" {
+		t.Fatalf("missing dir = %q, want empty", got)
+	}
+}
