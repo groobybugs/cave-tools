@@ -3699,6 +3699,35 @@ process.exit(1);
   }
 
   {
+    console.log("Testing Claude installer wires native Bash hooks:");
+    const home = mkdtempSync("/tmp/cti-");
+    try {
+      const env = { ...process.env, HOME: home };
+      delete env.CLAUDE_CONFIG_DIR;
+      const r = spawnSync(process.execPath, [join(process.cwd(), "scripts", "install-agent-instructions.mjs"), "--agent", "claude"], { encoding: "utf8", env });
+      assert.equal(r.status, 0, r.stderr);
+      const hooksDir = join(home, ".claude", "hooks");
+      for (const f of ["cave-tools-bash-filter.js", "cave-tools-bash-wrap.js"]) {
+        assert.ok(existsSync(join(hooksDir, f)), `${f} copied`);
+      }
+      const settings = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+      const wired = (event, script) => (settings.hooks[event] || []).some(
+        (g) => g.matcher === "Bash" && (g.hooks || []).some((h) => String(h.command).includes(script)),
+      );
+      assert.ok(wired("PostToolUse", "cave-tools-bash-filter.js"), "PostToolUse Bash filter wired");
+      assert.ok(wired("PreToolUse", "cave-tools-bash-wrap.js"), "PreToolUse Bash wrap wired (opt-in at runtime)");
+      // Re-running is idempotent.
+      spawnSync(process.execPath, [join(process.cwd(), "scripts", "install-agent-instructions.mjs"), "--agent", "claude"], { encoding: "utf8", env });
+      const again = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"));
+      const count = (again.hooks.PostToolUse || []).flatMap((g) => g.hooks || []).filter((h) => String(h.command).includes("cave-tools-bash-filter.js")).length;
+      assert.equal(count, 1, "no duplicate filter hook after reinstall");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+    console.log("Claude installer native Bash hook tests passed\n");
+  }
+
+  {
     console.log("Testing CLI bash exit codes, stderr, raw, -- separator:");
     const cliPath = join(process.cwd(), "dist", "cli.js");
     const root = mkdtempSync("/tmp/ctb-");

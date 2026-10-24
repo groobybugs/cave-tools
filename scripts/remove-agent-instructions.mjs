@@ -587,6 +587,8 @@ function removeKnownFiles() {
     path.join(claudeDir, 'hooks', 'cave-tools-mode-tracker.js'),
     path.join(claudeDir, 'hooks', 'cave-tools-subagent.js'),
     path.join(claudeDir, 'hooks', 'cave-tools-recover.js'),
+    path.join(claudeDir, 'hooks', 'cave-tools-bash-filter.js'),
+    path.join(claudeDir, 'hooks', 'cave-tools-bash-wrap.js'),
     path.join(claudeDir, 'hooks', 'cave-tools-statusline.sh'),
     path.join(claudeDir, 'hooks', 'cave-tools-statusline.ps1'),
     path.join(claudeDir, 'hooks', 'statusline-wrapper.sh'),

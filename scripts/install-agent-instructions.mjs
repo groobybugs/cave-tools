@@ -1690,6 +1690,8 @@ function installCaveToolsClaudeHooks() {
     ['hooks/cave-tools-statusline.ps1', path.join(hooksDir, 'cave-tools-statusline.ps1'), 0o644],
     ['hooks/statusline-wrapper.sh', path.join(hooksDir, 'statusline-wrapper.sh'), 0o755],
     ['hooks/cave-tools-redirect.sh', path.join(hooksDir, 'cave-tools-redirect.sh'), 0o755],
+    ['hooks/cave-tools-bash-filter.js', path.join(hooksDir, 'cave-tools-bash-filter.js'), 0o755],
+    ['hooks/cave-tools-bash-wrap.js', path.join(hooksDir, 'cave-tools-bash-wrap.js'), 0o755],
     ['skills/cave-tools/SKILL.md', path.join(skillsDir, 'SKILL.md'), 0o644],
     ['commands/cave-tools.md', path.join(commandsDir, 'cave-tools.md'), 0o644],
   ];
@@ -1773,6 +1775,19 @@ function installCaveToolsClaudeHooks() {
       timeout: 3,
     });
   }
+
+  // Native Bash: compress output after it runs (default on), and the opt-in
+  // command wrap (no-op unless CAVE_TOOLS_WRAP_BASH=1). Same as hooks.json.
+  upsertHookHandler(settings, 'PostToolUse', 'Bash', {
+    type: 'command',
+    command: `"${nodeBin}" "${path.join(hooksDir, 'cave-tools-bash-filter.js')}"`,
+    timeout: 8,
+  });
+  upsertHookHandler(settings, 'PreToolUse', 'Bash', {
+    type: 'command',
+    command: `"${nodeBin}" "${path.join(hooksDir, 'cave-tools-bash-wrap.js')}"`,
+    timeout: 3,
+  });
 
   upsertHookHandler(settings, 'PostToolUse', 'mcp__cave-tools__.*', {
     type: 'command',
