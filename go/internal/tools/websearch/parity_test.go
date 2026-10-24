@@ -234,6 +234,16 @@ func TestParityHandler(t *testing.T) {
 			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("null timeout")},
 		},
 		{
+			name:    "null livecrawl and type",
+			args:    map[string]any{"query": "abc", "provider": "exa", "livecrawl": nil, "type": nil, "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("null livecrawl")},
+		},
+		{
+			name:    "livecrawl preferred deep",
+			args:    map[string]any{"query": "abc", "provider": "exa", "livecrawl": "preferred", "type": "deep", "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("preferred deep")},
+		},
+		{
 			name:    "null num results",
 			args:    map[string]any{"query": "abc", "provider": "exa", "numResults": nil, "timeout": float64(2)},
 			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("null numResults")},
@@ -251,6 +261,18 @@ func TestParityHandler(t *testing.T) {
 		{
 			name: "null query",
 			args: map[string]any{"query": nil},
+		},
+		{
+			// JSON.stringify leaves U+2028/U+2029 raw and only escapes C0
+			// controls; Go's encoder must match byte for byte.
+			name:    "jsonrpc string escaping",
+			args:    map[string]any{"query": "line\u2028sep \"q\" \\\n\t\u0001 </&>", "provider": "exa", "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("escaped")},
+		},
+		{
+			name:    "jsonrpc string escaping parallel",
+			args:    map[string]any{"query": "line\u2028sep \"q\" \\\n\t\u0001 </&>", "provider": "parallel", "timeout": float64(2)},
+			fixture: fixture{status: 200, contentType: "application/json", body: directPayload("escaped parallel")},
 		},
 		{
 			name:    "env provider",

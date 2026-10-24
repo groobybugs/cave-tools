@@ -440,13 +440,6 @@ func convertHtmlToMarkdown(html string) string {
 			out = append(out, "\n\n"+marker+" ")
 		} else if tag == "br" && !closing {
 			out = append(out, "\n")
-		} else if hasTag(blockTags, tag) || tag == "body" || tag == "html" {
-			if !closing && !self && len(out) > 0 && !lastIsNewline() {
-				out = append(out, "\n")
-			}
-			if (closing || self) && len(out) > 0 && !lastIsNewline() {
-				out = append(out, "\n")
-			}
 		} else if tag == "a" && !closing && attrs["href"] != "" {
 			linkHrefStack = append(linkHrefStack, attrs["href"])
 			out = append(out, "[")
@@ -512,6 +505,13 @@ func convertHtmlToMarkdown(html string) string {
 				out = append(out, "\n"+strings.Repeat("  ", len(listStack)-1)+marker)
 			} else {
 				out = append(out, "\n- ")
+			}
+		} else if hasTag(blockTags, tag) || tag == "body" || tag == "html" {
+			if !closing && !self && len(out) > 0 && !lastIsNewline() {
+				out = append(out, "\n")
+			}
+			if (closing || self) && len(out) > 0 && !lastIsNewline() {
+				out = append(out, "\n")
 			}
 		}
 	}

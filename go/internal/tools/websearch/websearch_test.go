@@ -181,6 +181,22 @@ func TestSelectProvider(t *testing.T) {
 	}
 }
 
+func TestQuoteJSONString(t *testing.T) {
+	tests := []struct{ input, want string }{
+		{`a"b\c`, `"a\"b\\c"`},
+		{"\n\t", `"\n\t"`},
+		{"\u0001\u001f", `"\u0001\u001f"`},
+		{"<&>", `"<&>"`},
+		{"\u2028\u2029", "\"\u2028\u2029\""},
+		{"plain", `"plain"`},
+	}
+	for _, test := range tests {
+		if got := quoteJSONString(test.input); got != test.want {
+			t.Fatalf("quoteJSONString(%q) = %s, want %s", test.input, got, test.want)
+		}
+	}
+}
+
 func TestExaURL(t *testing.T) {
 	if got := exaUrl(""); got != ExaURL {
 		t.Fatalf("exaUrl(\"\") = %q", got)

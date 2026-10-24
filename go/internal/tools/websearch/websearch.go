@@ -297,17 +297,61 @@ type mcpParams struct {
 }
 
 type exaArguments struct {
-	Query                string `json:"query"`
-	Type                 string `json:"type"`
-	NumResults           int    `json:"numResults"`
-	Livecrawl            string `json:"livecrawl"`
-	ContextMaxCharacters *int   `json:"contextMaxCharacters,omitempty"`
+	Query                jsonString `json:"query"`
+	Type                 jsonString `json:"type"`
+	NumResults           int        `json:"numResults"`
+	Livecrawl            jsonString `json:"livecrawl"`
+	ContextMaxCharacters *int       `json:"contextMaxCharacters,omitempty"`
 }
 
 type parallelArguments struct {
-	Objective     string   `json:"objective"`
-	SearchQueries []string `json:"search_queries"`
-	SessionID     string   `json:"session_id"`
+	Objective     jsonString   `json:"objective"`
+	SearchQueries []jsonString `json:"search_queries"`
+	SessionID     jsonString   `json:"session_id"`
+}
+
+// jsonString marshals exactly like JSON.stringify: no HTML escaping and
+// U+2028/U+2029 left raw (encoding/json escapes them).
+type jsonString string
+
+func (value jsonString) MarshalJSON() ([]byte, error) {
+	return []byte(quoteJSONString(string(value))), nil
+}
+
+// quoteJSONString is JSON.stringify's string quoting: quote, backslash,
+// the usual control escapes and other C0 controls are escaped; everything
+// else stays raw.
+func quoteJSONString(value string) string {
+	var out strings.Builder
+	out.Grow(len(value) + 2)
+	out.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '"':
+			out.WriteString(`\"`)
+		case '\\':
+			out.WriteString(`\\`)
+		case '\b':
+			out.WriteString(`\b`)
+		case '\f':
+			out.WriteString(`\f`)
+		case '\n':
+			out.WriteString(`\n`)
+		case '\r':
+			out.WriteString(`\r`)
+		case '\t':
+			out.WriteString(`\t`)
+		default:
+			if r < 0x20 {
+				out.WriteString(`\u`)
+				out.WriteString(strconv.FormatInt(int64(r)+0x10000, 16)[1:])
+			} else {
+				out.WriteRune(r)
+			}
+		}
+	}
+	out.WriteByte('"')
+	return out.String()
 }
 
 // marshalRequest encodes the JSON-RPC body like JSON.stringify: no HTML
@@ -381,10 +425,10 @@ func handler(ctx context.Context, args map[string]any) (types.ToolResult, error)
 			exaUrl(envValue(ctx, "EXA_API_KEY")),
 			"web_search_exa",
 			exaArguments{
-				Query:                input.query,
-				Type:                 input.typ,
+				Query:                jsonString(input.query),
+				Type:                 jsonString(input.typ),
 				NumResults:           input.numResults,
-				Livecrawl:            input.livecrawl,
+				Livecrawl:            jsonString(input.livecrawl),
 				ContextMaxCharacters: input.contextMaxCharacters,
 			},
 			nil,
@@ -400,9 +444,9 @@ func handler(ctx context.Context, args map[string]any) (types.ToolResult, error)
 			ParallelURL,
 			"web_search",
 			parallelArguments{
-				Objective:     input.query,
-				SearchQueries: []string{input.query},
-				SessionID:     checksum(input.query),
+				Objective:     jsonString(input.query),
+				SearchQueries: []jsonString{jsonString(input.query)},
+				SessionID:     jsonString(checksum(input.query)),
 			},
 			headers,
 			input.timeout,

@@ -101,6 +101,14 @@ func newFixtureServer(t *testing.T) *httptest.Server {
 		w.Header().Set("content-type", "text/plain")
 		_, _ = w.Write([]byte(strings.Repeat("x", 6*1024*1024)))
 	})
+	mux.HandleFunc("/lists", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<ul><li>one</li><li>two</li></ul><ol><li>first</li><li>second</li></ol><blockquote>quoted</blockquote>"))
+	})
+	mux.HandleFunc("/prototype", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<constructor>Alpha</constructor><toString>Beta</toString><h2>Real</h2>"))
+	})
 	mux.HandleFunc("/long", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "text/html; charset=utf-8")
 		var page strings.Builder
@@ -307,12 +315,12 @@ func TestConvertHtmlToMarkdown(t *testing.T) {
 func TestConvertHtmlToMarkdownFeatures(t *testing.T) {
 	tests := []struct{ name, input, want string }{
 		{"emphasis", "<p>a <em>b</em> <strong>c</strong> <b>d</b> <i>e</i></p>", "a *b* **c** **d** *e*"},
-		// li and blockquote are BLOCK_TAGS, so their marker branches below are
-		// unreachable: TS emits plain block text for both. Ported as-is.
-		{"unordered list", "<ul><li>one</li><li>two</li></ul>", "one\ntwo"},
-		{"ordered list", "<ol><li>one</li><li>two</li></ol>", "one\ntwo"},
-		{"nested list", "<ul><li>a<ul><li>b</li></ul></li></ul>", "a\nb"},
-		{"blockquote", "<blockquote>q</blockquote>", "q"},
+		{"unordered list", "<ul><li>one</li><li>two</li></ul>", "- one\n\n- two"},
+		{"ordered list", "<ol><li>one</li><li>two</li></ol>", "1. one\n\n2. two"},
+		// "  " indentation collapses to one space in the final whitespace pass.
+		{"nested list", "<ul><li>a<ul><li>b</li></ul></li></ul>", "- a\n\n - b"},
+		{"blockquote", "<blockquote>q</blockquote>", "> q"},
+		{"prototype tag names are ordinary", "<constructor>Alpha</constructor><toString>Beta</toString><h2>Real</h2>", "AlphaBeta\n\n## Real"},
 		{"inline code", "<p>run <code>x</code></p>", "run `x`"},
 		{"links", `<p><a href="/a">a</a> and <a href="/b">b</a></p>`, "[a](/a) and [b](/b)"},
 		{"nested skip tags", "<noscript><style>x</style>hidden</noscript><p>shown</p>", "shown"},
@@ -324,6 +332,29 @@ func TestConvertHtmlToMarkdownFeatures(t *testing.T) {
 				t.Fatalf("markdown = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+// Ports scripts/test-port-bugs.mjs 16: list markers and blockquote prefixes.
+func TestPortBugs16ListMarkers(t *testing.T) {
+	html := "<ul><li>one</li><li>two</li></ul><ol><li>first</li><li>second</li></ol><blockquote>quoted</blockquote>"
+	wantMarkdown := "- one\n\n- two\n\n1. first\n\n2. second\n\n> quoted"
+	if got := convertHtmlToMarkdown(html); got != wantMarkdown {
+		t.Fatalf("markdown = %q, want %q", got, wantMarkdown)
+	}
+	if got, want := extractTextFromHtml(html), "one\ntwo\nfirst\nsecond\nquoted"; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+}
+
+// Ports scripts/test-port-bugs.mjs 17: inherited object keys are ordinary tags.
+func TestPortBugs17InheritedObjectKeys(t *testing.T) {
+	html := "<constructor>Alpha</constructor><toString>Beta</toString><h2>Real</h2>"
+	if got, want := convertHtmlToMarkdown(html), "AlphaBeta\n\n## Real"; got != want {
+		t.Fatalf("markdown = %q, want %q", got, want)
+	}
+	if got, want := extractTextFromHtml(html), "AlphaBetaReal"; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
 	}
 }
 
