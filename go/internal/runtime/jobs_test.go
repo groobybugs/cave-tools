@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -36,7 +37,7 @@ func TestMain(m *testing.M) {
 // startAndWait starts a job and waits for it to settle.
 func jobsStartAndWait(t *testing.T, command, session string) *storage.JobRecord {
 	t.Helper()
-	record, err := StartJob(StartJobInput{Command: command, SessionID: session})
+	record, err := StartJob(context.Background(), StartJobInput{Command: command, SessionID: session})
 	if err != nil {
 		t.Fatalf("StartJob(%q): %v", command, err)
 	}
@@ -144,7 +145,7 @@ func TestStartJobExitCode(t *testing.T) {
 
 // Mirrors test.mjs case 3 (stop): stopJob reports killed and the process dies.
 func TestStopJobKillsProcess(t *testing.T) {
-	record, err := StartJob(StartJobInput{Command: "sleep 30", SessionID: "test-jobs-stop"})
+	record, err := StartJob(context.Background(), StartJobInput{Command: "sleep 30", SessionID: "test-jobs-stop"})
 	if err != nil {
 		t.Fatalf("StartJob: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestStopJobKillsProcess(t *testing.T) {
 		t.Fatalf("signal = %v, want SIGTERM", stopped.Signal)
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for isProcessAlive(record.Pid) {
+	for IsProcessAlive(int(record.Pid)) {
 		if time.Now().After(deadline) {
 			t.Fatalf("pid %d still alive after SIGTERM", record.Pid)
 		}
@@ -385,7 +386,7 @@ func TestTailFileBytesAndSize(t *testing.T) {
 // worker later records structured completion; adopted wait polls and returns
 // before its timeout.
 func TestWaitForJobAdoptedAfterRestart(t *testing.T) {
-	record, err := StartJob(StartJobInput{
+	record, err := StartJob(context.Background(), StartJobInput{
 		Command:   "sleep 1; printf durable-restart; exit 4",
 		SessionID: "test-jobs-adopted",
 	})

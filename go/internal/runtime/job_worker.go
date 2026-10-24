@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"syscall"
 	"time"
 )
 
@@ -48,38 +47,27 @@ func (w *jobWorker) run(shell, command string) int {
 	if err != nil {
 		return w.finish(jobInt64Ptr(-1), nil, err)
 	}
-	cmd := exec.Command(shell, "-c", command)
+	cmd := shellCommand(shell, command)
+	// TS passes windowsHide: process.platform === "win32"; no `detached`.
+	configureSpawn(cmd, false)
 	cmd.Env = os.Environ()
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
-		return w.finish(jobInt64Ptr(-1), nil, jobSpawnError(err, shell))
+		return w.finish(jobInt64Ptr(-1), nil, spawnError(shell, err))
 	}
 	_ = logFile.Close()
 
-	err = cmd.Wait()
-	if err == nil {
-		return w.finish(jobInt64Ptr(0), nil, nil)
-	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		return w.finish(jobInt64Ptr(-1), nil, err)
-	}
-	status, ok := exitErr.Sys().(syscall.WaitStatus)
-	if !ok {
-		return w.finish(jobInt64Ptr(-1), nil, nil)
-	}
-	if status.Signaled() {
-		var signal *string
-		if name := nodeSignalName(status.Signal()); name != "" {
-			signal = &name
+	if err := cmd.Wait(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			return w.finish(jobInt64Ptr(-1), nil, err)
 		}
-		return w.finish(nil, signal, nil)
 	}
-	code := int64(status.ExitStatus())
-	return w.finish(&code, nil, nil)
+	code, signal := waitResult(cmd)
+	return w.finish(jobInt64From(code), signal, nil)
 }
 
 // finish writes the worker-error line, the structured result sidecar and the
@@ -170,40 +158,12 @@ func jobInt64Ptr(value int64) *int64 {
 	return &value
 }
 
-// jobSpawnError renders a spawn failure the way libuv does, because TS logs
-// JSON.stringify(error.message) as "spawn <shell> <CODE>". Non-errno failures
-// keep Go's message.
-func jobSpawnError(err error, shell string) error {
-	var errno syscall.Errno
-	if !errors.As(err, &errno) {
-		return err
+// jobInt64From widens the process helper's exit code for storage and the
+// result sidecar.
+func jobInt64From(code *int) *int64 {
+	if code == nil {
+		return nil
 	}
-	var code string
-	switch errno {
-	case syscall.EPERM:
-		code = "EPERM"
-	case syscall.ENOENT:
-		code = "ENOENT"
-	case syscall.EACCES:
-		code = "EACCES"
-	case syscall.EMFILE:
-		code = "EMFILE"
-	case syscall.ENFILE:
-		code = "ENFILE"
-	case syscall.EAGAIN:
-		code = "EAGAIN"
-	case syscall.ENOMEM:
-		code = "ENOMEM"
-	case syscall.E2BIG:
-		code = "E2BIG"
-	case syscall.ENOEXEC:
-		code = "ENOEXEC"
-	case syscall.ENOTDIR:
-		code = "ENOTDIR"
-	case syscall.EINVAL:
-		code = "EINVAL"
-	default:
-		return err
-	}
-	return errors.New("spawn " + shell + " " + code)
+	value := int64(*code)
+	return &value
 }

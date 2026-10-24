@@ -2,19 +2,18 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/groobybugs/cave-tools/go/internal/storage"
@@ -35,6 +34,9 @@ const (
 const JobWorkerCommand = "__job-worker"
 
 // port of src/runtime/jobs.ts:EXIT_MARKER
+//
+// TODO(jsre): compile through go/internal/jsre once W1a lands it, so `\s`
+// keeps JS whitespace semantics.
 var exitMarker = regexp.MustCompile(`\[cave-job exit=(-?\d+)(?: signal=(\w+))?\]\s*$`)
 
 // closeWaiters are the close-waiters for jobs started by this server process,
@@ -74,7 +76,10 @@ type StartJobInput struct {
 
 // StartJob launches a detached worker for command and records the job row.
 // port of src/runtime/jobs.ts:startJob
-func StartJob(input StartJobInput) (*storage.JobRecord, error) {
+//
+// ctx carries the call environment the worker inherits, like TS's ambient
+// getEnv() in startDurableBackgroundCommand.
+func StartJob(ctx context.Context, input StartJobInput) (*storage.JobRecord, error) {
 	if err := os.MkdirAll(storage.JobsDir(), 0o700); err != nil {
 		return nil, err
 	}
@@ -91,20 +96,18 @@ func StartJob(input StartJobInput) (*storage.JobRecord, error) {
 		return nil, err
 	}
 
-	handle, err := startDurableBackgroundCommand(input.Command, durableStartOptions{
-		cwd:        input.Workdir,
-		shell:      defaultShell(),
-		jobID:      jobID,
-		logPath:    logPath,
-		resultPath: resultPath,
+	handle := StartDurableBackgroundCommand(ctx, input.Command, StartDurableBackgroundOptions{
+		Cwd:        jobWorkdir(input.Workdir),
+		Shell:      DefaultShell(ctx),
+		WorkerPath: JobWorkerCommand,
+		JobID:      jobID,
+		LogPath:    logPath,
+		ResultPath: resultPath,
 	})
-	if err != nil {
-		return nil, err
-	}
 
 	record := storage.JobRecord{
 		JobID:     jobID,
-		Pid:       handle.pid,
+		Pid:       int64(handle.Pid),
 		SessionID: input.SessionID,
 		Command:   input.Command,
 		Workdir:   input.Workdir,
@@ -118,10 +121,10 @@ func StartJob(input StartJobInput) (*storage.JobRecord, error) {
 
 	registerCloseWaiter(jobID)
 
-	handle.onClose(func(code *int64, signal *string) {
+	handle.OnClose(func(code *int, signal *string) {
 		completion := recoverFromResult(jobID, resultPath)
 		endedAt := time.Now().UnixMilli()
-		exitCode := code
+		exitCode := jobInt64From(code)
 		completionSignal := signal
 		if completion != nil {
 			endedAt = completion.EndedAt
@@ -143,6 +146,15 @@ func StartJob(input StartJobInput) (*storage.JobRecord, error) {
 	})
 
 	return &record, nil
+}
+
+// jobWorkdir maps the optional workdir onto the process helper's empty-string
+// "inherit" convention.
+func jobWorkdir(workdir *string) string {
+	if workdir == nil {
+		return ""
+	}
+	return *workdir
 }
 
 // durableJobResult is the worker's structured completion sidecar.
@@ -290,7 +302,7 @@ func GetJobInfo(jobID string) (*storage.JobRecord, error) {
 	if job == nil || job.State != storage.JobRunning {
 		return job, nil
 	}
-	if hasCloseWaiter(jobID) || isProcessAlive(job.Pid) {
+	if hasCloseWaiter(jobID) || (job.Pid > 0 && IsProcessAlive(int(job.Pid))) {
 		return job, nil
 	}
 
@@ -380,13 +392,17 @@ func StopJob(jobID string, signal ...string) (*storage.JobRecord, error) {
 		EndedAt: &endedAt,
 		Signal:  &requestedSignal,
 	})
-	killProcessGroup(job.Pid, requestedSignal)
-	go func(pid int64) {
-		time.Sleep(forceKillGraceMS * time.Millisecond)
-		if isProcessAlive(pid) {
-			killProcessGroup(pid, "SIGKILL")
-		}
-	}(job.Pid)
+	// pid 0 means the worker never started (a Go-only state: TS fails the
+	// insert before storing it). Signalling 0 would hit this process group.
+	if job.Pid > 0 {
+		KillProcessGroup(int(job.Pid), requestedSignal)
+		go func(pid int64) {
+			time.Sleep(forceKillGraceMS * time.Millisecond)
+			if IsProcessAlive(int(pid)) {
+				KillProcessGroup(int(pid), "SIGKILL")
+			}
+		}(job.Pid)
+	}
 
 	returnedAt := time.Now().UnixMilli()
 	result := *job
@@ -700,288 +716,4 @@ func PruneJobs(maxAgeMS ...int64) (int, error) {
 		}
 	}
 	return removed, nil
-}
-
-// ── Process helpers ────────────────────────────────────────────────────────
-// W1b owns runtime/process.go. Until it lands these are the minimal unexported
-// equivalents of the four src/runtime/process.ts helpers jobs.ts uses. POSIX
-// only (the port targets Linux); W1b's package will replace them.
-
-// defaultShell mirrors process.ts:defaultShell for POSIX platforms.
-// port of src/runtime/process.ts:defaultShell
-func defaultShell() string {
-	return "/bin/sh"
-}
-
-// isProcessAlive mirrors process.ts:isProcessAlive.
-// port of src/runtime/process.ts:isProcessAlive
-func isProcessAlive(pid int64) bool {
-	return syscall.Kill(int(pid), 0) == nil
-}
-
-// killProcessGroup mirrors process.ts:killProcessGroup (negative pid).
-// port of src/runtime/process.ts:killProcessGroup
-func killProcessGroup(pid int64, signal string) bool {
-	sig, ok := nodeSignalToSyscall(signal)
-	if !ok {
-		return false
-	}
-	return syscall.Kill(-int(pid), sig) == nil
-}
-
-// durableStartOptions is startDurableBackgroundCommand's option object.
-// port of src/runtime/process.ts:StartDurableBackgroundOptions
-type durableStartOptions struct {
-	cwd        *string
-	shell      string
-	jobID      string
-	logPath    string
-	resultPath string
-}
-
-// closeListener receives the worker's exit code (nil when signalled) and the
-// Node-style signal name.
-// port of src/runtime/process.ts:CloseListener
-type closeListener func(code *int64, signal *string)
-
-// backgroundHandle is the started worker.
-// port of src/runtime/process.ts:BackgroundHandle
-type backgroundHandle struct {
-	pid     int64
-	onClose func(cb closeListener)
-}
-
-// startDurableBackgroundCommand starts a detached worker that owns the command
-// and writes its structured completion result before exiting.
-// port of src/runtime/process.ts:startDurableBackgroundCommand
-func startDurableBackgroundCommand(command string, options durableStartOptions) (*backgroundHandle, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return nil, err
-	}
-	args := []string{
-		JobWorkerCommand,
-		options.jobID,
-		options.logPath,
-		options.resultPath,
-		options.shell,
-		command,
-	}
-	cmd := exec.Command(executable, args...)
-	if options.cwd != nil {
-		cmd.Dir = *options.cwd
-	}
-	cmd.Env = os.Environ()
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	// Node's `detached: true` on POSIX: new session/process group, so
-	// killProcessGroup can signal the worker and the shell it spawned.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-
-	var (
-		mu        sync.Mutex
-		settled   bool
-		finalCode *int64
-		finalSig  *string
-		listeners []closeListener
-	)
-	fire := func(code *int64, signal *string) {
-		mu.Lock()
-		if settled {
-			mu.Unlock()
-			return
-		}
-		settled = true
-		finalCode = code
-		finalSig = signal
-		pending := listeners
-		listeners = nil
-		mu.Unlock()
-		for _, cb := range pending {
-			cb(code, signal)
-		}
-	}
-
-	go func() {
-		err := cmd.Wait()
-		if err == nil {
-			code := int64(0)
-			fire(&code, nil)
-			return
-		}
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) {
-			fire(nil, nil)
-			return
-		}
-		status, ok := exitErr.Sys().(syscall.WaitStatus)
-		if !ok {
-			code := int64(-1)
-			fire(&code, nil)
-			return
-		}
-		if status.Signaled() {
-			var signal *string
-			if name := nodeSignalName(status.Signal()); name != "" {
-				signal = &name
-			}
-			fire(nil, signal)
-			return
-		}
-		code := int64(status.ExitStatus())
-		fire(&code, nil)
-	}()
-
-	return &backgroundHandle{
-		pid: int64(cmd.Process.Pid),
-		onClose: func(cb closeListener) {
-			mu.Lock()
-			if settled {
-				code, signal := finalCode, finalSig
-				mu.Unlock()
-				cb(code, signal)
-				return
-			}
-			listeners = append(listeners, cb)
-			mu.Unlock()
-		},
-	}, nil
-}
-
-// nodeSignalToSyscall maps a Node signal name to its POSIX signal.
-func nodeSignalToSyscall(name string) (syscall.Signal, bool) {
-	switch name {
-	case "SIGHUP":
-		return syscall.SIGHUP, true
-	case "SIGINT":
-		return syscall.SIGINT, true
-	case "SIGQUIT":
-		return syscall.SIGQUIT, true
-	case "SIGILL":
-		return syscall.SIGILL, true
-	case "SIGTRAP":
-		return syscall.SIGTRAP, true
-	case "SIGABRT":
-		return syscall.SIGABRT, true
-	case "SIGBUS":
-		return syscall.SIGBUS, true
-	case "SIGFPE":
-		return syscall.SIGFPE, true
-	case "SIGKILL":
-		return syscall.SIGKILL, true
-	case "SIGUSR1":
-		return syscall.SIGUSR1, true
-	case "SIGSEGV":
-		return syscall.SIGSEGV, true
-	case "SIGUSR2":
-		return syscall.SIGUSR2, true
-	case "SIGPIPE":
-		return syscall.SIGPIPE, true
-	case "SIGALRM":
-		return syscall.SIGALRM, true
-	case "SIGTERM":
-		return syscall.SIGTERM, true
-	case "SIGCHLD":
-		return syscall.SIGCHLD, true
-	case "SIGCONT":
-		return syscall.SIGCONT, true
-	case "SIGSTOP":
-		return syscall.SIGSTOP, true
-	case "SIGTSTP":
-		return syscall.SIGTSTP, true
-	case "SIGTTIN":
-		return syscall.SIGTTIN, true
-	case "SIGTTOU":
-		return syscall.SIGTTOU, true
-	case "SIGURG":
-		return syscall.SIGURG, true
-	case "SIGXCPU":
-		return syscall.SIGXCPU, true
-	case "SIGXFSZ":
-		return syscall.SIGXFSZ, true
-	case "SIGVTALRM":
-		return syscall.SIGVTALRM, true
-	case "SIGPROF":
-		return syscall.SIGPROF, true
-	case "SIGWINCH":
-		return syscall.SIGWINCH, true
-	case "SIGIO":
-		return syscall.SIGIO, true
-	case "SIGPWR":
-		return syscall.SIGPWR, true
-	case "SIGSYS":
-		return syscall.SIGSYS, true
-	}
-	return 0, false
-}
-
-// nodeSignalName maps a POSIX signal to the name Node reports in close events.
-func nodeSignalName(sig syscall.Signal) string {
-	switch sig {
-	case syscall.SIGHUP:
-		return "SIGHUP"
-	case syscall.SIGINT:
-		return "SIGINT"
-	case syscall.SIGQUIT:
-		return "SIGQUIT"
-	case syscall.SIGILL:
-		return "SIGILL"
-	case syscall.SIGTRAP:
-		return "SIGTRAP"
-	case syscall.SIGABRT:
-		return "SIGABRT"
-	case syscall.SIGBUS:
-		return "SIGBUS"
-	case syscall.SIGFPE:
-		return "SIGFPE"
-	case syscall.SIGKILL:
-		return "SIGKILL"
-	case syscall.SIGUSR1:
-		return "SIGUSR1"
-	case syscall.SIGSEGV:
-		return "SIGSEGV"
-	case syscall.SIGUSR2:
-		return "SIGUSR2"
-	case syscall.SIGPIPE:
-		return "SIGPIPE"
-	case syscall.SIGALRM:
-		return "SIGALRM"
-	case syscall.SIGTERM:
-		return "SIGTERM"
-	case syscall.SIGCHLD:
-		return "SIGCHLD"
-	case syscall.SIGCONT:
-		return "SIGCONT"
-	case syscall.SIGSTOP:
-		return "SIGSTOP"
-	case syscall.SIGTSTP:
-		return "SIGTSTP"
-	case syscall.SIGTTIN:
-		return "SIGTTIN"
-	case syscall.SIGTTOU:
-		return "SIGTTOU"
-	case syscall.SIGURG:
-		return "SIGURG"
-	case syscall.SIGXCPU:
-		return "SIGXCPU"
-	case syscall.SIGXFSZ:
-		return "SIGXFSZ"
-	case syscall.SIGVTALRM:
-		return "SIGVTALRM"
-	case syscall.SIGPROF:
-		return "SIGPROF"
-	case syscall.SIGWINCH:
-		return "SIGWINCH"
-	case syscall.SIGIO:
-		return "SIGIO"
-	case syscall.SIGPWR:
-		return "SIGPWR"
-	case syscall.SIGSYS:
-		return "SIGSYS"
-	}
-	return ""
 }

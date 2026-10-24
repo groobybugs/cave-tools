@@ -120,6 +120,33 @@ testable without spawning a process.
 
 Non-Go files under `src/` (`src/plugins/**`) are not ported.
 
+### Durable job worker
+
+TS starts a background job by spawning
+`process.execPath dist/runtime/job-worker.js <jobId> <logPath> <resultPath> <shell> <command>`.
+Go has no separate worker script, so it re-executes its own binary and uses
+argv[1] as the worker selector; the remaining arguments keep TS's positions:
+
+```
+cave-tools-go __job-worker <jobId> <logPath> <resultPath> <shell> <command>
+```
+
+`runtime.JobWorkerCommand` is the selector (`"__job-worker"`). `jobs.StartJob`
+passes it as `StartDurableBackgroundOptions.WorkerPath` to
+`runtime.StartDurableBackgroundCommand`, which invokes the current executable
+with `WorkerPath` first. `cmd/cave-tools-go/main.go` must check for it before
+any flag parsing (W3k wiring):
+
+```go
+if len(os.Args) > 1 && os.Args[1] == runtime.JobWorkerCommand {
+    os.Exit(runtime.RunJobWorker(os.Args[2:]))
+}
+```
+
+The worker writes the same log header, `[cave-job exit=N signal=SIG]` marker
+and `<jobId>.result.json` sidecar as TS, so both implementations can adopt
+each other's running jobs.
+
 ## Package boundaries
 
 ```

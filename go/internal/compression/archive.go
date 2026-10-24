@@ -1,7 +1,7 @@
-// Package compression holds cave-tools' output compression and archive store.
+// Archive store: content-addressed output files plus their archive_meta rows.
 //
-// Port of src/compression/*.ts. The archive store shares its SQLite file,
-// data dir and archive layout with the TypeScript implementation.
+// Port of src/compression/archive.ts. The archive store shares its SQLite
+// file, data dir and archive layout with the TypeScript implementation.
 package compression
 
 import (
@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
 
 	"github.com/groobybugs/cave-tools/go/internal/storage"
 )
@@ -89,7 +88,7 @@ func StoreArchive(output, command string) (id string, path string, err error) {
 	if err := storage.RecordArchive(storage.ArchiveEntry{
 		ID:          id,
 		Command:     command,
-		SizeChars:   utf16Length(output),
+		SizeChars:   int64(utf16Length(output)),
 		CreatedAt:   time.Now().UnixMilli(),
 		ContentPath: archivedContentPath,
 	}); err != nil {
@@ -223,11 +222,6 @@ func GetArchiveStats() storage.ArchiveTotals {
 		return storage.ArchiveTotals{}
 	}
 	return totals
-}
-
-// utf16Length is JS string.length: UTF-16 code units, not bytes.
-func utf16Length(value string) int64 {
-	return int64(len(utf16.Encode([]rune(value))))
 }
 
 func minInt(a, b int) int {
