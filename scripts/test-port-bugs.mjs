@@ -193,5 +193,28 @@ await test("11 redaction keeps non-secret delimiters", () => {
   assert.doesNotMatch(out, /MIIEsecret|hunter2/);
 });
 
+await test("13 daemon control skips a malformed reply line instead of crashing", () => {
+  // Fake daemon on the real socket path: one garbage line, then the hello reply.
+  const script = `
+    const net = await import("node:net");
+    const fs = await import("node:fs");
+    const paths = await import(${JSON.stringify(join(ROOT, "dist/daemon/paths.js"))});
+    const control = await import(${JSON.stringify(join(ROOT, "dist/daemon/control.js"))});
+    paths.ensureSocketDir();
+    const sock = paths.socketPath();
+    try { fs.unlinkSync(sock); } catch {}
+    const server = net.createServer((c) => c.on("data", () => {
+      c.write("not json\\n" + JSON.stringify({ id: 1, result: { pid: 42, buildId: "b" } }) + "\\n");
+    }));
+    await new Promise((r) => server.listen(sock, r));
+    const code = await control.daemonStatus();
+    server.close();
+    process.exit(code);
+  `;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", env: process.env });
+  assert.equal(r.status, 0, r.stderr || r.stdout);
+  assert.match(r.stdout, /running pid 42/);
+});
+
 console.log(`port-bugs: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
