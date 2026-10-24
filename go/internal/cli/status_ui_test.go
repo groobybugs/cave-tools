@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -460,5 +461,16 @@ func TestRenderStatusCLIVerboseGolden(t *testing.T) {
 	input.Verbose = true
 	if got := RenderStatusCLI(input); got != verboseGolden {
 		t.Fatalf("verbose status differs from TS golden:\n--- got ---\n%s\n--- want ---\n%s", got, verboseGolden)
+	}
+}
+
+// Expected values from dist/status-ui.js coloredMeter(NaN, 10, false|true).
+func TestColoredMeterNaNMatchesTS(t *testing.T) {
+	if got := ColoredMeter(math.NaN(), 10, false); got != "" {
+		t.Fatalf("ColoredMeter(NaN, plain) = %q, want empty", got)
+	}
+	want := "\x1b[38;5;240m\x1b[0m\x1b[38;5;240m\x1b[0m"
+	if got := ColoredMeter(math.NaN(), 10, true); got != want {
+		t.Fatalf("ColoredMeter(NaN, color) = %q, want %q", got, want)
 	}
 }

@@ -435,6 +435,8 @@ Accepted runtime deviations (W1b, Muse review):
 
 - Job `.result.json` with a fractional `exitCode` (only reachable by hand-editing the sidecar) is truncated to an integer in Go; TS keeps the fraction.
 
+- `daemon/control` (Go `bins` run / CLI exec helpers): output above the TS `maxBuffer` is parsed in Go instead of rejected with a maxBuffer error (Muse W2k, low).
+
 ### TS bugs found while porting
 
 - `src/storage/db.ts:595` (and the `try/catch` at `src/storage/db.ts:405-414`):
