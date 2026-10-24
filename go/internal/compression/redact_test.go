@@ -135,3 +135,47 @@ func TestRedactSecrets(t *testing.T) {
 		})
 	}
 }
+
+// TestRedactSecretsJSWhitespace is the Muse regression: JS \s matches NBSP and
+// U+FEFF, so a token separated from its label by one of those is still
+// redacted. Expected strings are the TS reference output.
+func TestRedactSecretsJSWhitespace(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "nbsp bearer token",
+			input: "Authorization: Bearer\u00a0abcdef123456",
+			want:  "Authorization: Bearer\u00a0[REDACTED:Bearer token]",
+		},
+		{
+			name:  "nbsp bearer token alone",
+			input: "bearer\u00a0abcdefgh12345678",
+			want:  "bearer\u00a0[REDACTED:Bearer token]",
+		},
+		{
+			name:  "nbsp authorization header",
+			input: "authorization: Basic\u00a0dXNlcjpwYXNz",
+			want:  "authorization: Basic\u00a0[REDACTED:Authorization header]",
+		},
+		{
+			name:  "bom before bearer",
+			input: "Authorization:\ufeffBearer\u00a0abcdef123456",
+			want:  "Authorization:\ufeffBearer\u00a0[REDACTED:Bearer token]",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := RedactSecrets(test.input)
+			if got != test.want {
+				t.Fatalf("RedactSecrets(%q) = %q, want %q", test.input, got, test.want)
+			}
+			if twice := RedactSecrets(got); twice != got {
+				t.Fatalf("RedactSecrets is not idempotent: %q -> %q", got, twice)
+			}
+		})
+	}
+}

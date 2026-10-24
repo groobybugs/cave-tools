@@ -85,3 +85,44 @@ func TestAggressiveCompress(t *testing.T) {
 		})
 	}
 }
+
+// TestAggressiveCompressJSWhitespace is the Muse regression: JS trimStart
+// strips U+FEFF, so a BOM before the shebang still preserves the shebang, and
+// a U+FEFF-only line counts as blank. Expected strings are the TS reference
+// output.
+func TestAggressiveCompressJSWhitespace(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		ext     string
+		want    string
+	}{
+		{
+			name:    "bom before python shebang",
+			content: "\ufeff#!/usr/bin/env python3\n# comment\n\n\nprint(1)\n",
+			ext:     ".py",
+			want:    "\ufeff#!/usr/bin/env python3\n\nprint(1)",
+		},
+		{
+			name:    "bom before ts shebang keeps following comment",
+			content: "\ufeff#!/usr/bin/env python3\n# comment\n\n\nprint(1)\n",
+			ext:     ".ts",
+			want:    "\ufeff#!/usr/bin/env python3\n# comment\n\nprint(1)",
+		},
+		{
+			name:    "bom only line is blank",
+			content: "const a = 1;\n\ufeff\n\n\nconst b = 2;\n",
+			ext:     ".ts",
+			want:    "const a = 1;\n\nconst b = 2;",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := AggressiveCompress(test.content, test.ext)
+			if got != test.want {
+				t.Fatalf("AggressiveCompress(%q, %q) = %q, want %q", test.content, test.ext, got, test.want)
+			}
+		})
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 )
 
 // SignatureKind is the declaration kind a signature line describes.
@@ -43,31 +45,31 @@ type signaturePattern struct {
 var tsPatterns = []signaturePattern{
 	{
 		kind: SigFn,
-		re:   regexp.MustCompile(`^(\s*)(export\s+)?(async\s+)?function\s+(\w+)(?:\s*<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([^{]+))?\s*\{?`),
+		re:   jsre.MustCompile(`^(\s*)(export\s+)?(async\s+)?function\s+(\w+)(?:\s*<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([^{]+))?\s*\{?`, ""),
 	},
 	{
 		kind: SigClass,
-		re:   regexp.MustCompile(`^(\s*)(export\s+)?(abstract\s+)?class\s+(\w+)`),
+		re:   jsre.MustCompile(`^(\s*)(export\s+)?(abstract\s+)?class\s+(\w+)`, ""),
 	},
 	{
 		kind: SigInterface,
-		re:   regexp.MustCompile(`^(\s*)(export\s+)?interface\s+(\w+)`),
+		re:   jsre.MustCompile(`^(\s*)(export\s+)?interface\s+(\w+)`, ""),
 	},
 	{
 		kind: SigType,
-		re:   regexp.MustCompile(`^(\s*)(export\s+)?type\s+(\w+)`),
+		re:   jsre.MustCompile(`^(\s*)(export\s+)?type\s+(\w+)`, ""),
 	},
 	{
 		kind: SigEnum,
-		re:   regexp.MustCompile(`^(\s*)(export\s+)?enum\s+(\w+)`),
+		re:   jsre.MustCompile(`^(\s*)(export\s+)?enum\s+(\w+)`, ""),
 	},
 	{
 		kind: SigConst,
-		re:   regexp.MustCompile(`^(\s*)(export\s+)?(const|let|var)\s+(\w+)(?:\s*:\s*([^=]+))?\s*=`),
+		re:   jsre.MustCompile(`^(\s*)(export\s+)?(const|let|var)\s+(\w+)(?:\s*:\s*([^=]+))?\s*=`, ""),
 	},
 	{
 		kind: SigFn,
-		re:   regexp.MustCompile(`^(\s*)(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(([^)]*)\)(?:\s*:\s*([^=]+))?\s*=>`),
+		re:   jsre.MustCompile(`^(\s*)(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(([^)]*)\)(?:\s*:\s*([^=]+))?\s*=>`, ""),
 	},
 }
 
@@ -76,31 +78,31 @@ var tsPatterns = []signaturePattern{
 var rustPatterns = []signaturePattern{
 	{
 		kind: SigFn,
-		re:   regexp.MustCompile(`^(\s*)(pub\s+)?(async\s+)?fn\s+(\w+)(?:\s*<[^>]*>)?\s*\(([^)]*)\)(?:\s*->\s*([^{]+))?\s*\{?`),
+		re:   jsre.MustCompile(`^(\s*)(pub\s+)?(async\s+)?fn\s+(\w+)(?:\s*<[^>]*>)?\s*\(([^)]*)\)(?:\s*->\s*([^{]+))?\s*\{?`, ""),
 	},
 	{
 		kind: SigClass,
-		re:   regexp.MustCompile(`^(\s*)(pub\s+)?struct\s+(\w+)`),
+		re:   jsre.MustCompile(`^(\s*)(pub\s+)?struct\s+(\w+)`, ""),
 	},
 	{
 		kind: SigEnum,
-		re:   regexp.MustCompile(`^(\s*)(pub\s+)?enum\s+(\w+)`),
+		re:   jsre.MustCompile(`^(\s*)(pub\s+)?enum\s+(\w+)`, ""),
 	},
 	{
 		kind: SigInterface,
-		re:   regexp.MustCompile(`^(\s*)(pub\s+)?trait\s+(\w+)`),
+		re:   jsre.MustCompile(`^(\s*)(pub\s+)?trait\s+(\w+)`, ""),
 	},
 	{
 		kind: SigType,
-		re:   regexp.MustCompile(`^(\s*)(pub\s+)?type\s+(\w+)`),
+		re:   jsre.MustCompile(`^(\s*)(pub\s+)?type\s+(\w+)`, ""),
 	},
 	{
 		kind: SigImpl,
-		re:   regexp.MustCompile(`^(\s*)impl\s+(?:(\w+)\s+for\s+)?(\w+)`),
+		re:   jsre.MustCompile(`^(\s*)impl\s+(?:(\w+)\s+for\s+)?(\w+)`, ""),
 	},
 	{
 		kind: SigConst,
-		re:   regexp.MustCompile(`^(\s*)(pub\s+)?(const|static)\s+(\w+)(?:\s*:\s*([^=]+))?\s*=`),
+		re:   jsre.MustCompile(`^(\s*)(pub\s+)?(const|static)\s+(\w+)(?:\s*:\s*([^=]+))?\s*=`, ""),
 	},
 }
 
@@ -117,7 +119,7 @@ func extractTsSignatures(content string) []Signature {
 
 			indent := utf16Length(match[1])
 			isExported := match[2] != ""
-			isAsync := strings.TrimSpace(match[3]) == "async"
+			isAsync := jsre.Trim(match[3]) == "async"
 
 			var name string
 			var params string
@@ -127,23 +129,23 @@ func extractTsSignatures(content string) []Signature {
 			case pattern.kind == SigFn && strings.Contains(match[0], "function"):
 				name = match[4]
 				params = match[5]
-				returnType = strings.TrimSpace(match[6])
+				returnType = jsre.Trim(match[6])
 			case pattern.kind == SigFn:
 				name = match[4]
 				params = match[6]
-				returnType = strings.TrimSpace(match[7])
+				returnType = jsre.Trim(match[7])
 			case pattern.kind == SigConst:
 				name = match[4]
-				returnType = strings.TrimSpace(match[5])
+				returnType = jsre.Trim(match[5])
 			default:
 				name = match[len(match)-1]
 			}
 
 			sigs = append(sigs, Signature{
 				Kind:       pattern.kind,
-				Name:       strings.TrimSpace(name),
-				Params:     strings.TrimSpace(params),
-				ReturnType: strings.TrimSpace(returnType),
+				Name:       jsre.Trim(name),
+				Params:     jsre.Trim(params),
+				ReturnType: jsre.Trim(returnType),
 				IsAsync:    isAsync,
 				IsExported: isExported,
 				Indent:     indent,
@@ -167,7 +169,7 @@ func extractRustSignatures(content string) []Signature {
 
 			indent := utf16Length(match[1])
 			isExported := match[2] != ""
-			isAsync := strings.TrimSpace(match[3]) == "async"
+			isAsync := jsre.Trim(match[3]) == "async"
 
 			var name string
 			var params string
@@ -177,24 +179,24 @@ func extractRustSignatures(content string) []Signature {
 			case SigFn:
 				name = match[4]
 				params = match[5]
-				returnType = strings.TrimSpace(match[6])
+				returnType = jsre.Trim(match[6])
 			case SigImpl:
 				name = match[3]
 				if forType := match[2]; forType != "" {
-					returnType = "for " + strings.TrimSpace(forType)
+					returnType = "for " + jsre.Trim(forType)
 				}
 			case SigConst:
 				name = match[4]
-				returnType = strings.TrimSpace(match[5])
+				returnType = jsre.Trim(match[5])
 			default:
 				name = match[len(match)-1]
 			}
 
 			sigs = append(sigs, Signature{
 				Kind:       pattern.kind,
-				Name:       strings.TrimSpace(name),
-				Params:     strings.TrimSpace(params),
-				ReturnType: strings.TrimSpace(returnType),
+				Name:       jsre.Trim(name),
+				Params:     jsre.Trim(params),
+				ReturnType: jsre.Trim(returnType),
 				IsAsync:    isAsync,
 				IsExported: isExported,
 				Indent:     indent,
@@ -218,10 +220,14 @@ func ExtractSignatures(content string, ext string) []Signature {
 	}
 }
 
-// compactType collapses whitespace runs in a type expression.
+// whitespaceRunRE is the inline /\s+/g regex in compactType.
+var whitespaceRunRE = jsre.MustCompile(`\s+`, "g")
+
+// compactType collapses whitespace runs in a type expression:
+// typeStr.replace(/\s+/g, " ").trim() in TS.
 // port of src/compression/signatures.ts:compactType
 func compactType(typeStr string) string {
-	return strings.Join(strings.Fields(typeStr), " ")
+	return jsre.Trim(whitespaceRunRE.ReplaceAllString(typeStr, " "))
 }
 
 // formatSignature renders one signature line.

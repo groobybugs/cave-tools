@@ -18,6 +18,7 @@ go/
   internal/runtime/             per-call context, processes, paths, bins, jobs
   internal/storage/             data dir + SQLite (stats, archives, jobs)
   internal/compression/         output compression + archiving
+  internal/jsre/                JS regex + whitespace semantics for ported code
   internal/tools/               one file per MCP tool
   internal/server/              MCP stdio server, dispatch, tool list, profile
   internal/daemon/              daemon server, client, control, socket paths
@@ -120,6 +121,10 @@ testable without spawning a process.
 
 Non-Go files under `src/` (`src/plugins/**`) are not ported.
 
+`go/internal/jsre` has no TS counterpart: it is the helper that makes ported
+regexes and whitespace helpers behave like JavaScript (see
+"Regex and whitespace rule" below).
+
 ### Durable job worker
 
 TS starts a background job by spawning
@@ -153,7 +158,8 @@ each other's running jobs.
 types     <- nobody (leaf)
 runtime   <- types
 storage   <- nobody (stdlib + modernc.org/sqlite only; data-dir is SQLite-free)
-compression <- types, runtime, storage
+jsre      <- nobody (leaf; stdlib only)
+compression <- types, runtime, storage, jsre
 tools     <- types, runtime, storage, compression
 server    <- types, runtime, storage, compression, tools
 daemon    <- types, runtime, storage, compression, tools
@@ -194,6 +200,58 @@ Rules:
 - Go files are `snake_case.go`; Go tests are `snake_case_test.go` in the same
   package (white-box), because several assertions read unexported state such as
   the DB singleton.
+
+## Regex and whitespace rule
+
+ECMAScript and RE2 disagree on the two things the compression code depends on.
+Every regex ported from TS **must** be compiled through `go/internal/jsre`, and
+every JS `trim`/`split(/\s+/)` **must** use its helpers:
+
+```go
+var re = jsre.MustCompile(`^ssh\s`, "i") // the original TS source + TS flags
+trimmed := jsre.Trim(command)            // not strings.TrimSpace
+parts := jsre.SplitWS(line)              // not strings.Fields
+```
+
+- Pass the TS regex source verbatim (including `\/` and escapes) and the TS
+  flags as the second argument; `jsre` translates before compiling, so a
+  reviewer can diff the Go literal against `src/` by eye. Never call
+  `regexp.Compile`/`regexp.MustCompile` on a TS pattern, and never re-implement
+  `\s` by hand at a call site.
+- Supported flags: `g` (no-op: use `FindAll*`/`ReplaceAll*`), `i`, `m`, `s`,
+  `u` (no-op for pattern syntax). Anything else is an error instead of being
+  silently ignored.
+- `jsre` rejects constructs RE2 cannot express — lookbehind, lookahead,
+  backreferences, named groups, octal escapes, unknown escapes — with an error
+  naming the construct. Port such a regex by hand and add an equivalence test
+  on the TS test inputs (see the porting rules).
+
+| JS construct | RE2 alone | `jsre` translation |
+| --- | --- | --- |
+| `\s` | ASCII only | ECMAScript WhiteSpace + LineTerminator: `\t\n\v\f\r`, space, U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029, U+202F, U+205F, U+3000, U+FEFF |
+| `\S` | ASCII only | explicit complement of that set (also inside classes, including negated ones) |
+| `.` | excludes only `\n` | excludes `\n`, `\r`, U+2028, U+2029; `(?s:.)` with the `s` flag |
+| `[]` / `[^]` | invalid | never matches / matches every character |
+| `\uXXXX`, `\xXX`, `\u{...}` | `\uXXXX` unsupported | `\x{...}` |
+| `\b` inside a class | invalid | `\x{8}` (backspace) |
+
+Whitespace helpers (JS semantics, not `unicode.IsSpace`):
+
+- `jsre.IsSpace(r)` is exactly ECMAScript WhiteSpace + LineTerminator. It
+  includes U+FEFF and excludes U+0085, the opposite of `unicode.IsSpace`.
+- `jsre.Trim` / `TrimStart` / `TrimEnd` mirror the `String.prototype` methods.
+- `jsre.SplitWS(s)` mirrors `s.split(/\s+/)`: a whitespace run is one
+  separator and the empty string at either end is kept (`" a"` → `["", "a"]`),
+  which is why `normalizeLine` filters empties after splitting instead of using
+  `strings.Fields`.
+
+Known limitation: `i` maps to RE2's Unicode case folding, slightly wider than
+JavaScript's non-`u` Canonicalize (ſ and the Kelvin sign fold to s/k in Go).
+TS only applies `i` to ASCII command words, so no shipped pattern can observe
+it. The other unmatchable corner — global iteration over a pattern that can
+match the empty string — is pinned by
+`go/internal/jsre.TestGlobalEmptyMatchIteration`; every ported pattern needs at
+least one character (`+`, `{n,}` or a literal), so it does not arise.
 
 ## Context flow
 
@@ -305,6 +363,7 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
 | --- | --- |
 | W0 | `go/` (all of it, this wave only), `docs/go-port.md` |
 | W1a | `go/internal/compression/{aggressive,classify,codebook,diff,redact,repetition,signatures,snapshots}.go` + tests |
+| W1a-jsre | `go/internal/jsre/` (new), the eight W1a compression files + tests, `docs/go-port.md` |
 | W1b | `go/internal/runtime/{path,process,bins,ripgrep,file_mutation,read_registry}.go` + tests |
 | W1c | `go/internal/runtime/{jobs,job_worker}.go`, `go/internal/compression/archive.go` + tests |
 | W2d | `go/internal/compression/{utils,structured}.go` + tests |

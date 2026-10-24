@@ -138,3 +138,51 @@ func TestFormatSignatures(t *testing.T) {
 		t.Errorf("FormatSignature(impl) = %q, want %q", impl, want)
 	}
 }
+
+// TestSignatureJSWhitespace is the Muse regression: JS \s matches NBSP and
+// U+FEFF, so an NBSP-indented declaration is still a signature and U+FEFF is
+// collapsed by compactType. Expected strings are the TS reference output.
+func TestSignatureJSWhitespace(t *testing.T) {
+	t.Run("nbsp indent", func(t *testing.T) {
+		content := "\u00a0export function foo(a: string): void {"
+		if got, want := FormatSignatures(content, ".ts"), " export fn foo(a: string) → void"; got != want {
+			t.Fatalf("FormatSignatures() = %q, want %q", got, want)
+		}
+		sigs := ExtractSignatures(content, ".ts")
+		if len(sigs) != 1 || sigs[0].Indent != 1 || sigs[0].Name != "foo" {
+			t.Fatalf("ExtractSignatures() = %+v, want one signature with Indent 1", sigs)
+		}
+	})
+
+	t.Run("nbsp inside params and return type", func(t *testing.T) {
+		content := "export function bar(a:\u00a0string):\u00a0\u00a0void {"
+		if got, want := FormatSignatures(content, ".ts"), "export fn bar(a: string) → void"; got != want {
+			t.Fatalf("FormatSignatures() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("feff before a type", func(t *testing.T) {
+		content := "export const x:\ufeffLoader = 1;"
+		if got, want := FormatSignatures(content, ".ts"), "export const x: Loader"; got != want {
+			t.Fatalf("FormatSignatures() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("compactType", func(t *testing.T) {
+		tests := []struct {
+			input string
+			want  string
+		}{
+			{"a\ufeffb", "a b"},
+			{"  a   b  ", "a b"},
+			{"a\u00a0\u00a0b", "a b"},
+			{"a\u0085b", "a\u0085b"},
+			{"\ufeffx\ufeff", "x"},
+		}
+		for _, test := range tests {
+			if got := compactType(test.input); got != test.want {
+				t.Errorf("compactType(%q) = %q, want %q", test.input, got, test.want)
+			}
+		}
+	})
+}

@@ -2,8 +2,9 @@ package compression
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
+
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 )
 
 // Consecutive identical-line run-length elision.
@@ -32,10 +33,10 @@ const defaultMinRun = 3
 const markerPrefix = "… "
 
 // port of src/compression/repetition.ts:MARKER_RE
-var markerRE = regexp.MustCompile(`^… \d+ identical lines elided …$`)
+var markerRE = jsre.MustCompile(`^… \d+ identical lines elided …$`, "")
 
 // digitsRE is the inline /\d+/g regex in lineKey.
-var digitsRE = regexp.MustCompile(`\d+`)
+var digitsRE = jsre.MustCompile(`\d+`, "g")
 
 // RepetitionMarker renders the elision marker for elided lines.
 // port of src/compression/repetition.ts:repetitionMarker
@@ -86,7 +87,7 @@ func CollapseRepetition(text string, options ...CollapseRepetitionOptions) strin
 		runLen := j - i
 		out = append(out, current)
 		if runLen >= minRun &&
-			strings.TrimSpace(current) != "" &&
+			jsre.Trim(current) != "" &&
 			!IsRepetitionMarker(current) {
 			out = append(out, RepetitionMarker(runLen-1))
 			collapsed = true

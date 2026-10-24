@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 )
 
 // CodebookEntry is one learned boilerplate line.
@@ -199,10 +201,18 @@ func (c *Codebook) Size() int {
 	return len(c.entries)
 }
 
-// normalizeLine collapses whitespace runs and trims.
+// normalizeLine collapses whitespace runs and trims: the TS implementation is
+// line.split(/\s+/).filter(Boolean).join(" "), so it uses JS whitespace
+// (NBSP and U+FEFF included) rather than strings.Fields.
 // port of src/compression/codebook.ts:normalizeLine
 func normalizeLine(line string) string {
-	return strings.Join(strings.Fields(line), " ")
+	fields := make([]string, 0, 8)
+	for _, part := range jsre.SplitWS(line) {
+		if part != "" {
+			fields = append(fields, part)
+		}
+	}
+	return strings.Join(fields, " ")
 }
 
 // containsString mirrors Array.prototype.includes for the short ref lists.
