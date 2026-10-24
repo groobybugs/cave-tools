@@ -102,10 +102,10 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/tools/configure.ts` | `go/internal/tools/configure/configure.go` | W3e |
 | `src/runtime/tool-errors.ts` | `go/internal/runtime/tool_errors.go` | W3e |
 | `src/runtime/tool-errors-cli.ts` | `go/internal/runtime/tool_errors_cli.go` | W3e |
-| `src/index.ts` | `go/internal/server/index.go` | W3i |
-| `src/dispatch.ts` | `go/internal/server/dispatch.go` | W3i |
-| `src/tool-list.ts` | `go/internal/server/tool_list.go` | W3i |
-| `src/profile.ts` | `go/internal/server/profile.go` | W3i |
+| `src/index.ts` | `go/internal/server/index.go` | W4i |
+| `src/dispatch.ts` | `go/internal/server/dispatch.go` | W4i |
+| `src/tool-list.ts` | `go/internal/server/tool_list.go` | W4i |
+| `src/profile.ts` | `go/internal/server/profile.go` | W4i |
 | `src/daemon/server.ts` | `go/internal/daemon/server.go` | W4j |
 | `src/daemon/control.ts` | `go/internal/daemon/control.go` | W3j |
 | `src/daemon/paths.ts` | `go/internal/daemon/paths.go` | W3j |
@@ -378,7 +378,7 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
 | W2g | `go/internal/tools/{bash,bash_start,bash_status,bash_stop,grep,find,ls,invalidate}.go` + tests |
 | W2h | `go/internal/tools/{webfetch,websearch,compress}.go` + tests |
 | W3e | `go/internal/tools/{status,configure}.go`, `go/internal/runtime/{tool_errors,tool_errors_cli}.go` + tests |
-| W3i | `go/internal/server/*.go` + tests |
+| W4i | `go/internal/server/*.go` + tests |
 | W3j | `go/internal/daemon/*.go` + tests |
 | W3k | `go/internal/cli/*.go`, `go/cmd/cave-tools-go/main.go` + tests |
 | W4 | integration, launcher switch, full parity suite |
@@ -436,6 +436,23 @@ Accepted runtime deviations (W1b, Muse review):
 - `daemon/control` (Go `bins` run / CLI exec helpers): output above the TS `maxBuffer` is parsed in Go instead of rejected with a maxBuffer error (Muse W2k, low).
 - `daemon` (W4j): the daemon key is TS's dist-derived build id, so the Go client must locate the repository `dist/`. It walks up from the executable and cwd, and a spawning Go client passes `CAVE_TOOLS_GO_DIST_DIR` to the re-executed daemon (which starts in `$HOME` like TS). A standalone Go binary run outside the repository with neither path available cannot derive the key and stays in-process.
 - `daemon-client` (W4j): `types.Content` models text/image/resource only, so an unknown MCP content-block type in a daemon reply is reported as connection-lost (never retried) instead of being passed through as arbitrary JSON (no cave-tools tool emits one).
+
+Accepted server deviations (W4i):
+
+- `server` (W4i): `tools/list` and `tools/call` are served from one receiving
+  middleware. The SDK's tool set sorts entries by name and its content types
+  re-encode media; the middleware returns the TS tool order and the exact
+  `types.Content` blocks instead. The JSON-RPC results are semantically equal
+  to TS (verified by the wire differential test).
+- `server` (W4i): `CallTool` takes a Go map, so an absent `arguments` value and
+  an explicit `null` are the same nil map. Direct/in-process calls treat nil as
+  undefined (what TS dispatch receives when a caller omits it); the MCP layer
+  sees the raw JSON and rejects an explicit `null` with the TS SDK's zod
+  `record` error before dispatch, never reaching the handler.
+- `server` (W4i): malformed `tools/call` `params.name` values (missing, null or
+  non-string) are decoded by the Go SDK's typed request parameters, so their
+  protocol error text differs from the TS SDK's zod text. Valid names, every
+  tool schema, arguments-record validation and all tool results match.
 
 Accepted compression deviations (W2d, Muse review):
 

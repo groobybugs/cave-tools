@@ -27,8 +27,8 @@ func TestDispatchNilArgsDifferential(t *testing.T) {
 		t.Skip("dist/dispatch.js missing; run pnpm build")
 	}
 	cwd := t.TempDir()
-	tsData := filepath.Join(cwd, "ts-data")
-	goData := filepath.Join(cwd, "go-data")
+	tsData := t.TempDir()
+	goData := t.TempDir()
 	t.Setenv("CAVE_TOOLS_DATA_DIR", goData)
 	t.Cleanup(func() { callruntime.FlushToolErrorQueue() })
 
@@ -127,11 +127,14 @@ func TestDispatchLocalDifferential(t *testing.T) {
 		t.Skip("dist/dispatch.js missing; run pnpm build")
 	}
 	cwd := t.TempDir()
+	tsData := t.TempDir()
+	goData := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cwd, "note.txt"), []byte("alpha\nbeta\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tsData := filepath.Join(cwd, "ts-data")
-	goData := filepath.Join(cwd, "go-data")
+	if err := os.WriteFile(filepath.Join(cwd, "unicode.txt"), []byte("héllo 世界\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CAVE_TOOLS_DATA_DIR", goData)
 	t.Cleanup(func() { callruntime.FlushToolErrorQueue() })
 
@@ -144,6 +147,7 @@ func TestDispatchLocalDifferential(t *testing.T) {
 		{Name: "cave__read", Args: map[string]any{"file_path": "note.txt"}},
 		{Name: "cave__read", Args: map[string]any{"file_path": "note.txt"}},
 		{Name: "cave__read", Args: map[string]any{"file_path": filepath.Join(cwd, "note.txt")}},
+		{Name: "cave__read", Args: map[string]any{"file_path": "unicode.txt"}},
 		{Name: "cave__ls", Args: map[string]any{"path": "."}},
 		{Name: "cave__nope", Args: map[string]any{"path": "x"}},
 	}
