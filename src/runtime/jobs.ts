@@ -202,7 +202,8 @@ export function getJobInfo(jobId: string): JobRecord | null {
     return { ...job, state: "exited", exitCode: recovered.exitCode, signal: recovered.signal, endedAt: Date.now() };
   }
   updateJobState(jobId, { state: "lost", endedAt: Date.now() });
-  return { ...job, state: "lost", endedAt: Date.now() };
+  // Return the stored row so the result matches the db exactly.
+  return getJob(jobId) ?? { ...job, state: "lost" };
 }
 
 export function listSessionJobs(sessionId: string): JobRecord[] {

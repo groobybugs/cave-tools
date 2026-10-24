@@ -356,6 +356,10 @@ func TestIsRegistrablePath(t *testing.T) {
 		{"nul", base + "/a\x00b", false},
 		{"leading space", " " + base + "/a", false},
 		{"trailing space", base + "/a ", false},
+		// Muse regression: trim() strips U+FEFF but keeps U+0085.
+		{"leading bom", "\ufeff" + base + "/a", false},
+		{"trailing nel", base + "/a\u0085", true},
+		{"leading nbsp", "\u00a0" + base + "/a", false},
 		{"too long", "/" + strings.Repeat("a", maxPathChars), false},
 		{"max length", "/" + strings.Repeat("a", maxPathChars-1), true},
 	}
@@ -422,5 +426,32 @@ func TestStateForCapsStates(t *testing.T) {
 	}
 	if _, ok := registryStates.byPath[first]; ok {
 		t.Fatal("oldest state was not evicted")
+	}
+}
+
+// TestSeedKnownJSWhitespace is the Muse regression for the registry loader:
+// TS trims each line with line.trim(), which strips U+FEFF and keeps U+0085.
+func TestSeedKnownJSWhitespace(t *testing.T) {
+	registry := filepath.Join(t.TempDir(), "cave-tools", "read-registry.txt")
+	if err := os.MkdirAll(filepath.Dir(registry), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "\ufeff/tmp/a.ts\n/tmp/b.ts\u0085\n\u00a0/tmp/c.ts\u00a0\n"
+	if err := os.WriteFile(registry, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state := &registryState{known: newOrderedSet(), pending: map[string]*pendingAppend{}}
+	seedKnown(state, registry)
+
+	for _, want := range []string{"/tmp/a.ts", "/tmp/b.ts\u0085", "/tmp/c.ts"} {
+		if !state.known.has(want) {
+			t.Errorf("seedKnown did not load %q", want)
+		}
+	}
+	for _, unwanted := range []string{"\ufeff/tmp/a.ts", "/tmp/b.ts", "\u00a0/tmp/c.ts\u00a0"} {
+		if state.known.has(unwanted) {
+			t.Errorf("seedKnown kept un-trimmed %q", unwanted)
+		}
 	}
 }

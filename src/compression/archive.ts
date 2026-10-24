@@ -92,6 +92,13 @@ export async function archiveIfLarge(
   const { id } = await storeArchive(output, command);
 
   const lines = output.split("\n");
+  if (lines.length <= 30) {
+    // Few huge lines: a line-based head/tail would keep everything, so cut by chars.
+    const head = output.slice(0, 1000);
+    const tail = output.slice(-500);
+    const summary = `${head}\n\n... (${output.length - 1500} chars archived) ...\n\n${tail}`;
+    return { id, summary };
+  }
   const head = lines.slice(0, 20).join("\n");
   const tail = lines.slice(-10).join("\n");
   const summary = `${head}\n\n... (${lines.length - 30} lines archived) ...\n\n${tail}`;

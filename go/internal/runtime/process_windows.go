@@ -11,8 +11,9 @@ package runtime
 import (
 	"os"
 	"os/exec"
-	"regexp"
 	"syscall"
+
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 )
 
 // shellCommand mirrors the win32 spawn in src/runtime/process.ts:231-241.
@@ -30,7 +31,7 @@ func shellCommand(shell, command string) *exec.Cmd {
 }
 
 // cmdShellPattern is Node's cmd.exe detection: /^(?:.*\\)?cmd(?:\.exe)?$/i.
-var cmdShellPattern = regexp.MustCompile(`(?i)^(?:.*\\)?cmd(?:\.exe)?$`)
+var cmdShellPattern = jsre.MustCompile(`^(?:.*\\)?cmd(?:\.exe)?$`, "i")
 
 func isCmdExe(shell string) bool {
 	return cmdShellPattern.MatchString(shell)

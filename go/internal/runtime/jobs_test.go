@@ -673,3 +673,56 @@ func jobsReadDurableResult(t *testing.T, path string) durableJobResult {
 	}
 	return result
 }
+
+// TestRecoverFromMarkerJSWhitespace is the Muse regression for EXIT_MARKER:
+// the TS regex ends in \s*$, whose \s includes NBSP, U+FEFF and the Unicode
+// space separators, while RE2's \s is ASCII-only. U+0085 (not JS whitespace)
+// must not be accepted.
+func TestRecoverFromMarkerJSWhitespace(t *testing.T) {
+	tests := []struct {
+		name   string
+		suffix string
+		want   *recoveredMarker
+	}{
+		{name: "no suffix", suffix: "", want: &recoveredMarker{exitCode: 0}},
+		{name: "newline", suffix: "\n", want: &recoveredMarker{exitCode: 0}},
+		{name: "nbsp", suffix: "\u00a0", want: &recoveredMarker{exitCode: 0}},
+		{name: "bom", suffix: "\ufeff", want: &recoveredMarker{exitCode: 0}},
+		{name: "line separator", suffix: "\u2028", want: &recoveredMarker{exitCode: 0}},
+		{name: "ideographic space", suffix: "\u3000", want: &recoveredMarker{exitCode: 0}},
+		{name: "nel is not js whitespace", suffix: "\u0085", want: nil},
+		{name: "zero width space is not js whitespace", suffix: "\u200b", want: nil},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "job.log")
+			body := "worker output\n[cave-job exit=0]" + test.suffix
+			if err := os.WriteFile(logPath, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got := recoverFromMarker(logPath)
+			if test.want == nil {
+				if got != nil {
+					t.Fatalf("recoverFromMarker = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil || got.exitCode != test.want.exitCode || got.signal != nil {
+				t.Fatalf("recoverFromMarker = %+v, want exit %d", got, test.want.exitCode)
+			}
+		})
+	}
+
+	t.Run("signal with nbsp suffix", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "job.log")
+		body := "[cave-job exit=143 signal=SIGTERM]\u00a0"
+		if err := os.WriteFile(logPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := recoverFromMarker(logPath)
+		if got == nil || got.exitCode != 143 || got.signal == nil || *got.signal != "SIGTERM" {
+			t.Fatalf("recoverFromMarker = %+v, want exit 143 signal SIGTERM", got)
+		}
+	})
+}

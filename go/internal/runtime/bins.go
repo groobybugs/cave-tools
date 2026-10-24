@@ -16,6 +16,8 @@ import (
 	goruntime "runtime"
 	"strings"
 	"sync"
+
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 )
 
 // port of src/runtime/bins.ts:RG_VERSION
@@ -273,7 +275,7 @@ func extractArchive(ctx context.Context, archivePath, destDir, extension string)
 	if extension == "tar.gz" {
 		code, stderr := run(ctx, "tar", []string{"-xzf", archivePath, "-C", destDir})
 		if code != 0 {
-			return fmt.Errorf("%s", firstNonEmpty(strings.TrimSpace(stderr), "tar extract failed"))
+			return fmt.Errorf("%s", firstNonEmpty(jsre.Trim(stderr), "tar extract failed"))
 		}
 		return nil
 	}
@@ -293,11 +295,11 @@ func extractArchive(ctx context.Context, archivePath, destDir, extension string)
 		)
 		psCode, psStderr := run(ctx, shell, []string{"-NoProfile", "-NonInteractive", "-Command", script})
 		if psCode != 0 {
-			return fmt.Errorf("%s", firstNonEmpty(strings.TrimSpace(psStderr), "zip extract failed"))
+			return fmt.Errorf("%s", firstNonEmpty(jsre.Trim(psStderr), "zip extract failed"))
 		}
 		return nil
 	}
-	return fmt.Errorf("%s", firstNonEmpty(strings.TrimSpace(stderr), "zip extract failed"))
+	return fmt.Errorf("%s", firstNonEmpty(jsre.Trim(stderr), "zip extract failed"))
 }
 
 func firstNonEmpty(values ...string) string {

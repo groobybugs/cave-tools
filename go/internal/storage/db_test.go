@@ -706,7 +706,9 @@ func TestLegacyMigration(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(registryFile), 0o700); err != nil {
 		t.Fatalf("mkdir registry: %v", err)
 	}
-	if err := os.WriteFile(registryFile, []byte("  /tmp/one.ts  \n\n/tmp/two.ts\n"), 0o600); err != nil {
+	// The BOM/NEL lines are the Muse regression for migrateReadRegistry's
+	// line.trim(): JS trim strips U+FEFF and keeps U+0085.
+	if err := os.WriteFile(registryFile, []byte("  /tmp/one.ts  \n\n/tmp/two.ts\n\ufeff/tmp/three.ts\n/tmp/four.ts\u0085\n"), 0o600); err != nil {
 		t.Fatalf("write registry: %v", err)
 	}
 
@@ -758,7 +760,7 @@ func TestLegacyMigration(t *testing.T) {
 	}
 
 	paths := queryStrings(t, conn, "SELECT path FROM read_registry ORDER BY path")
-	if !equalStrings(paths, []string{"/tmp/one.ts", "/tmp/two.ts"}) {
+	if !equalStrings(paths, []string{"/tmp/four.ts\u0085", "/tmp/one.ts", "/tmp/three.ts", "/tmp/two.ts"}) {
 		t.Fatalf("migrated read_registry = %v", paths)
 	}
 

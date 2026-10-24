@@ -156,8 +156,8 @@ each other's running jobs.
 
 ```
 types     <- nobody (leaf)
-runtime   <- types
-storage   <- nobody (stdlib + modernc.org/sqlite only; data-dir is SQLite-free)
+runtime   <- types, storage, jsre
+storage   <- jsre (stdlib + modernc.org/sqlite otherwise; data-dir is SQLite-free)
 jsre      <- nobody (leaf; stdlib only)
 compression <- types, runtime, storage, jsre
 tools     <- types, runtime, storage, compression
@@ -218,6 +218,11 @@ parts := jsre.SplitWS(line)              // not strings.Fields
   reviewer can diff the Go literal against `src/` by eye. Never call
   `regexp.Compile`/`regexp.MustCompile` on a TS pattern, and never re-implement
   `\s` by hand at a call site.
+- The same rule covers JS regexes that come from Node rather than from `src/`
+  (for example the cmd.exe detection in `process_windows.go`) and patterns
+  assembled at runtime (for example `globToRegExp` in `ripgrep.go`). Only
+  Go-only regexes with no JS origin may use the `regexp` package directly, and
+  they must be named in the worker's report.
 - Supported flags: `g` (no-op: use `FindAll*`/`ReplaceAll*`), `i`, `m`, `s`,
   `u` (no-op for pattern syntax). Anything else is an error instead of being
   silently ignored.
@@ -427,6 +432,8 @@ Accepted runtime deviations (W1b, Muse review):
 - `RunCommand` options `MaxBytes`/`MaxLines`/`ForceKillAfterMs` treat 0 as "use default"; TS `??` keeps an explicit 0. No TS caller passes 0.
 - `BinResolution` uses `""` for a missing binary where TS uses `null`. W3k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
 - Child output is decoded once from the full byte buffer; TS decodes per chunk, so a multibyte char split across chunks becomes U+FFFD in TS but decodes correctly in Go.
+
+- Job `.result.json` with a fractional `exitCode` (only reachable by hand-editing the sidecar) is truncated to an integer in Go; TS keeps the fraction.
 
 ### TS bugs found while porting
 

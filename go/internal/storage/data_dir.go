@@ -9,7 +9,8 @@ package storage
 import (
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 )
 
 // CaveToolsDataDir returns the directory holding SQLite stats, archives and
@@ -30,7 +31,7 @@ func CaveToolsDataDir() string {
 // caveToolsDataDir is the pure part of CaveToolsDataDir so tests can pin the
 // home directory.
 func caveToolsDataDir(override, home string) string {
-	if trimmed := strings.TrimSpace(override); trimmed != "" {
+	if trimmed := jsre.Trim(override); trimmed != "" {
 		return trimmed
 	}
 	return filepath.Join(home, ".cache", "cave-tools")
