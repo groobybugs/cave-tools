@@ -39,7 +39,7 @@ func newDaemonHarness(t *testing.T) *daemonHarness {
 	h := &daemonHarness{
 		root:     root,
 		data:     filepath.Join(base, "data"),
-		run:      filepath.Join(base, "run"),
+		run:      shortRuntimeDir(t),
 		home:     filepath.Join(base, "home"),
 		claude:   filepath.Join(base, "claude"),
 		work:     filepath.Join(base, "work"),
@@ -47,12 +47,25 @@ func newDaemonHarness(t *testing.T) *daemonHarness {
 		tsPrefix: tsPrefix,
 		goBinary: goBinary,
 	}
-	for _, dir := range []string{h.data, h.run, h.home, h.claude, h.work} {
+	for _, dir := range []string{h.data, h.home, h.claude, h.work} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
 	return h
+}
+
+// shortRuntimeDir keeps the Unix socket below sun_path (~107 bytes). A
+// t.TempDir path is long enough to hit the implementation's shared /tmp
+// fallback, which would make same-key daemons look like one socket.
+func shortRuntimeDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "w5run-")
+	if err != nil {
+		t.Fatalf("short runtime dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 // baseEnv is the daemon process environment (never a daemon client).
@@ -342,6 +355,122 @@ func TestDaemonTSClientToGoDaemon(t *testing.T) {
 	fresh := h.runTS(t, h.work, nil, "read", "note.txt", "--session", "shared")
 	if fresh.code != 0 || !strings.HasPrefix(fresh.stdout, "session content") {
 		t.Fatalf("post-restart read = code %d stdout %q stderr %q", fresh.code, fresh.stdout, fresh.stderr)
+	}
+}
+
+// TestDaemonReadSessionIsolation covers the benchmark smoke observation:
+// with a private daemon/data/socket, a fresh explicit session is a full read
+// and only that same session is stubbed. Run for every daemon/client pair.
+func TestDaemonReadSessionIsolation(t *testing.T) {
+	requireMode(t)
+	cases := []struct {
+		name   string
+		daemon string
+		client string
+	}{
+		{name: "go-daemon-go-client", daemon: "go", client: "go"},
+		{name: "go-daemon-ts-client", daemon: "go", client: "ts"},
+		{name: "ts-daemon-go-client", daemon: "ts", client: "go"},
+		{name: "ts-daemon-ts-client", daemon: "ts", client: "ts"},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			h := newDaemonHarness(t)
+			if testCase.daemon == "go" {
+				h.startGoDaemon(t)
+			} else {
+				h.startTSDaemon(t)
+			}
+			h.writeWorkFile(t, "note.txt", "session content\n")
+			run := func(args ...string) outcome {
+				if testCase.client == "go" {
+					return h.runGo(t, h.work, nil, args...)
+				}
+				return h.runTS(t, h.work, nil, args...)
+			}
+			firstA := run("read", "note.txt", "--session", "A")
+			if !strings.HasPrefix(firstA.stdout, "session content") {
+				t.Fatalf("first session A = %#v", firstA)
+			}
+			firstB := run("read", "note.txt", "--session", "B")
+			if !strings.HasPrefix(firstB.stdout, "session content") {
+				t.Fatalf("fresh session B was not a full read: %#v", firstB)
+			}
+			secondA := run("read", "note.txt", "--session", "A")
+			if !strings.Contains(secondA.stdout, "<file unchanged since read #1 (session cli:A)") {
+				t.Fatalf("second session A = %#v", secondA)
+			}
+		})
+	}
+}
+
+// TestDaemonSeparateSocketsSameDataKeepCachesIndependent proves read dedup is
+// per-daemon in-memory state, not a shared data-dir cache: two daemons with
+// the same key inputs but different socket dirs both start with a full read
+// for the same explicit session.
+func TestDaemonSeparateSocketsSameDataKeepCachesIndependent(t *testing.T) {
+	requireMode(t)
+	h := newDaemonHarness(t)
+	tsDaemon := h.startTSDaemon(t)
+	second := *h
+	second.run = shortRuntimeDir(t)
+	goDaemon := second.startGoDaemon(t)
+	h.writeWorkFile(t, "note.txt", "session content\n")
+
+	tsFirst := h.runTS(t, h.work, nil, "read", "note.txt", "--session", "A")
+	if !strings.HasPrefix(tsFirst.stdout, "session content") {
+		t.Fatalf("TS daemon first read = %#v", tsFirst)
+	}
+	goFirst := second.runGo(t, h.work, nil, "read", "note.txt", "--session", "A")
+	if !strings.HasPrefix(goFirst.stdout, "session content") {
+		tsStatus := runCommandOutcome(t, h.goBinary, nil, h.work, h.baseEnv(), "", "daemon", "status")
+		goStatus := runCommandOutcome(t, h.goBinary, nil, h.work, second.baseEnv(), "", "daemon", "status")
+		t.Fatalf("Go daemon first read reused the other daemon's cache: %#v\nTS daemon out:\n%s\nGo daemon out:\n%s\nTS status: %#v\nGo status: %#v",
+			goFirst, tsDaemon.out.String(), goDaemon.out.String(), tsStatus, goStatus)
+	}
+	tsSecond := h.runTS(t, h.work, nil, "read", "note.txt", "--session", "A")
+	if !strings.Contains(tsSecond.stdout, "(session cli:A)") {
+		t.Fatalf("TS daemon second read = %#v", tsSecond)
+	}
+	goSecond := second.runGo(t, h.work, nil, "read", "note.txt", "--session", "A")
+	if !strings.Contains(goSecond.stdout, "(session cli:A)") {
+		t.Fatalf("Go daemon second read = %#v", goSecond)
+	}
+}
+
+// TestDaemonSharedSocketSessionNamespace covers an intentionally shared
+// daemon: different explicit sessions stay isolated across TS and Go clients,
+// while the same explicit session is shared by design (cli:<id>).
+func TestDaemonSharedSocketSessionNamespace(t *testing.T) {
+	requireMode(t)
+	h := newDaemonHarness(t)
+	h.startTSDaemon(t)
+	h.writeWorkFile(t, "note.txt", "session content\n")
+
+	tsA := h.runTS(t, h.work, nil, "read", "note.txt", "--session", "A")
+	if !strings.HasPrefix(tsA.stdout, "session content") {
+		t.Fatalf("TS session A first read = %#v", tsA)
+	}
+	goB := h.runGo(t, h.work, nil, "read", "note.txt", "--session", "B")
+	if !strings.HasPrefix(goB.stdout, "session content") {
+		t.Fatalf("Go fresh session B got a stub from session A: %#v", goB)
+	}
+	goA := h.runGo(t, h.work, nil, "read", "note.txt", "--session", "A")
+	if !strings.Contains(goA.stdout, "(session cli:A)") {
+		t.Fatalf("Go session A did not share the TS session: %#v", goA)
+	}
+	tsB := h.runTS(t, h.work, nil, "read", "note.txt", "--session", "B")
+	if !strings.Contains(tsB.stdout, "(session cli:B)") {
+		t.Fatalf("TS session B did not share the Go session: %#v", tsB)
+	}
+	tsC := h.runTS(t, h.work, nil, "read", "note.txt", "--session", "C")
+	if !strings.HasPrefix(tsC.stdout, "session content") {
+		t.Fatalf("TS session C = %#v", tsC)
+	}
+	goC := h.runGo(t, h.work, nil, "read", "note.txt", "--session", "C")
+	if !strings.Contains(goC.stdout, "(session cli:C)") {
+		t.Fatalf("Go session C did not share the TS session: %#v", goC)
 	}
 }
 

@@ -1,31 +1,9 @@
 # W5a parity findings
 
-Environment: TypeScript dist built from `main` `6cefd81` (merged into this
-branch), Go binary stamped with `package.json` version `0.6.1`. All tests below
-are in `go/parity/` behind the `parity` build tag and run with
+Environment: TypeScript dist built from `main` `6cefd81` plus the reviewed
+opt-in switch (`a0dcc6e`); Go merged from `a0dcc6e`. All tests below live in
+`go/parity/` behind the `parity` build tag and run with
 `go test -tags parity ./parity/`.
-
-## Blocking: main `6cefd81` mirror not merged
-
-`migration/w5-sync` commit `51158ed` contains both mirrors; they are not merged
-into this branch yet.
-
-1. `cave__bash` description: Go still has the pre-`6cefd81` text. TS changed
-   `src/tools/bash.ts` (native-shell-first wording). Go source:
-   `go/internal/tools/bash/bash.go:31`.
-   Failing tests: `TestCLIEveryToolHelp/bash`,
-   `TestCLIEveryToolExplicitHelp/bash`, all four
-   `TestMCPToolsListDifferential/*`, `TestParity/help`, `TestParity/help-bash`,
-   `TestCLIBlackBoxDifferential/help.top-level`.
-2. `init`/`install-agent` instruction block: Go still has the old
-   `CAVE_INSTRUCTIONS` text (`go/internal/cli/cli.go`). TS changed
-   `src/cli.ts`. Failing tests:
-   `TestCLIBlackBoxDifferential/init.fresh-then-existing` and
-   `init.existing-file`.
-
-Both are byte-identical to TS in `51158ed` (verified by comparing the
-description string and the native-shell guidance line), so merging that sync
-commit should clear these failures without test changes.
 
 ## Real mismatches still open
 
@@ -54,14 +32,40 @@ commit should clear these failures without test changes.
    stdout already match.
    Test: `TestCLIBlackBoxDifferential/filter.invalid-json`.
 
+## Daemon read-dedup smoke investigation (no defect found)
+
+The benchmark observation (`go-w5-bench/scripts/bench-ts-go.md`) was
+reproduced from its two halves; it is daemon-key/socket sharing, not a
+per-session isolation defect:
+
+- `TestDaemonReadSessionIsolation` runs all four daemon/client pairs
+  (Go/Go, Go/TS, TS/Go, TS/TS) with private temp data/socket/config trees:
+  session A first read full, a fresh session B also full, only A's second read
+  is the `cli:A` stub. All pass.
+- `TestDaemonSeparateSocketsSameDataKeepCachesIndependent` starts a TS daemon
+  and a Go daemon with the **same data dir** but distinct short socket dirs:
+  both first reads for the same explicit session are full. Read dedup is
+  in-memory per daemon; the data dir is not a shared cache. Passes.
+- `TestDaemonSharedSocketSessionNamespace` intentionally shares one daemon:
+  TS session A full, Go session B full, Go A stub, TS B stub, and the same
+  session C is shared across clients (`cli:C` stub) by design. Passes.
+
+The earlier smoke-side mismatch had TS full and Go `stub` for the **same**
+validation session, which is what happens when both clients reach one daemon.
+The current harness keys (TS `2bdf…`, Go with `CAVE_TOOLS_GO_DIST_DIR` `6788…`)
+differ, so the fixed harness does not share a socket. One test-harness detail
+matters: long temp paths push the socket path over `sun_path`, and both sides
+then fall back to the shared `/tmp/cave-tools-<uid>` directory. The new daemon
+tests use short runtime dirs so they exercise real separate sockets.
+
 ## Deliberately not asserted as failures
 
 - Tool-error storage is documented best-effort: both implementations drop a
-  queued record when SQLite is busy (`flushOneBatch`/`StoreBusy`). The
-  errors.flow case pauses 100 ms between failing CLI processes instead of
-  manufacturing a lock race; format, count, codes, session hash and argument
-  keys are still asserted exactly. A 1-in-5 loss was observed before adding the
-  pause.
+  queued record when SQLite is busy. `errors.seeded-aggregate` uses fixed
+  seeded rows for exact aggregation/formatting; `errors.live-single` proves a
+  single real failure is persisted. Rapid multi-process logging is not used as
+  a gate because the documented busy-drop is nondeterministic (Go lost 2/30,
+  TS 0/30 on this machine).
 - Accepted deviations remain accepted and are not normalized into the suite:
   Brotli/stacked `Content-Encoding`, ICU/`localeCompare` ordering outside the
   covered fixtures, lone-surrogate JSON, unknown MCP content-block types, and
