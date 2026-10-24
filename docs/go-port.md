@@ -562,6 +562,11 @@ there is no tested `CAVE_TOOLS_IMPL=go` path yet. Planned contract:
    `CAVE_TOOLS_IMPL=go` and without it, diffing stdout/stderr/exit code, plus
    the missing-binary/error-path test. Until that lands and is run, no switch
    claim is valid.
+7. Switch candidate `8fea696` adds the TS-only adapter `src/impl-switch.ts`
+   (present only on that candidate, not on this branch). It is **not
+   integrated** here. If merged, the inventory becomes 57 TS files: the same
+   56 mapped files plus this adapter-only helper, which must not get a fake Go
+   counterpart.
 
 ## Review fixes worth keeping
 
@@ -605,6 +610,11 @@ needs a follow-up decision or stays a documented limit.
   the default"; TS `??` keeps an explicit 0. No TS caller passes 0.
 - `BinResolution` uses `""` for a missing binary where TS uses `null`. The CLI
   prints `(missing)` for `""`, matching TS's null display.
+- `rtk rewrite` (`compression/utils.go` `runRtkRewrite`): TS calls `execFile`
+  with Node's default `maxBuffer`, so an oversized stdout can fail there and
+  leave only partial output; Go reads the full buffer. The 3s timeout normally
+  dominates, and no fix/test is claimed. This is separate from `rtk gain`,
+  which does implement the 2 MiB `limitedBuffer` cap. (W2k review, low.)
 - A job `.result.json` with a fractional `exitCode` (only reachable by
   hand-editing the sidecar) is truncated to an integer in Go; TS keeps the
   fraction.
@@ -703,18 +713,29 @@ hash cases. The TS side was already correct.
 ## Coverage and annotation audit
 
 - The map above covers all 56 `src/**/*.ts` files and every target exists.
-- 232 exported TS function/const-arrow names were all found in Go source
-  (exact or exported form) in a static audit; this is a name-level check, not
-  proof that each function body was compared or tested.
-- 806 `// port of` provenance lines cover all 56 TS files on this branch.
-  Counts per file are not evidence of completeness: some TS types, constants
-  and module-level state are annotated under their Go names, and a few helpers
-  are referenced only in prose.
+- An ad-hoc static audit checked exported TS function/const-arrow names against
+  Go source; no missing exported callable was found. It is name-level only, its
+  extraction regex is not committed, and it is not proof that each function
+  body was compared or tested. No count is asserted.
+- Provenance annotations are non-test `// port of src/<file>.ts:<symbol>`
+  comments. To reproduce the line count (not a coverage measure):
+
+  ```sh
+  grep -rn "// port of src/" go --include='*.go' --exclude='*_test.go' | wc -l
+  ```
+
+  The scope matters: `// port of` including test files is larger and must not
+  be compared with the non-test count. No numeric count is asserted here
+  because the pending `scanJob` annotation normalization will change it.
+  Counts per file are not evidence of completeness either: some TS types,
+  constants and module-level state are annotated under their Go names, and a
+  few helpers are referenced only in prose.
 - Known annotation gap (report only, no Go edit in W5c): `storage.scanJob` is
   annotated with prose "This is the Go form of
   `src/storage/db.ts:jobFromRow`" rather than the canonical
   `// port of src/storage/db.ts:jobFromRow`. The implementation exists and is
-  exercised; the annotation should be normalised in a later Go edit.
+  exercised. Coordinator is normalising the comment in `go-w3d`; followup stays
+  pending until the exact SHA and evidence are supplied.
 - `src/plugins/**` is adapter code listed above and is not expected to have a
   Go counterpart.
 
@@ -750,8 +771,9 @@ than it states.
   - Job `jmvmt2rgb996949` was deliberately canceled during a concurrent TS
     build and is superseded by `jmvmt3fh0d37266`; it is not evidence.
 - Coordinator evidence for W4 (not rerun in this docs task): final combined
-  offline gate at `ba8d079` — gofmt, vet, full tests, parity with 430
-  web+CLI/daemon roundtrip comparisons, race packages, Windows/darwin vet;
+  offline gate at `ba8d079` — gofmt, vet, full tests, parity with
+  coordinator-reported 430 web+CLI/daemon roundtrip comparisons (count not
+  re-derived in this docs task), race packages, Windows/darwin vet;
   job `jobjmvm1wsiz04fecf`. Treat the job id as a pointer, not a substitute for
   rerunning at release.
 - TypeScript reference: `main` at `6cefd81`, synced as `d163dae`, passed
