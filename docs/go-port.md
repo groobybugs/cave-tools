@@ -95,9 +95,9 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/tools/find.ts` | `go/internal/tools/find.go` | W2g |
 | `src/tools/ls.ts` | `go/internal/tools/ls.go` | W2g |
 | `src/tools/invalidate.ts` | `go/internal/tools/invalidate.go` | W2g |
-| `src/tools/webfetch.ts` | `go/internal/tools/webfetch.go` | W2h |
-| `src/tools/websearch.ts` | `go/internal/tools/websearch.go` | W2h |
-| `src/tools/compress.ts` | `go/internal/tools/compress.go` | W2h |
+| `src/tools/webfetch.ts` | `go/internal/tools/webfetch/webfetch.go` | W3d |
+| `src/tools/websearch.ts` | `go/internal/tools/websearch/websearch.go` | W3d |
+| `src/tools/compress.ts` | `go/internal/tools/compress/compress.go` | W3d |
 | `src/tools/status.ts` | `go/internal/tools/status.go` | W2h |
 | `src/tools/configure.ts` | `go/internal/tools/configure.go` | W2h |
 | `src/runtime/tool-errors.ts` | `go/internal/runtime/tool_errors.go` | W2h |
