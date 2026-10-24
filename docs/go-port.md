@@ -100,8 +100,8 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/tools/compress.ts` | `go/internal/tools/compress/compress.go` | W3d |
 | `src/tools/status.ts` | `go/internal/tools/status/status.go` | W3e |
 | `src/tools/configure.ts` | `go/internal/tools/configure/configure.go` | W3e |
-| `src/runtime/tool-errors.ts` | `go/internal/runtime/tool_errors.go` | W2h |
-| `src/runtime/tool-errors-cli.ts` | `go/internal/runtime/tool_errors_cli.go` | W2h |
+| `src/runtime/tool-errors.ts` | `go/internal/runtime/tool_errors.go` | W3e |
+| `src/runtime/tool-errors-cli.ts` | `go/internal/runtime/tool_errors_cli.go` | W3e |
 | `src/index.ts` | `go/internal/server/index.go` | W3i |
 | `src/dispatch.ts` | `go/internal/server/dispatch.go` | W3i |
 | `src/tool-list.ts` | `go/internal/server/tool_list.go` | W3i |
@@ -355,8 +355,9 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
   - e: tools read + line-range
   - f: tools edit + edit-match + replacers + write + apply-patch
   - g: tools bash + bash-start + bash-status + bash-stop + grep + find + ls + invalidate
-  - h: tools webfetch + websearch + compress + status + configure; runtime/tool-errors + tool-errors-cli
+  - h: tools webfetch + websearch + compress
 - W3 (parallel):
+  - e: tools status + configure; runtime/tool-errors + tool-errors-cli
   - i: dispatch + tool-list + profile + index (MCP stdio server via go-sdk)
   - j: daemon server/client/control/paths
   - k: CLI — cli, cli-tools, status-ui (incl. raw, filter --json)
@@ -375,7 +376,8 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
 | W2e | `go/internal/tools/{read,line_range}.go` + tests |
 | W2f | `go/internal/tools/{edit,edit_match,replacers,write,apply_patch}.go` + tests |
 | W2g | `go/internal/tools/{bash,bash_start,bash_status,bash_stop,grep,find,ls,invalidate}.go` + tests |
-| W2h | `go/internal/tools/{webfetch,websearch,compress,status,configure}.go`, `go/internal/runtime/{tool_errors,tool_errors_cli}.go` + tests |
+| W2h | `go/internal/tools/{webfetch,websearch,compress}.go` + tests |
+| W3e | `go/internal/tools/{status,configure}.go`, `go/internal/runtime/{tool_errors,tool_errors_cli}.go` + tests |
 | W3i | `go/internal/server/*.go` + tests |
 | W3j | `go/internal/daemon/*.go` + tests |
 | W3k | `go/internal/cli/*.go`, `go/cmd/cave-tools-go/main.go` + tests |
@@ -446,6 +448,30 @@ Accepted compression deviations (W2d, Muse review):
   emitted rows are identical.
 - `GetRtkTopPassthrough` breaks equal-count ties in byte order; TS uses
   `localeCompare` (ICU), so mixed-case/prefix order can differ for tied counts.
+
+### W3e Muse-review fixes (budgets and status ordering)
+
+The W3e review found three gaps. They are fixed on the Go side; TS is unchanged
+and remains the reference.
+
+- `storage.BudgetConfig` stores TS numbers as `float64` (the old shared
+  `int64` API truncated `max_chars: 12.7` to `12`). `configure` prints and
+  stores the same number, `status` prints it with ECMAScript
+  `Number::toString`, and `Number()` accepts JS binary/octal literals
+  (`0b11`, `0o17`). Non-finite budget fields serialize as `null`, exactly like
+  `JSON.stringify`; `maxChars` stays omitted when TS holds `undefined`.
+- `truncateLines`/`truncateChars` keep fractional `maxLines`/`headLines`/
+  `tailLines`/`maxChars` and the omitted/dropped marker arithmetic. Numbers are
+  coerced to integers only inside `Array.prototype.slice`/
+  `String.prototype.slice`, matching `ToIntegerOrInfinity`; `Infinity`,
+  negative values and empty-string filtering follow TS.
+- Status no longer approximates ordering with alphabetical sorts. Budget names
+  follow `Object.entries` (integer-like keys ascending first, then insertion
+  order) and bounce ties keep the per-extension `Map` insertion order.
+- `TestHandlerParity` for `cave__status` runs the Go handler in a fresh
+  test-binary process pinned to a temp data dir, so a cached storage singleton
+  or the real user cache cannot make it pass incidentally. The configure parity
+  case also compares `configure` → `status` → `applyBudget` output against TS.
 
 ### TS bugs found while porting
 

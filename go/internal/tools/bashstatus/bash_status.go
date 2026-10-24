@@ -108,11 +108,12 @@ func nonnegativeInteger(value any, defined bool, fallback int64) (int64, bool) {
 	return int64(math.Floor(parsed)), true
 }
 
-// limitIncrementalLines keeps at most maxLines complete lines.
+// limitIncrementalLines keeps at most maxLines complete lines. maxLines stays
+// fractional like TS; the loop compares with `<` before any slice boundary.
 // port of src/tools/bash-status.ts:limitIncrementalLines
-func limitIncrementalLines(text string, maxLines int64) (string, int64, bool) {
+func limitIncrementalLines(text string, maxLines float64) (string, int64, bool) {
 	end := 0
-	for line := int64(0); line < maxLines; line++ {
+	for line := 0; float64(line) < maxLines; line++ {
 		index := strings.Index(text[end:], "\n")
 		if index == -1 {
 			return text, int64(len(text)), false
@@ -231,11 +232,8 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 		), "\n")
 	case hasCursor:
 		chunk := rt.ReadFileChunk(job.LogPath, cursor, tailReadBytes)
-		budgetLines := int64(compression.GetBudget("bash").MaxLines - 8)
-		if budgetLines < 1 {
-			budgetLines = 1
-		}
-		limitedText, consumedBytes, limited := limitIncrementalLines(chunk.Text, min64(tailLines, budgetLines))
+		budgetLines := math.Max(1, compression.GetBudget("bash").MaxLines-8)
+		limitedText, consumedBytes, limited := limitIncrementalLines(chunk.Text, math.Min(float64(tailLines), budgetLines))
 		nextCursor := chunk.StartCursor + consumedBytes
 		hasMore := nextCursor < chunk.FileSize
 		notes := make([]string, 0, 2)
@@ -303,13 +301,6 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 		Content: []types.Content{types.Text(text + handle)},
 		IsError: job.State == storage.JobExited && (job.ExitCode == nil || *job.ExitCode != 0),
 	}, nil
-}
-
-func min64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func textResult(text string) types.ToolResult {

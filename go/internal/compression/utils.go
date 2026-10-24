@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -107,13 +108,16 @@ var (
 
 	// port of src/compression/utils.ts:budgets
 	budgets = map[string]storage.BudgetConfig{
-		"bash": {MaxLines: 50, HeadLines: 15, TailLines: 35, MaxChars: int64Ptr(6000)},
+		"bash": {MaxLines: 50, HeadLines: 15, TailLines: 35, MaxChars: numberPtr(6000)},
 		"read": {MaxLines: 200, HeadLines: 100, TailLines: 100},
-		"grep": {MaxLines: 60, HeadLines: 30, TailLines: 30, MaxChars: int64Ptr(6000)},
-		"web":  {MaxLines: 120, HeadLines: 60, TailLines: 60, MaxChars: int64Ptr(8000)},
+		"grep": {MaxLines: 60, HeadLines: 30, TailLines: 30, MaxChars: numberPtr(6000)},
+		"web":  {MaxLines: 120, HeadLines: 60, TailLines: 60, MaxChars: numberPtr(8000)},
 		"find": {MaxLines: 120, HeadLines: 60, TailLines: 60},
 		"ls":   {MaxLines: 60, HeadLines: 30, TailLines: 30},
 	}
+	// budgetOrder is the object insertion order TS keeps for Object.entries;
+	// a Go map would randomize the status report.
+	budgetOrder = []string{"bash", "read", "grep", "web", "find", "ls"}
 
 	// port of src/compression/utils.ts:rtkAvailableCache
 	rtkAvailableCache *bool
@@ -237,7 +241,9 @@ type StatsBucket struct {
 	totalBounces        int64
 	totalWastedChars    int64
 	perExtension        map[string]storage.BounceStats
-	savingsByTool       map[string]storage.ToolSavings
+	// perExtensionOrder is TS's Map insertion order for bounce extensions.
+	perExtensionOrder []string
+	savingsByTool     map[string]storage.ToolSavings
 }
 
 // newBucket builds a zeroed stats bucket.
@@ -919,6 +925,7 @@ func ResetStats(ctx context.Context) {
 	bucket.totalWastedChars = 0
 	recentReads = map[string][]bounceEvent{}
 	bucket.perExtension = map[string]storage.BounceStats{}
+	bucket.perExtensionOrder = nil
 	recentlyEdited = map[string]int64{}
 	bucket.savingsByTool = map[string]storage.ToolSavings{}
 	persistStatsLocked(ctx)
@@ -952,7 +959,10 @@ func RecordRead(ctx context.Context, filePath string, wasCompressed bool, charsS
 
 			ext := extensionOf(filePath)
 			if ext != "" {
-				stats := bucket.perExtension[ext]
+				stats, ok := bucket.perExtension[ext]
+				if !ok {
+					bucket.perExtensionOrder = append(bucket.perExtensionOrder, ext)
+				}
 				stats.Bounces++
 				stats.WastedChars += last.charsSent
 				bucket.perExtension[ext] = stats
@@ -967,7 +977,10 @@ func RecordRead(ctx context.Context, filePath string, wasCompressed bool, charsS
 	recentReads[filePath] = events
 
 	if ext := extensionOf(filePath); ext != "" {
-		stats := bucket.perExtension[ext]
+		stats, ok := bucket.perExtension[ext]
+		if !ok {
+			bucket.perExtensionOrder = append(bucket.perExtensionOrder, ext)
+		}
 		stats.TotalReads++
 		bucket.perExtension[ext] = stats
 	}
@@ -1060,6 +1073,25 @@ func getBounceStatsLocked(bucket *StatsBucket) storage.BounceSummary {
 	}
 }
 
+// BounceStatsView is getBounceStats plus TS's Map insertion order for the
+// per-extension object. status renders Object.entries in this order and only
+// sorts by bounce count, stably.
+type BounceStatsView struct {
+	Summary storage.BounceSummary
+	Order   []string
+}
+
+// GetBounceStatsView returns the bounce counters and their TS insertion order.
+func GetBounceStatsView(ctx context.Context) BounceStatsView {
+	utilsMu.Lock()
+	defer utilsMu.Unlock()
+	bucket := statsBucketLocked(ctx)
+	return BounceStatsView{
+		Summary: getBounceStatsLocked(bucket),
+		Order:   append([]string(nil), bucket.perExtensionOrder...),
+	}
+}
+
 // GetBudget returns one tool's budget or the 100/50/50 default.
 // port of src/compression/utils.ts:getBudget
 func GetBudget(toolName string) storage.BudgetConfig {
@@ -1075,16 +1107,19 @@ func getBudgetLocked(toolName string) storage.BudgetConfig {
 	return storage.BudgetConfig{MaxLines: 100, HeadLines: 50, TailLines: 50}
 }
 
-// SetBudget replaces one tool's budget. A nil or zero maxChars disables the
-// char cap, matching JS truthiness.
+// SetBudget replaces one tool's budget. maxChars is stored only when TS treats
+// it as truthy (0/NaN disable it, ±Infinity and negatives are kept).
 // port of src/compression/utils.ts:setBudget
-func SetBudget(ctx context.Context, toolName string, maxLines int64, headLines int64, tailLines int64, maxChars *int64) {
+func SetBudget(ctx context.Context, toolName string, maxLines float64, headLines float64, tailLines float64, maxChars *float64) {
 	utilsMu.Lock()
 	defer utilsMu.Unlock()
 	budget := storage.BudgetConfig{MaxLines: maxLines, HeadLines: headLines, TailLines: tailLines}
-	if maxChars != nil && *maxChars != 0 {
+	if maxChars != nil && jsNumberTruthy(*maxChars) {
 		value := *maxChars
 		budget.MaxChars = &value
+	}
+	if _, ok := budgets[toolName]; !ok {
+		budgetOrder = append(budgetOrder, toolName)
 	}
 	budgets[toolName] = budget
 	persistStatsLocked(ctx)
@@ -1104,6 +1139,76 @@ func getAllBudgetsLocked() map[string]storage.BudgetConfig {
 		out[name] = budget
 	}
 	return out
+}
+
+// BudgetEntry is one ordered Tool => BudgetConfig pair.
+type BudgetEntry struct {
+	Name   string
+	Budget storage.BudgetConfig
+}
+
+// GetAllBudgetEntries returns the budgets in JS Object.entries order: integer
+// keys ascending first, then string keys in insertion order.
+// port of src/tools/status.ts:Object.entries(budgets)
+func GetAllBudgetEntries() []BudgetEntry {
+	utilsMu.Lock()
+	defer utilsMu.Unlock()
+	return getAllBudgetEntriesLocked()
+}
+
+func getAllBudgetEntriesLocked() []BudgetEntry {
+	out := make([]BudgetEntry, 0, len(budgets))
+	seen := make(map[string]bool, len(budgets))
+
+	// Integer-like property names enumerate first, ascending.
+	numeric := make([]string, 0)
+	rest := make([]string, 0)
+	for _, name := range budgetOrder {
+		if seen[name] {
+			continue
+		}
+		if _, ok := budgets[name]; !ok {
+			continue
+		}
+		seen[name] = true
+		if isJSArrayIndex(name) {
+			numeric = append(numeric, name)
+			continue
+		}
+		rest = append(rest, name)
+	}
+	sort.Slice(numeric, func(i, j int) bool {
+		return jsArrayIndexValue(numeric[i]) < jsArrayIndexValue(numeric[j])
+	})
+	for _, name := range append(numeric, rest...) {
+		out = append(out, BudgetEntry{Name: name, Budget: budgets[name]})
+	}
+	return out
+}
+
+// isJSArrayIndex reports whether key is an ECMAScript array index: the
+// canonical decimal form of a uint32 other than 2^32-1.
+func isJSArrayIndex(key string) bool {
+	if key == "" || (len(key) > 1 && key[0] == '0') {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		if key[i] < '0' || key[i] > '9' {
+			return false
+		}
+	}
+	value, err := strconv.ParseUint(key, 10, 64)
+	return err == nil && value < 4294967295
+}
+
+func jsArrayIndexValue(key string) uint64 {
+	value, _ := strconv.ParseUint(key, 10, 64)
+	return value
+}
+
+// jsNumberTruthy is JS ToBoolean for a number.
+func jsNumberTruthy(value float64) bool {
+	return value != 0 && !math.IsNaN(value)
 }
 
 // StripAnsi removes SGR, cursor, screen and C1 control sequences.
@@ -1163,46 +1268,71 @@ func CollapseRepeatedLines(text string) string {
 	return text
 }
 
-// jsArraySlice mirrors Array.prototype.slice(start, end) for string slices.
-func jsArraySlice(lines []string, start int, end int) []string {
-	n := len(lines)
-	if start < 0 {
-		start = n + start
-		if start < 0 {
-			start = 0
+// jsToIntegerOrInfinity is ECMAScript ToIntegerOrInfinity for slice bounds.
+func jsToIntegerOrInfinity(value float64) float64 {
+	if math.IsNaN(value) {
+		return 0
+	}
+	if math.IsInf(value, 0) {
+		return value
+	}
+	return math.Trunc(value)
+}
+
+// jsSliceBounds resolves Array.prototype.slice(start, end) to Go indices. A
+// nil end is JS `undefined`. JS coerces numbers to integers only here, at the
+// slice boundary; the line counts and omitted markers stay fractional.
+func jsSliceBounds(n int, start float64, end *float64) (int, int) {
+	relativeStart := jsToIntegerOrInfinity(start)
+	var begin float64
+	switch {
+	case math.IsInf(relativeStart, -1):
+		begin = 0
+	case relativeStart < 0:
+		begin = math.Max(float64(n)+relativeStart, 0)
+	default:
+		begin = math.Min(relativeStart, float64(n))
+	}
+
+	final := float64(n)
+	if end != nil {
+		relativeEnd := jsToIntegerOrInfinity(*end)
+		switch {
+		case math.IsInf(relativeEnd, -1):
+			final = 0
+		case relativeEnd < 0:
+			final = math.Max(float64(n)+relativeEnd, 0)
+		default:
+			final = math.Min(relativeEnd, float64(n))
 		}
 	}
-	if start > n {
-		start = n
+	if final < begin {
+		final = begin
 	}
-	if end < 0 {
-		end = n + end
-		if end < 0 {
-			end = 0
-		}
-	}
-	if end > n {
-		end = n
-	}
-	if end < start {
-		end = start
-	}
-	return lines[start:end]
+	return int(begin), int(final)
+}
+
+// jsArraySlice mirrors Array.prototype.slice(start, end) for string slices;
+// end nil is JS `undefined`.
+func jsArraySlice(lines []string, start float64, end *float64) []string {
+	begin, final := jsSliceBounds(len(lines), start, end)
+	return lines[begin:final]
 }
 
 // TruncateLines keeps head and tail lines around a truncation marker.
 // port of src/compression/utils.ts:truncateLines
-func TruncateLines(text string, maxLines int, headLines int, tailLines int) string {
+func TruncateLines(text string, maxLines float64, headLines float64, tailLines float64) string {
 	lines := strings.Split(text, "\n")
-	if len(lines) <= maxLines {
+	if float64(len(lines)) <= maxLines {
 		return text
 	}
-	head := jsArraySlice(lines, 0, headLines)
-	tail := jsArraySlice(lines, -tailLines, len(lines))
-	omitted := len(lines) - headLines - tailLines
+	head := jsArraySlice(lines, 0, &headLines)
+	tailStart := -tailLines
+	tail := jsArraySlice(lines, tailStart, nil)
+	omitted := float64(len(lines)) - headLines - tailLines
 	joined := make([]string, 0, len(head)+1+len(tail))
 	joined = append(joined, head...)
-	joined = append(joined, fmt.Sprintf("\n... (%d lines truncated) ...\n", omitted))
+	joined = append(joined, "\n... ("+jsNumberToString(omitted)+" lines truncated) ...\n")
 	joined = append(joined, tail...)
 	return strings.Join(joined, "\n")
 }
@@ -1213,76 +1343,113 @@ func TruncateLongOutput(text string) string {
 	return TruncateLines(text, globalMaxLines, globalHeadLines, globalTailLines)
 }
 
-// jsStringSlice mirrors String.prototype.slice over UTF-16 code units.
-// Unpaired surrogates serialize as U+FFFD, like Node writing UTF-8.
-func jsStringSlice(s string, start int, end int) string {
+// jsStringSlice mirrors String.prototype.slice over UTF-16 code units; end nil
+// is JS `undefined`. Unpaired surrogates serialize as U+FFFD, like Node
+// writing UTF-8.
+func jsStringSlice(s string, start float64, end *float64) string {
 	units := utf16.Encode([]rune(s))
-	n := len(units)
-	if start < 0 {
-		start = n + start
-		if start < 0 {
-			start = 0
+	begin, final := jsSliceBounds(len(units), start, end)
+	return string(utf16.Decode(units[begin:final]))
+}
+
+// jsNumberToString mirrors ECMAScript Number::toString(10), which is what
+// string interpolation and template literals use.
+func jsNumberToString(value float64) string {
+	if math.IsNaN(value) {
+		return "NaN"
+	}
+	if math.IsInf(value, 1) {
+		return "Infinity"
+	}
+	if math.IsInf(value, -1) {
+		return "-Infinity"
+	}
+	if value == 0 {
+		return "0"
+	}
+	negative := value < 0
+	if negative {
+		value = -value
+	}
+
+	repr := strconv.FormatFloat(value, 'e', -1, 64)
+	mantissa, exponentPart, _ := strings.Cut(repr, "e")
+	exponent, _ := strconv.Atoi(exponentPart)
+	digits := strings.Replace(mantissa, ".", "", 1)
+	n := len(digits)
+	k := exponent + 1
+
+	var out string
+	switch {
+	case k > 0 && k <= 21:
+		if n <= k {
+			out = digits + strings.Repeat("0", k-n)
+		} else {
+			out = digits[:k] + "." + digits[k:]
+		}
+	case k <= 0 && k > -6:
+		out = "0." + strings.Repeat("0", -k) + digits
+	default:
+		if n == 1 {
+			out = digits
+		} else {
+			out = digits[:1] + "." + digits[1:]
+		}
+		exponentOut := k - 1
+		if exponentOut >= 0 {
+			out += "e+" + strconv.Itoa(exponentOut)
+		} else {
+			out += "e-" + strconv.Itoa(-exponentOut)
 		}
 	}
-	if start > n {
-		start = n
+	if negative {
+		out = "-" + out
 	}
-	if end < 0 {
-		end = n + end
-		if end < 0 {
-			end = 0
-		}
-	}
-	if end > n {
-		end = n
-	}
-	if end < start {
-		end = start
-	}
-	return string(utf16.Decode(units[start:end]))
+	return out
 }
 
 // TruncateChars applies a character cap after the line budget, cutting at line
 // boundaries unless a single line is larger than the cap.
 // port of src/compression/utils.ts:truncateChars
-func TruncateChars(text string, maxChars int, headLines int, tailLines int) string {
-	if utf16Length(text) <= maxChars {
+func TruncateChars(text string, maxChars float64, headLines float64, tailLines float64) string {
+	if float64(utf16Length(text)) <= maxChars {
 		return text
 	}
-	keep := max(0, maxChars-charMarkerReserve)
+	keep := math.Max(0, maxChars-charMarkerReserve)
 	ratio := 0.5
 	if headLines+tailLines > 0 {
-		ratio = float64(headLines) / float64(headLines+tailLines)
+		ratio = headLines / (headLines + tailLines)
 	}
-	headBudget := int(math.Floor(float64(keep) * ratio))
+	headBudget := math.Floor(keep * ratio)
 	tailBudget := keep - headBudget
 	lines := strings.Split(text, "\n")
 	n := len(lines)
 
 	h := 0
-	used := 0
-	for h < n && used+utf16Length(lines[h])+1 <= headBudget {
-		used += utf16Length(lines[h]) + 1
+	used := 0.0
+	for h < n && used+float64(utf16Length(lines[h])+1) <= headBudget {
+		used += float64(utf16Length(lines[h]) + 1)
 		h++
 	}
 	t := n
 	used = 0
-	for t-1 >= h && used+utf16Length(lines[t-1])+1 <= tailBudget {
-		used += utf16Length(lines[t-1]) + 1
+	for t-1 >= h && used+float64(utf16Length(lines[t-1])+1) <= tailBudget {
+		used += float64(utf16Length(lines[t-1]) + 1)
 		t--
 	}
 
 	head := strings.Join(lines[:h], "\n")
 	tail := strings.Join(lines[t:], "\n")
-	if h == 0 && utf16Length(lines[0]) > maxChars {
-		head = jsStringSlice(lines[0], 0, headBudget)
+	if h == 0 && float64(utf16Length(lines[0])) > maxChars {
+		head = jsStringSlice(lines[0], 0, &headBudget)
 	}
-	if t == n && utf16Length(lines[n-1]) > maxChars {
-		tail = jsStringSlice(lines[n-1], -tailBudget, utf16Length(lines[n-1]))
+	if t == n && float64(utf16Length(lines[n-1])) > maxChars {
+		start := -tailBudget
+		tail = jsStringSlice(lines[n-1], start, nil)
 	}
 
-	dropped := utf16Length(text) - utf16Length(head) - utf16Length(tail)
-	marker := fmt.Sprintf("... (%d chars truncated) ...", dropped)
+	dropped := float64(utf16Length(text)) - float64(utf16Length(head)) - float64(utf16Length(tail))
+	marker := "... (" + jsNumberToString(dropped) + " chars truncated) ..."
 	parts := make([]string, 0, 3)
 	for _, part := range []string{head, marker, tail} {
 		if part != "" {
@@ -1315,10 +1482,11 @@ func FitsBudget(text string, toolName string, maxBytes ...int) bool {
 		return false
 	}
 	budget := GetBudget(toolName)
-	if budget.MaxChars != nil && utf16Length(text) > int(*budget.MaxChars) {
+	if budget.MaxChars != nil && jsNumberTruthy(*budget.MaxChars) &&
+		float64(utf16Length(text)) > *budget.MaxChars {
 		return false
 	}
-	return countLines(text) <= int(budget.MaxLines)
+	return float64(countLines(text)) <= budget.MaxLines
 }
 
 // BudgetedText applies ANSI stripping, blank-line collapse, line truncation,
@@ -1333,13 +1501,13 @@ func BudgetedText(text string, toolName string) string {
 	collapsed := CollapseBlankLines(stripped)
 	truncated := TruncateLines(
 		collapsed,
-		int(budget.MaxLines),
-		int(budget.HeadLines),
-		int(budget.TailLines),
+		budget.MaxLines,
+		budget.HeadLines,
+		budget.TailLines,
 	)
 	capped := TruncateLongOutput(truncated)
-	if budget.MaxChars != nil {
-		return TruncateChars(capped, int(*budget.MaxChars), int(budget.HeadLines), int(budget.TailLines))
+	if budget.MaxChars != nil && jsNumberTruthy(*budget.MaxChars) {
+		return TruncateChars(capped, *budget.MaxChars, budget.HeadLines, budget.TailLines)
 	}
 	return capped
 }
@@ -1720,5 +1888,5 @@ func RewriteCommandWithRtk(ctx context.Context, command string, incomingAlreadyW
 	return rewritten
 }
 
-// int64Ptr returns a pointer to v (for optional BudgetConfig.MaxChars).
-func int64Ptr(v int64) *int64 { return &v }
+// numberPtr returns a pointer to v (for optional BudgetConfig.MaxChars).
+func numberPtr(v float64) *float64 { return &v }

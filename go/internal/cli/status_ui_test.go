@@ -75,6 +75,22 @@ func deterministic(t *testing.T) {
 	t.Setenv("FORCE_COLOR", "")
 }
 
+// TestAppendBudgetsFractionalNumbers mirrors TS's `${b.maxLines}` template
+// interpolation: configured fractions must not be truncated by the renderer.
+func TestAppendBudgetsFractionalNumbers(t *testing.T) {
+	deterministic(t)
+	input := emptyStatusSample()
+	input.HasData = true
+	input.Verbose = true
+	input.Budgets = []BudgetEntry{{Name: "frac", Value: Budget{MaxLines: 12.7, HeadLines: 2.5, TailLines: 1.25}}}
+	out := RenderStatusCLI(input)
+	for _, want := range []string{"frac", "max=12.7", "head=2.5", "tail=1.25"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // Ported from test.mjs "12. Testing status-ui renderer".
 func TestFormatCompact(t *testing.T) {
 	tests := []struct {
