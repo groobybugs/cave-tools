@@ -149,21 +149,31 @@ func exeName(tool SearchBin) string {
 }
 
 // port of src/runtime/bins.ts:binDir
-func BinDir() string {
+// Uses the call env, like WhichOnPath: daemon clients get their own bin dir.
+// port of src/runtime/bins.ts:binDir
+func BinDir(ctx context.Context) string {
+	env := GetEnv(ctx)
 	if goruntime.GOOS == "windows" {
-		// TS reads process.env directly here, outside any call context.
-		root := os.Getenv("LOCALAPPDATA")
+		home := env["USERPROFILE"]
+		if home == "" {
+			home = homeDir()
+		}
+		root := env["LOCALAPPDATA"]
 		if root == "" {
-			root = filepath.Join(homeDir(), "AppData", "Local")
+			root = filepath.Join(home, "AppData", "Local")
 		}
 		return filepath.Join(root, "cave-tools", "bin")
 	}
-	return filepath.Join(homeDir(), ".local", "share", "cave-tools", "bin")
+	home := env["HOME"]
+	if home == "" {
+		home = homeDir()
+	}
+	return filepath.Join(home, ".local", "share", "cave-tools", "bin")
 }
 
 // port of src/runtime/bins.ts:cachedBinPath
-func CachedBinPath(tool SearchBin) string {
-	return filepath.Join(BinDir(), exeName(tool))
+func CachedBinPath(ctx context.Context, tool SearchBin) string {
+	return filepath.Join(BinDir(ctx), exeName(tool))
 }
 
 func homeDir() string {
@@ -390,11 +400,11 @@ func installFromGithub(ctx context.Context, tool SearchBin, log func(message str
 	if err != nil {
 		return "", err
 	}
-	destDir := BinDir()
+	destDir := BinDir(ctx)
 	if err := os.MkdirAll(destDir, 0o777); err != nil {
 		return "", err
 	}
-	dest := CachedBinPath(tool)
+	dest := CachedBinPath(ctx, tool)
 	tmpDest := fmt.Sprintf("%s.%d.tmp", dest, os.Getpid())
 	if err := copyFile(extracted, tmpDest); err != nil {
 		return "", err
@@ -432,7 +442,7 @@ func resolveTool(ctx context.Context, tool SearchBin, userPath string, log func(
 	if userPath != "" {
 		return userPath
 	}
-	cached := CachedBinPath(tool)
+	cached := CachedBinPath(ctx, tool)
 	if isExecutable(cached) {
 		return cached
 	}

@@ -402,3 +402,18 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TS counts chars in UTF-16 units (String.length); expected values from
+// dist/tools/line-range.js on the same inputs.
+func TestLineRangeCountsUTF16Units(t *testing.T) {
+	c := "añb\nçd\ne\n"
+	if r := ApplyRangeEdit(c, 1, 2, "x"); r.ReplacedChars != 6 {
+		t.Fatalf("ReplacedChars = %d, want 6", r.ReplacedChars)
+	}
+	if m := ApplyMoveLines(c, 1, 1, 3); m.MovedChars != 3 {
+		t.Fatalf("MovedChars = %d, want 3", m.MovedChars)
+	}
+	if v := VerifyRangeChecksum(c, 1, 1, "ñññ"); v.Error != "expected_range_checksum must be at least 4 hex characters" {
+		t.Fatalf("VerifyRangeChecksum(ñññ) error = %q", v.Error)
+	}
+}

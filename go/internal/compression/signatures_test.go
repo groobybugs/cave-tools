@@ -75,7 +75,7 @@ func TestFormatSignatures(t *testing.T) {
 				"enum Color",
 				"const MAX",
 				"const count: number",
-				"export const load",
+				"export async fn load(id: string) → Promise<User>",
 				"  export class Base",
 				"const legacy: any",
 				"const typed: Loader",
@@ -185,4 +185,37 @@ func TestSignatureJSWhitespace(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestArrowFunctionsAreFunctions ports the TS fix where the arrow pattern runs
+// before the plain const pattern: `const f = (a) => …` used to be reported as
+// a const, and its async marker came from the const group.
+func TestArrowFunctionsAreFunctions(t *testing.T) {
+	content := "export const f = async (a: number): Promise<void> => {}\nconst g = (b) => b\nconst h = 1\n"
+	sigs := ExtractSignatures(content, ".ts")
+	if len(sigs) != 3 {
+		t.Fatalf("signatures = %+v, want 3", sigs)
+	}
+
+	f := sigs[0]
+	if f.Kind != SigFn || f.Name != "f" || !f.IsAsync || f.Params != "a: number" ||
+		f.ReturnType != "Promise<void>" || !f.IsExported {
+		t.Errorf("f = %+v", f)
+	}
+	if want := "export async fn f(a: number) → Promise<void>"; FormatSignature(f) != want {
+		t.Errorf("FormatSignature(f) = %q, want %q", FormatSignature(f), want)
+	}
+
+	g := sigs[1]
+	if g.Kind != SigFn || g.Name != "g" || g.IsAsync || g.Params != "b" {
+		t.Errorf("g = %+v", g)
+	}
+	if want := "fn g(b)"; FormatSignature(g) != want {
+		t.Errorf("FormatSignature(g) = %q, want %q", FormatSignature(g), want)
+	}
+
+	h := sigs[2]
+	if h.Kind != SigConst || h.Name != "h" || h.IsAsync {
+		t.Errorf("h = %+v", h)
+	}
 }

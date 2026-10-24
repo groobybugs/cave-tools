@@ -70,11 +70,13 @@ func rpc(method string) (*rpcReply, error) {
 			}
 		}
 		scanner := bufio.NewScanner(conn)
+		// TS buffers lines of any length; bufio's default 64 KB cap would end
+		// the scan early on a long reply line.
+		scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 		for scanner.Scan() {
 			var msg rpcReply
 			if json.Unmarshal(scanner.Bytes(), &msg) != nil {
-				// TS lets JSON.parse throw here; a real daemon only writes valid
-				// newline-delimited JSON, so skip garbage instead of crashing.
+				// Skip malformed lines, as TS does since main 1b3fbbc.
 				continue
 			}
 			if msg.ID == wantID {
