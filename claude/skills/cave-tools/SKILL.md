@@ -30,7 +30,7 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 
 - Use `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets). Since 0.2.0 also returns image files (png/jpg/jpeg/gif/webp/bmp/svg up to 5 MB) as MCP image blocks.
 - Use `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
-- Shell, Claude Code / opencode: native Bash/shell is fine in every mode. Its output is auto-compressed after it runs (Claude: successful commands only, via PostToolUse; opencode: via `execute.after`). Never prefix `cave-tools` or `rtk` yourself. `cave__bash` also works (RTK rewrite, compresses failures too, max timeout 10min).
+- Shell, Claude Code / opencode: native Bash/shell is the default in every mode. Output is auto-compressed through the CLI filter (Claude: successful commands only, via PostToolUse; opencode: completed results via `execute.after`). Never prefix `cave-tools` or `rtk` yourself. Use `cave__bash` for RTK pre-rewrite or guaranteed failure compression (max timeout 10min).
 - Shell, other hosts (Codex, Grok, Gemini, Antigravity, Kiro, Hermes, Cursor, ZCode): native shell output is NOT compressed. Use `cave__bash`; if MCP is down, run `cave-tools bash -- '<cmd>'` in the native shell.
 - Long jobs: native background (`run_in_background`, Monitor) for servers, watchers and streams — its output is never compressed. Use `cave__bash_start` when a long job's final output should be compressed: returns a jobId, poll `cave__bash_status` (`wait` up to 60s), stop `cave__bash_stop`. Jobs survive server restarts; `cave-tools jobs` lists/kills them. Never `sleep`-poll.
 - `[cave: full output … at <path>]` means output was trimmed: `cave__read` offset/limit or `cave__grep` that path; don't re-run the command.
@@ -70,7 +70,7 @@ Not: `Read("/etc/hosts")`
 Yes: `cave__read({file_path: "/etc/hosts"})`
 
 Not: `Bash("cave-tools bash -- 'git status'")` or `Bash("rtk git status")` on Claude Code / opencode
-Yes: `Bash("git status")` (auto-compressed) or `cave__bash({command: "git status"})`
+Yes: `Bash("git status")` by default (auto-compressed); use `cave__bash({command: "git status"})` for RTK/failure compression
 
 Not: `Grep("pattern", "src/")`
 Yes: `cave__grep({pattern: "pattern", path: "src/"})`
@@ -87,9 +87,9 @@ Run `cave-tools status` (CLI) or `cave__status` (MCP) for reduction %, hit rate,
 The hooks inject only the block below at SessionStart/SubagentStart (keep it short; it costs tokens every session).
 
 <!-- cave-tools-compact-begin -->
-Prefer cave tools over built-ins (same results, fewer tokens):
+Prefer cave file/web/edit tools over built-ins (same results, fewer tokens):
 - Read→`cave__read`, Grep→`cave__grep`, Glob→`cave__find`, ls→`cave__ls`, WebSearch/WebFetch→`cave__websearch`/`cave__webfetch`.
-- Native Bash auto-compressed (failures: `cave__bash`); never prefix `cave-tools`/`rtk`.
+- Native Bash default (CLI-filtered); `cave__bash` for RTK/failures; never prefix `cave-tools`/`rtk`.
 - Background for servers/watchers; long jobs: `cave__bash_start`/`_status` (`wait` ≤60s). No sleep-poll.
 - `[cave: full output … at <path>]`: `cave__read`/`cave__grep` it.
 - Edit: `cave__edit` old_string/new_string, or line range after `cave__read` `line_numbers=true` (pass `expected_hash`/`expected_range_checksum`). `cave__write` whole files, `cave__apply_patch` multi-file.

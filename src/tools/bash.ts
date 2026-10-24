@@ -97,7 +97,7 @@ export const bashTool: Tool & {
 } = {
   name: "cave__bash",
   description:
-    "Shell with RTK rewriting (never prefix rtk yourself), secret redaction, output budget; archives what it trims. On Claude Code/opencode native shell output is already compressed (successful commands); this also compresses failures.",
+    "Shell with RTK pre-rewrite, secret redaction, output budget, and failure compression. On Claude Code/opencode use native shell by default (CLI-filtered); use this for RTK pre-rewrite or guaranteed failure compression. Never prefix rtk yourself.",
   inputSchema: {
     type: "object",
     properties: {

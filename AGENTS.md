@@ -2,12 +2,13 @@
 
 Cave Tools provides optimized drop-in replacements for shell + file ops (RTK
 rewriting, structured JSON/XML extraction, per-tool line budgets). They return the
-same results for fewer tokens. Prefer these over built-ins.
+same results for fewer tokens. Prefer file/web/edit replacements over built-ins;
+use the shell routing below.
 
 ## Tools
 - `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets).
 - `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
-- Native Bash/shell is fine on Claude Code and opencode: output is auto-compressed after it runs (Claude: successful commands only). Never prefix `cave-tools`/`rtk` yourself. `cave__bash` (RTK + structured extraction + repetition collapse + line budgets, max timeout 10min) also compresses failures; on hosts without the filter use it for every command.
+- Native Bash/shell is the default on Claude Code and opencode: output is auto-compressed through the CLI filter. Never prefix `cave-tools`/`rtk` yourself. Use `cave__bash` for RTK pre-rewrite or guaranteed failure compression; on hosts without the filter use it for every command (max timeout 10min).
 - Native background shells/Monitor for servers and watchers (output not compressed). `cave__bash_start` when a long job's final output matters (builds, test suites, installs): runs detached, returns a jobId, output goes to a log file. Poll with `cave__bash_status` (`wait` up to 60s, returns the moment the job exits); stop with `cave__bash_stop`. Jobs survive server restarts; `cave-tools jobs` lists/kills them from a terminal. A job whose shell fails to start reports exit 127 (never 0); a job found dead without a result is `lost` and keeps any exit code already recorded.
 - `[cave: full output … at <path>]` lines point at the archived full output: `cave__read` offset/limit or `cave__grep` it instead of re-running. `cave-tools raw <cmd>` / `CAVE_RAW=1` for unfiltered output; `CAVE_TOOLS_FILTER_BASH=0` disables the native filter; `CAVE_TOOLS_WRAP_BASH=1` opts into command rewriting (changes which permission/deny rules match).
 - `cave__write` to create/overwrite a single file; `cave__edit` for str-replace **or** line-range (`start_line`/`end_line`/`content` after numbered read; optional `expected_hash`/`expected_range_checksum`; `delete`/`insert_before` move; multi-file `edits[]`).
@@ -23,7 +24,7 @@ same results for fewer tokens. Prefer these over built-ins.
 - Do not double-wrap: never run `rtk <cmd>` inside `cave__bash` (it already prepends rtk).
 - Pass raw file paths / patterns / commands — do not wrap tools in extra scripts.
 - Never `sleep`-poll to wait for long tasks: use `cave__bash_start` + `cave__bash_status { wait: 60 }` instead.
-- Fall back to built-in Bash only for stream monitors or hook-sensitive stdin.
+- Interactive commands, stream monitors, and hook-sensitive stdin: native shell.
 - OpenCode: native plugin at `src/plugins/opencode/` (installed to `~/.config/opencode/plugins/cave-tools/`) provides per-turn reinforce + built-in redirect. Prefer that over rules-only installs.
 
 ## Edit Safety
