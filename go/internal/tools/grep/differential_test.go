@@ -29,6 +29,16 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fixtureDir, "many.ts"), []byte(strings.Join(many, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Fractional context needs a match past line 2 so line - context stays
+	// above the Math.max(1, ...) clamp.
+	if err := os.WriteFile(filepath.Join(fixtureDir, "ctx.txt"), []byte("one\ntwo\nthree\nfour\nfive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Missing-key coercion: String(undefined) is "undefined", String(null) is
+	// "null"; the two lines make the difference visible in the matches.
+	if err := os.WriteFile(filepath.Join(fixtureDir, "presence.txt"), []byte("undefined\nnull\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []struct {
 		name      string
@@ -49,6 +59,14 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 		{name: "limit-one-in-file", args: `{"pattern":"export","path":"a.ts","limit":1}`},
 		{name: "invalid-pattern", args: `{"pattern":"(","path":"."}`},
 		{name: "no-matches", args: `{"pattern":"NO_SUCH_TOKEN","path":"."}`},
+		{name: "fractional-context", args: `{"pattern":"three","path":".","glob":"ctx.txt","context":1.5,"limit":5}`},
+		{name: "fractional-context-tail", args: `{"pattern":"four","path":".","glob":"ctx.txt","context":1.5,"limit":5}`},
+		{name: "fractional-context-integer-start", args: `{"pattern":"one","path":".","glob":"ctx.txt","context":1.5,"limit":5}`},
+		{name: "fractional-context-half", args: `{"pattern":"three","path":".","glob":"ctx.txt","context":0.5,"limit":5}`},
+		{name: "huge-context", args: `{"pattern":"three","path":".","glob":"ctx.txt","context":1e300,"limit":5}`},
+		{name: "string-context-is-zero", args: `{"pattern":"three","path":".","glob":"ctx.txt","context":"1.5","limit":5}`},
+		{name: "missing-pattern", args: `{}`},
+		{name: "null-pattern", args: `{"pattern":null}`},
 	}
 
 	for _, testCase := range cases {
@@ -226,4 +244,103 @@ func decodeJSON(t *testing.T, raw []byte) any {
 		t.Fatalf("invalid JSON %q: %v", raw, err)
 	}
 	return value
+}
+
+// TestDifferentialNaNLimitWithFakeRg pins the NaN-limit path against a
+// deterministic fake rg: TS never breaks out of the record loop because
+// matches.length > NaN is false, so a later malformed record must still throw
+// even though slice(0, NaN) is empty. A Go int64 limit would stop after the
+// first match and hide the error.
+func TestDifferentialNaNLimitWithFakeRg(t *testing.T) {
+	nodePath, distModule := differentialDeps(t)
+	fixtureDir := t.TempDir()
+	binDir := t.TempDir()
+	rgPath := filepath.Join(binDir, "rg")
+	script := "#!/bin/sh\n/bin/cat \"$RGFIXTURE\"\nexit \"$RGEXIT\"\n"
+	if err := os.WriteFile(rgPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(rgPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	match := `{"type":"match","data":{"path":{"text":"a.ts"},"lines":{"text":"hello\n"},"line_number":1}}` + "\n" +
+		`{"type":"match","data":{"path":{"text":"a.ts"},"lines":{"text":"hello again\n"},"line_number":2}}` + "\n"
+	cases := []struct {
+		name string
+		body string
+		exit string
+	}{
+		{name: "malformed-record-after-match", body: match + "not json\n", exit: "0"},
+		{name: "code-2-truncates", body: match, exit: "2"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			rgFixture := filepath.Join(t.TempDir(), "rg.json")
+			if err := os.WriteFile(rgFixture, []byte(testCase.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tsData := t.TempDir()
+			env := map[string]string{
+				"PATH":                binDir,
+				"RGFIXTURE":           rgFixture,
+				"RGEXIT":              testCase.exit,
+				"CAVE_TOOLS_DATA_DIR": tsData,
+				"CLAUDE_CONFIG_DIR":   filepath.Join(tsData, "claude"),
+			}
+			args := `{"pattern":"hello","path":".","limit":"abc"}`
+			tsJSON := runTypeScriptGrepEnv(t, nodePath, distModule, args, fixtureDir, env)
+			goJSON := runGoHandlerEnv(t, fixtureDir, args, env)
+			if !reflect.DeepEqual(tsJSON, goJSON) {
+				t.Fatalf("TS and Go disagree\nTS: %#v\nGo: %#v", tsJSON, goJSON)
+			}
+		})
+	}
+}
+
+// runTypeScriptGrepEnv is runTypeScriptGrep with extra environment values
+// (used to point PATH at a fake rg).
+func runTypeScriptGrepEnv(t *testing.T, nodePath, module, argsJSON, cwd string, env map[string]string) any {
+	t.Helper()
+	overrides := map[string]string{
+		"CAVE_DIFF_MODULE": module,
+		"CAVE_DIFF_EXPORT": "grepTool",
+		"CAVE_DIFF_ARGS":   argsJSON,
+	}
+	for key, value := range env {
+		overrides[key] = value
+	}
+	return runNodeJSON(t, nodePath, handlerScript, overrides, cwd)
+}
+
+// runGoHandlerEnv is runGoHandler with extra environment values.
+func runGoHandlerEnv(t *testing.T, cwd, argsJSON string, extra map[string]string) any {
+	t.Helper()
+	env := rt.EnvFromEnviron(os.Environ())
+	for key, value := range extra {
+		env[key] = value
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		t.Fatalf("args: %v", err)
+	}
+	var result any
+	rt.RunWithContext(context.Background(), &rt.CallContext{
+		SessionID: "differential",
+		Cwd:       cwd,
+		Env:       env,
+		ClientID:  "local",
+	}, func(ctx context.Context) struct{} {
+		output, err := Tool.Handler(ctx, args)
+		if err != nil {
+			t.Fatalf("go handler: %v", err)
+		}
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			t.Fatalf("marshal go result: %v", err)
+		}
+		result = decodeJSON(t, encoded)
+		return struct{}{}
+	})
+	return result
 }

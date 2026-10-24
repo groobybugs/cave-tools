@@ -206,3 +206,98 @@ func decodeJSON(t *testing.T, raw []byte) any {
 	}
 	return value
 }
+
+// TestDifferentialFallbackOrder exercises the no-fd/no-rg findWithNode path on
+// both sides with the same PATH (two existing but non-executable files, so the
+// resolvers pick them, the spawns fail and neither side tries a download).
+// Results are compared raw: TS sorts with localeCompare, so B.ts/a.ts order is
+// part of the contract and must not be normalized away.
+func TestDifferentialFallbackOrder(t *testing.T) {
+	nodePath, distModule := differentialDeps(t)
+	fixtureDir := t.TempDir()
+	for _, name := range []string{"B.ts", "a.ts", "C.ts", "b.ts", "undefined", "null"} {
+		if err := os.WriteFile(filepath.Join(fixtureDir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binDir := t.TempDir()
+	for _, name := range []string{"fd", "rg"} {
+		path := filepath.Join(binDir, name)
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := []struct {
+		name string
+		args string
+	}{
+		{name: "locale-order", args: `{"pattern":"*","limit":100}`},
+		{name: "fractional-limit", args: `{"pattern":"*","limit":2.5}`},
+		{name: "string-fractional-limit", args: `{"pattern":"*","limit":"2.5"}`},
+		{name: "huge-limit", args: `{"pattern":"*","limit":1e21}`},
+		{name: "missing-pattern", args: `{}`},
+		{name: "null-pattern", args: `{"pattern":null}`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			tsData := t.TempDir()
+			env := map[string]string{
+				"PATH":                binDir,
+				"CAVE_TOOLS_DATA_DIR": tsData,
+				"CLAUDE_CONFIG_DIR":   filepath.Join(tsData, "claude"),
+			}
+			tsJSON := runTypeScriptFindEnv(t, nodePath, distModule, testCase.args, fixtureDir, env)
+			goJSON := runGoHandlerEnv(t, fixtureDir, testCase.args, env)
+			if !reflect.DeepEqual(tsJSON, goJSON) {
+				t.Fatalf("TS and Go disagree\nTS: %#v\nGo: %#v", tsJSON, goJSON)
+			}
+		})
+	}
+}
+
+// runTypeScriptFindEnv is runTypeScriptFind with extra environment values.
+func runTypeScriptFindEnv(t *testing.T, nodePath, module, argsJSON, cwd string, extra map[string]string) any {
+	t.Helper()
+	env := map[string]string{
+		"CAVE_DIFF_MODULE": module,
+		"CAVE_DIFF_EXPORT": "findTool",
+		"CAVE_DIFF_ARGS":   argsJSON,
+	}
+	for key, value := range extra {
+		env[key] = value
+	}
+	return runNodeJSON(t, nodePath, handlerScript, env, cwd)
+}
+
+// runGoHandlerEnv is runGoHandler with extra environment values.
+func runGoHandlerEnv(t *testing.T, cwd, argsJSON string, extra map[string]string) any {
+	t.Helper()
+	env := rt.EnvFromEnviron(os.Environ())
+	for key, value := range extra {
+		env[key] = value
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		t.Fatalf("args: %v", err)
+	}
+	var result any
+	rt.RunWithContext(context.Background(), &rt.CallContext{
+		SessionID: "differential",
+		Cwd:       cwd,
+		Env:       env,
+		ClientID:  "local",
+	}, func(ctx context.Context) struct{} {
+		output, err := Tool.Handler(ctx, args)
+		if err != nil {
+			t.Fatalf("go handler: %v", err)
+		}
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			t.Fatalf("marshal go result: %v", err)
+		}
+		result = decodeJSON(t, encoded)
+		return struct{}{}
+	})
+	return result
+}

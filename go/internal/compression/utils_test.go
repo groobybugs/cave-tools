@@ -3,10 +3,13 @@ package compression
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -559,14 +562,116 @@ func jsonUnmarshal(text string, target any) error {
 	return json.Unmarshal([]byte(text), target)
 }
 
+// TestTruncateJSNumberSemantics pins TS's fractional number handling: line
+// counts and the omitted marker stay fractional, and numbers are coerced only
+// inside Array.prototype.slice.
+func TestTruncateJSNumberSemantics(t *testing.T) {
+	text := "a\nb\nc\nd\ne\nf"
+	if got, want := TruncateLines(text, 4, 1.5, 1.25), "a\n\n... (3.25 lines truncated) ...\n\nf"; got != want {
+		t.Errorf("fractional = %q, want %q", got, want)
+	}
+	if got := TruncateLines(text, math.Inf(1), 1, 1); got != text {
+		t.Errorf("Infinity maxLines = %q, want unchanged", got)
+	}
+	if got, want := TruncateLines(text, math.NaN(), 1, 1), "a\n\n... (4 lines truncated) ...\n\nf"; got != want {
+		t.Errorf("NaN maxLines = %q, want %q", got, want)
+	}
+	if got, want := TruncateLines(text, 3, -2, -1), "a\nb\nc\nd\n\n... (9 lines truncated) ...\n\nb\nc\nd\ne\nf"; got != want {
+		t.Errorf("negative bounds = %q, want %q", got, want)
+	}
+}
+
+// TestTruncateCharsJSNumberSemantics covers the char cap's JS arithmetic,
+// including Infinity and a negative cap.
+func TestTruncateCharsJSNumberSemantics(t *testing.T) {
+	if got := TruncateChars("short", math.Inf(1), 1, 1); got != "short" {
+		t.Errorf("Infinity cap = %q, want unchanged", got)
+	}
+	if got, want := TruncateChars("a\nb", -5, 0, 0), "... (2 chars truncated) ...\nb"; got != want {
+		t.Errorf("negative cap = %q, want %q", got, want)
+	}
+}
+
+// TestBudgetEntriesJSEntryOrder covers Object.entries(budgets): integer-like
+// names enumerate first ascending, then the rest in insertion order.
+func TestBudgetEntriesJSEntryOrder(t *testing.T) {
+	t.Cleanup(waitPendingPersists)
+	ctx := context.Background()
+
+	before := make([]string, 0)
+	for _, entry := range GetAllBudgetEntries() {
+		before = append(before, entry.Name)
+	}
+	for _, name := range []string{"2", "10", "1", "zzz", "aaa"} {
+		SetBudget(ctx, name, 3, 1, 1, numberPtr(1.5))
+	}
+	entries := GetAllBudgetEntries()
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name)
+	}
+	numeric := []string{"1", "2", "10"}
+	rest := make([]string, 0, len(before)+2)
+	for _, name := range before {
+		if isJSArrayIndex(name) {
+			numeric = append(numeric, name)
+		} else {
+			rest = append(rest, name)
+		}
+	}
+	rest = append(rest, "zzz", "aaa")
+	sort.Slice(numeric, func(i, j int) bool {
+		return jsArrayIndexValue(numeric[i]) < jsArrayIndexValue(numeric[j])
+	})
+	want := append(numeric, rest...)
+	if !slices.Equal(names, want) {
+		t.Fatalf("entries = %v, want %v", names, want)
+	}
+	if got := GetBudget("1").MaxChars; got == nil || *got != 1.5 {
+		t.Fatalf("fractional maxChars lost: %v", got)
+	}
+
+	for key, want := range map[string]bool{
+		"0": true, "1": true, "4294967294": true, "4294967295": false,
+		"00": false, "01": false, "-1": false, "1.0": false, "": false,
+	} {
+		if got := isJSArrayIndex(key); got != want {
+			t.Errorf("isJSArrayIndex(%q) = %v, want %v", key, got, want)
+		}
+	}
+}
+
+// TestResetStatsKeepsBudgetsClearsBounceOrder matches TS: resetStats clears
+// counters and the per-extension Map but not the budgets object.
+func TestResetStatsKeepsBudgetsClearsBounceOrder(t *testing.T) {
+	t.Cleanup(waitPendingPersists)
+	ctx := context.Background()
+	SetBudget(ctx, "reset-probe", 7.5, 2, 2, numberPtr(9.5))
+	RecordRead(ctx, "x.zzz", true, 10)
+	RecordRead(ctx, "x.zzz", false, 20)
+	RecordRead(ctx, "x.aaa", true, 10)
+	RecordRead(ctx, "x.aaa", false, 20)
+	if got := GetBounceStatsView(ctx); !slices.Equal(got.Order, []string{".zzz", ".aaa"}) {
+		t.Fatalf("bounce order = %v", got.Order)
+	}
+
+	ResetStats(ctx)
+	if got := GetBounceStatsView(ctx); len(got.Order) != 0 || len(got.Summary.ByExtension) != 0 {
+		t.Fatalf("bounce state after reset = %+v", got)
+	}
+	if got := GetBudget("reset-probe"); got.MaxLines != 7.5 || got.MaxChars == nil || *got.MaxChars != 9.5 {
+		t.Fatalf("resetStats must not clear budgets: %+v", got)
+	}
+}
+
 // TestBudgetDefaultsAndCharCaps ports test.mjs char-cap budget assertions.
 func TestBudgetDefaultsAndCharCaps(t *testing.T) {
 	t.Cleanup(waitPendingPersists)
 	ctx := context.Background()
 	defaults := GetAllBudgets()
-	for name, want := range map[string]int64{"bash": 50, "grep": 60, "web": 120, "read": 200, "ls": 60, "find": 120} {
+	for name, want := range map[string]float64{"bash": 50, "grep": 60, "web": 120, "read": 200, "ls": 60, "find": 120} {
 		if defaults[name].MaxLines != want {
-			t.Fatalf("%s.maxLines = %d, want %d", name, defaults[name].MaxLines, want)
+			t.Fatalf("%s.maxLines = %v, want %v", name, defaults[name].MaxLines, want)
 		}
 	}
 	if defaults["read"].MaxChars != nil {
@@ -587,9 +692,9 @@ func TestBudgetDefaultsAndCharCaps(t *testing.T) {
 
 	// Restore mutated budgets after this test.
 	t.Cleanup(func() {
-		SetBudget(ctx, "bash", 50, 15, 35, int64Ptr(6000))
-		SetBudget(ctx, "grep", 60, 30, 30, int64Ptr(6000))
-		SetBudget(ctx, "web", 120, 60, 60, int64Ptr(8000))
+		SetBudget(ctx, "bash", 50, 15, 35, numberPtr(6000))
+		SetBudget(ctx, "grep", 60, 30, 30, numberPtr(6000))
+		SetBudget(ctx, "web", 120, 60, 60, numberPtr(8000))
 	})
 
 	// Long lines under the line budget: char cap trims at line boundaries.
@@ -683,15 +788,15 @@ func TestBudgetDefaultsAndCharCaps(t *testing.T) {
 	}
 
 	// setBudget: max_chars set, 0 disables.
-	SetBudget(ctx, "web", 120, 60, 60, int64Ptr(100))
+	SetBudget(ctx, "web", 120, 60, 60, numberPtr(100))
 	if budget := GetBudget("web"); budget.MaxChars == nil || *budget.MaxChars != 100 {
 		t.Fatalf("web.maxChars = %v, want 100", budget.MaxChars)
 	}
-	SetBudget(ctx, "web", 120, 60, 60, int64Ptr(0))
+	SetBudget(ctx, "web", 120, 60, 60, numberPtr(0))
 	if budget := GetBudget("web"); budget.MaxChars != nil {
 		t.Fatal("max_chars 0 must disable the cap")
 	}
-	SetBudget(ctx, "web", 120, 60, 60, int64Ptr(8000))
+	SetBudget(ctx, "web", 120, 60, 60, numberPtr(8000))
 	if budget := GetBudget("web"); budget.MaxChars == nil || *budget.MaxChars != 8000 {
 		t.Fatal("web maxChars not restored")
 	}

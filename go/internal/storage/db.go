@@ -39,13 +39,55 @@ type RtkStats struct {
 
 // BudgetConfig is a configured output budget for one tool.
 // port of src/storage/db.ts:BudgetConfig
+//
+// The line fields are float64 because TS stores plain numbers there: configure
+// can set 12.7 and status/applyBudget keep the fraction. JS coerces to an
+// integer only at an array-slice boundary.
 type BudgetConfig struct {
-	MaxLines  int64 `json:"maxLines"`
-	HeadLines int64 `json:"headLines"`
-	TailLines int64 `json:"tailLines"`
+	MaxLines  float64 `json:"maxLines"`
+	HeadLines float64 `json:"headLines"`
+	TailLines float64 `json:"tailLines"`
 	// MaxChars is the optional total character cap applied after the line
 	// budget. TS: `maxChars?: number`.
-	MaxChars *int64 `json:"maxChars,omitempty"`
+	MaxChars *float64 `json:"maxChars,omitempty"`
+}
+
+// MarshalJSON mirrors JSON.stringify for TS numbers: NaN and ±Infinity become
+// null, and an absent maxChars stays omitted (TS `undefined`). The field order
+// matches TS's property insertion order in setBudget.
+// port of src/storage/db.ts:JSON.stringify(stats.budgets)
+func (b BudgetConfig) MarshalJSON() ([]byte, error) {
+	type budgetJSON struct {
+		MaxLines  any             `json:"maxLines"`
+		HeadLines any             `json:"headLines"`
+		TailLines any             `json:"tailLines"`
+		MaxChars  json.RawMessage `json:"maxChars,omitempty"`
+	}
+	out := budgetJSON{
+		MaxLines:  jsonBudgetNumber(b.MaxLines),
+		HeadLines: jsonBudgetNumber(b.HeadLines),
+		TailLines: jsonBudgetNumber(b.TailLines),
+	}
+	if b.MaxChars != nil {
+		out.MaxChars = json.RawMessage("null")
+		if finite := jsonBudgetNumber(*b.MaxChars); finite != nil {
+			raw, err := json.Marshal(finite)
+			if err != nil {
+				return nil, err
+			}
+			out.MaxChars = raw
+		}
+	}
+	return json.Marshal(out)
+}
+
+// jsonBudgetNumber returns nil for non-finite numbers so json.Marshal writes
+// null, exactly like JSON.stringify.
+func jsonBudgetNumber(value float64) any {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return nil
+	}
+	return value
 }
 
 // BounceStats is the dedup-bounce accounting for one file extension.

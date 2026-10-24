@@ -3,6 +3,7 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,6 +28,45 @@ func resetDB(t *testing.T) {
 
 // newDataDir points the storage layer at a private data dir and isolates the
 // legacy read-registry path from the developer's ~/.claude.
+// TestBudgetConfigJSONStringify mirrors JSON.stringify for budget numbers:
+// fractions are preserved, non-finite values become null, and an absent
+// maxChars is omitted.
+func TestBudgetConfigJSONStringify(t *testing.T) {
+	maxChars := -5.5
+	cases := []struct {
+		name string
+		cfg  BudgetConfig
+		want string
+	}{
+		{
+			name: "fractions",
+			cfg:  BudgetConfig{MaxLines: 12.7, HeadLines: 2.5, TailLines: 1.25, MaxChars: &maxChars},
+			want: `{"maxLines":12.7,"headLines":2.5,"tailLines":1.25,"maxChars":-5.5}`,
+		},
+		{
+			name: "nonfinite lines",
+			cfg:  BudgetConfig{MaxLines: math.Inf(1), HeadLines: math.NaN(), TailLines: math.Inf(-1)},
+			want: `{"maxLines":null,"headLines":null,"tailLines":null}`,
+		},
+		{
+			name: "nonfinite maxChars",
+			cfg:  BudgetConfig{MaxLines: 10, HeadLines: 5, TailLines: 5, MaxChars: ptrFloat(math.Inf(1))},
+			want: `{"maxLines":10,"headLines":5,"tailLines":5,"maxChars":null}`,
+		},
+	}
+	for _, test := range cases {
+		raw, err := json.Marshal(test.cfg)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if string(raw) != test.want {
+			t.Errorf("%s = %s, want %s", test.name, raw, test.want)
+		}
+	}
+}
+
+func ptrFloat(value float64) *float64 { return &value }
+
 func newDataDir(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -181,7 +221,7 @@ func TestOpenDBPermissions(t *testing.T) {
 
 func TestSessionStatsRoundTrip(t *testing.T) {
 	newDataDir(t)
-	maxChars := int64(4000)
+	maxChars := float64(4000)
 	stats := PersistedStats{
 		Pid:          1234,
 		SessionStart: 1_000,

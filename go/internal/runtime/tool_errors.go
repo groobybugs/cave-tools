@@ -33,6 +33,10 @@
 //     store defers to the next tool event. Expect a small best-effort delay
 //     (and possible loss under lock or shutdown), never a stall: lock wait is
 //     zero and failures are counted with process-level give-up.
+//   - Go's queue lock is never held across filesystem or SQLite work. A
+//     separate single-writer sink lock serializes flushes (and test resets),
+//     so a slow disk delays persistence only, never a tool result, and
+//     concurrent flushes still write batches in FIFO order.
 //   - Flush is scheduled asynchronously so the resolved tool result is
 //     delivered before the sink does its first write. For short-lived CLI
 //     processes, FlushToolErrorQueue is called at the controlled exit funnel
@@ -820,6 +824,9 @@ func agentHint(ctx context.Context) string {
 // --- Bounded best-effort SQLite sink ---
 
 var (
+	// toolErrorsMu guards the queue and flush state only. It is never held
+	// across filesystem or SQLite I/O, so ObserveToolCall only ever waits for
+	// another bounded in-memory critical section.
 	toolErrorsMu sync.Mutex
 	// port of src/runtime/tool-errors.ts:queue
 	toolErrorQueue []queuedError
@@ -834,12 +841,23 @@ var (
 	// toolErrorConnOrder is the FIFO eviction order for connections.
 	toolErrorConnOrder []string
 
+	// toolErrorSinkMu gives the SQLite sink a single writer. It is held only
+	// by flush and reset paths — never by ObserveToolCall — and serializes
+	// dequeue/write/restore so per-directory FIFO order survives concurrent
+	// flushes.
+	toolErrorSinkMu sync.Mutex
+
+	// toolErrorSinkHookForTests pauses a flush once it owns the sink, so tests
+	// can prove the call path never waits for sink I/O. Test-only.
+	toolErrorSinkHookForTests func()
+
 	// autoFlushDisabledForTests makes the asynchronous sink deterministic in
 	// tests (Go has no setImmediate turn to synchronize with).
 	autoFlushDisabledForTests bool
 )
 
-// closeConnections closes every cached connection. Best-effort.
+// closeConnections closes every cached connection. Best-effort. The caller
+// must hold toolErrorSinkMu, which owns the connection map.
 // port of src/runtime/tool-errors.ts:closeConnections
 func closeConnections() {
 	for _, db := range toolErrorConnections {
@@ -1011,15 +1029,34 @@ func PruneToolErrors(conn *sql.DB, nowMillis ...int64) error {
 	return err
 }
 
-// registerFlushFailureLocked counts one failed flush and gives up after the
-// process-level threshold, like TS's outer catch.
-func registerFlushFailureLocked() {
+// registerFlushFailure counts one failed flush and gives up after the
+// process-level threshold, like TS's outer catch. The caller holds the sink
+// lock, so closing the cached connections cannot race the sink.
+func registerFlushFailure() {
+	toolErrorsMu.Lock()
 	toolErrorConsecutiveFailures++
-	if toolErrorConsecutiveFailures >= toolErrorMaxFlushFailures {
+	dead := toolErrorConsecutiveFailures >= toolErrorMaxFlushFailures
+	if dead {
 		toolErrorStoreDead = true
 		toolErrorQueue = nil
+	}
+	toolErrorsMu.Unlock()
+	if dead {
 		closeConnections()
 	}
+}
+
+// restoreToolErrorBatch puts a locked batch back at the head of the queue,
+// preserving FIFO order. Called by the single sink writer. Observations can
+// run while the sink is stalled, so the cap is re-applied here: the oldest
+// rows are dropped exactly like an enqueue overflow.
+func restoreToolErrorBatch(batch []queuedError) {
+	toolErrorsMu.Lock()
+	toolErrorQueue = append(batch, toolErrorQueue...)
+	if len(toolErrorQueue) > ToolErrorQueueCap {
+		toolErrorQueue = toolErrorQueue[len(toolErrorQueue)-ToolErrorQueueCap:]
+	}
+	toolErrorsMu.Unlock()
 }
 
 // flushOneBatch drains one bounded batch (<=50 rows) from the leading same-dir
@@ -1027,18 +1064,23 @@ func registerFlushFailureLocked() {
 // (queue left intact for the next tool event). Never panics.
 // port of src/runtime/tool-errors.ts:flushOneBatch
 func flushOneBatch(nowMillis int64) bool {
-	toolErrorsMu.Lock()
-	defer toolErrorsMu.Unlock()
+	toolErrorSinkMu.Lock()
+	defer toolErrorSinkMu.Unlock()
 	return flushOneBatchLocked(nowMillis)
 }
 
-// flushOneBatchLocked implements flushOneBatch with toolErrorsMu held.
+// flushOneBatchLocked implements flushOneBatch with toolErrorSinkMu held.
+// The queue lock is taken only to dequeue and to update flush state, never
+// across filesystem or SQLite work.
 func flushOneBatchLocked(nowMillis int64) bool {
+	toolErrorsMu.Lock()
 	if len(toolErrorQueue) == 0 {
+		toolErrorsMu.Unlock()
 		return true
 	}
 	if !IsToolErrorLoggingEnabled(nil) || toolErrorStoreDead {
 		toolErrorQueue = nil
+		toolErrorsMu.Unlock()
 		return true
 	}
 
@@ -1048,28 +1090,35 @@ func flushOneBatchLocked(nowMillis int64) bool {
 		batch = append(batch, toolErrorQueue[0])
 		toolErrorQueue = toolErrorQueue[1:]
 	}
+	toolErrorsMu.Unlock()
+
+	// Test seam: a flush that owns the sink pauses here, after dequeuing and
+	// releasing the queue lock, to prove ObserveToolCall does not wait for I/O.
+	if hook := toolErrorSinkHookForTests; hook != nil {
+		hook()
+	}
 
 	conn, err := ensureLoggingConn(dir)
 	if errors.Is(err, errStoreBusy) {
 		// Locked: put the batch back, keep the queue for the next event.
-		toolErrorQueue = append(batch, toolErrorQueue...)
+		restoreToolErrorBatch(batch)
 		return false
 	}
 	if err != nil || conn == nil {
-		toolErrorQueue = append(batch, toolErrorQueue...)
-		registerFlushFailureLocked()
+		restoreToolErrorBatch(batch)
+		registerFlushFailure()
 		return true
 	}
 
 	tx, err := conn.Begin()
 	if err != nil {
 		if isBusyError(err) {
-			toolErrorQueue = append(batch, toolErrorQueue...)
+			restoreToolErrorBatch(batch)
 			return false
 		}
 		// TS's outer catch drops the already-dequeued batch on an unexpected
 		// error; only a lock restores it.
-		registerFlushFailureLocked()
+		registerFlushFailure()
 		return true
 	}
 	failed := false
@@ -1108,23 +1157,25 @@ func flushOneBatchLocked(nowMillis int64) bool {
 	if failed {
 		_ = tx.Rollback()
 		if isBusyError(execErr) {
-			toolErrorQueue = append(batch, toolErrorQueue...)
+			restoreToolErrorBatch(batch)
 			return false
 		}
-		registerFlushFailureLocked()
+		registerFlushFailure()
 		return true
 	}
 	if err := tx.Commit(); err != nil {
 		if isBusyError(err) {
-			toolErrorQueue = append(batch, toolErrorQueue...)
+			restoreToolErrorBatch(batch)
 			return false
 		}
-		registerFlushFailureLocked()
+		registerFlushFailure()
 		return true
 	}
+	toolErrorsMu.Lock()
 	toolErrorConsecutiveFailures = 0
+	toolErrorsMu.Unlock()
 	if err := PruneToolErrors(conn, nowMillis); err != nil {
-		registerFlushFailureLocked()
+		registerFlushFailure()
 	}
 	return true
 }
@@ -1178,9 +1229,8 @@ func FlushToolErrorQueue(maxBatches ...int) {
 			toolErrorsMu.Unlock()
 			return
 		}
-		progress := flushOneBatchLocked(time.Now().UnixMilli())
 		toolErrorsMu.Unlock()
-		if !progress {
+		if !flushOneBatch(time.Now().UnixMilli()) {
 			return
 		}
 	}
@@ -1552,8 +1602,11 @@ func ToolErrorsDBPath() string {
 // Test-only hook.
 // port of src/runtime/tool-errors.ts:resetToolErrorStateForTests
 func ResetToolErrorStateForTests() {
-	toolErrorsMu.Lock()
+	// Wait for any in-flight sink writer before resetting its connection map.
+	toolErrorSinkMu.Lock()
+	defer toolErrorSinkMu.Unlock()
 	closeConnections()
+	toolErrorsMu.Lock()
 	toolErrorQueue = nil
 	toolErrorFlushScheduled = false
 	toolErrorConsecutiveFailures = 0

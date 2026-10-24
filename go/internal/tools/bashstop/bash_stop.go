@@ -34,7 +34,7 @@ var Tool = types.ToolDefinition{
 // handle is the cave__bash_stop handler.
 // port of src/tools/bash-stop.ts:bashStopTool.handler
 func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) {
-	jobID := jsString(args["jobId"])
+	jobID := jsArgString(args, "jobId")
 	requested := "SIGTERM"
 	if raw, ok := args["signal"]; ok && raw != nil {
 		requested = jsString(raw)
