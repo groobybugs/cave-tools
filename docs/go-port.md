@@ -11,19 +11,22 @@ deviations and limitations".
 ## Status
 
 - W0–W4 are integrated on `go-port` (proof-coercion fix `fa5d968` included).
-  The W5 main sync is now merged at `d163dae`; every one of the 56
-  `src/**/*.ts` files listed below has a mapped Go implementation.
+  The W5 main sync is merged at `d163dae`; all 56 engine files listed below
+  have mapped Go implementations. The switch adds one TS-only adapter,
+  `src/impl-switch.ts`, bringing the current TS inventory to 57 files.
 - Source truth for the TypeScript reference is `main` at `6cefd81`.
   `d163dae` merges that commit: `src/`, `claude/`, `scripts/`, `rules/`,
   `AGENTS.md` and `CLAUDE.md` have zero diff against `6cefd81`. The sync adds
   two Go mirrors (the CLI instruction text and the bash tool metadata) and
   exact init/metadata tests; see "Verification status".
-- W5 is **not complete**. Main sync is done; parity expansion, the
-  implementation switch and the benchmark remain on separate worktrees.
-  Nothing in this document claims those are merged or tested unless it names
-  a test and result.
-- TypeScript remains the default implementation. `CAVE_TOOLS_IMPL=go` is
-  **not integrated yet**; see "Implementations switch".
+- W5 is **not complete**. Main sync, the opt-in switch and benchmark harness
+  are integrated; expanded parity and remaining acceptance gaps are pending.
+  Initial CLI/warm-MCP measurements and large-filter profiling are recorded in
+  `scripts/bench-ts-go.md`. Switch integration at `a0dcc6e` passed the checks
+  listed under "Verification status".
+- TypeScript remains the default implementation. `CAVE_TOOLS_IMPL=go` opts
+  into the locally built Go binary; see "Implementations switch". No live
+  user installation or configuration was changed.
 
 ## Layout
 
@@ -82,10 +85,12 @@ an intentional Go-only probe (TS has no `--version` branch) and is the single
 
 ## TS → Go file map
 
-One TS file maps to exactly one Go file with the same base name (kebab-case →
-snake_case). Packages mirror the TS directories; the handful of top-level TS
+Each of the 56 engine TS files maps to a Go file with the same base name
+(kebab-case → snake_case). Packages mirror the TS directories; top-level TS
 files live in the package that owns their responsibility (`server` for the MCP
-entry layer, `cli` for the CLI, `daemon` for the socket client).
+entry layer, `cli` for the CLI, `daemon` for the socket client). The additional
+`src/impl-switch.ts` is TS-only launcher glue and has no Go counterpart: the
+Go executable does not need to select itself.
 
 The wave column is the wave that actually ported the file, not an early plan:
 W2e is the shared tool helpers, W2k is status/profile/daemon paths+control,
@@ -151,8 +156,8 @@ W3a–e are the tools, W4i/j/k are the surfaces.
 | `src/status-ui.ts` | `go/internal/cli/status_ui.go` | W2k |
 
 All 56 rows were checked against the tree at `02890a1` and again after the
-`d163dae` sync: every TS file exists, every Go target exists, and no
-`src/**/*.ts` file is missing from the table. The sync changed guidance text
+`d163dae` sync: every mapped TS file and Go target exists. The later switch
+adds `src/impl-switch.ts` outside this engine map, as explained above. The sync changed guidance text
 in `src/cli.ts`/`src/tools/bash.ts`, not the file mapping. The map itself is
 not proof of function coverage; see "Coverage and annotation audit".
 
@@ -508,9 +513,10 @@ into W3. W5 is not finished.
   - W4j: daemon server/client plus transport.
   - W4k: CLI (`cli`, `cli-tools`) and the `cave-tools-go` executable wiring.
 - **W5 integration (partial)**: main sync completed at `d163dae` (shared
-  files zero diff vs `6cefd81`; two Go mirrors plus exact init/metadata tests).
-  Remaining: parity expansion, `CAVE_TOOLS_IMPL=go` switch, benchmark harness
-  and final docs/audit. W5 is not complete.
+  files zero diff vs `6cefd81`; two Go mirrors plus exact init/metadata tests),
+  and `CAVE_TOOLS_IMPL=go` switch integrated at `a0dcc6e`.
+  Benchmark harness `106940f` and initial replicated measurements are also
+  integrated. Remaining: expanded parity and final acceptance. W5 is not complete.
 
 ### Ownership per worker
 
@@ -536,37 +542,50 @@ into W3. W5 is not finished.
 `go.mod` is W0-only: later waves must not add dependencies. If one is truly
 needed, ask the coordinator.
 
-## Implementations switch (W5, pending)
+## Implementations switch (W5, integrated)
 
-Default stays TypeScript. The switch is **not integrated** at `d163dae`, so
-there is no tested `CAVE_TOOLS_IMPL=go` path yet. Planned contract:
+Default stays TypeScript. Switch commits `8fea696` and `793d072` are integrated
+at `a0dcc6e`; no user installer was run.
 
-1. `src/cli.ts` gets a shim before heavy imports: when
-   `process.env.CAVE_TOOLS_IMPL === "go"`, resolve the Go binary
-   (`CAVE_TOOLS_GO_BIN` if set, else `go/bin/cave-tools-go` relative to the
-   package root) and re-exec it with the same argv, stdio inherited,
-   propagating the exit code and signals. `mcp`, `status`, `raw`, `filter`,
-   daemon and tool subcommands are all covered by that one re-exec.
-2. A configured-but-missing binary fails with a clear non-zero error instead
-   of silently falling back to TS. The exact error text is part of the W5
-   switch change and must be tested there.
-3. Unset, empty or any other value keeps the current TS behaviour, so
-   `pnpm test` and existing installs are untouched.
-4. No install, no dependency and no PATH change: the user builds
-   `go/bin/cave-tools-go` locally. The binary is never named `cave-tools`.
-5. Both implementations share the data dir, SQLite schema, daemon key, socket
-   and NDJSON protocol. Switching does not require stopping a running daemon
-   built from the same `dist/`; the existing reconnect/spawn behavior applies
-   after a rebuild.
-6. W5 adds a CLI parity case that runs the same command with
-   `CAVE_TOOLS_IMPL=go` and without it, diffing stdout/stderr/exit code, plus
-   the missing-binary/error-path test. Until that lands and is run, no switch
-   claim is valid.
-7. Switch candidate `8fea696` adds the TS-only adapter `src/impl-switch.ts`
-   (present only on that candidate, not on this branch). It is **not
-   integrated** here. If merged, the inventory becomes 57 TS files: the same
-   56 mapped files plus this adapter-only helper, which must not get a fake Go
-   counterpart.
+```sh
+pnpm build
+(cd go && GOPROXY=off GOSUMDB=off go build -o bin/cave-tools-go ./cmd/cave-tools-go)
+CAVE_TOOLS_IMPL=go node dist/cli.js help
+```
+
+- Only exact lowercase `CAVE_TOOLS_IMPL=go` selects Go. Unset, empty and other
+  values retain TypeScript.
+- `CAVE_TOOLS_GO_BIN`, when nonempty, overrides the binary path. Relative
+  paths resolve against caller cwd. Otherwise the binary is
+  `<package>/go/bin/cave-tools-go` (`.exe` on Windows). Point the override at
+  an actual Go executable, not a TS launcher or wrapper that re-enters the
+  switch.
+- `src/impl-switch.ts` forwards argv, env, cwd and inherited stdin/stdout/stderr,
+  mirrors exit status and relays supported signals. All CLI modes, including
+  noargs MCP and `__job-worker`, pass through this one boundary.
+- Direct `node dist/cli.js` selects Go before CLI command execution, but static
+  imports still initialize first. It does not avoid Node startup. Newly
+  generated POSIX installer shims select Go with `exec` before starting Node;
+  static paths and caller arguments are quoted, including spaces and shell
+  metacharacters.
+- A missing binary exits 127; direct Node reports a non-executable path with
+  126. The POSIX shim reports either missing or non-executable with 127. There
+  is no silent TS retry of a selected Go operation.
+- Windows still uses the existing package-manager launcher through Node; no
+  pre-Node `.cmd` shim was added. Windows `.exe` resolution is unit-tested,
+  not Windows runtime acceptance. Windows signals and named-pipe runtime
+  interop remain unverified.
+- No install, dependency or PATH change is required to build locally. Both
+  implementations share the data dir, SQLite schema, daemon key, socket and
+  NDJSON protocol. Switching does not require stopping a compatible daemon
+  built from the same `dist/`; normal reconnect/spawn behavior applies after
+  rebuilding.
+- `scripts/test-impl-switch.mjs` covers default/opt-in selection, fake and real
+  Go binaries, missing/non-executable paths, argv/stdin/exit/signal forwarding,
+  bare-relative overrides and generated POSIX shims in private fake homes.
+  The coordinator ran this suite with a real local Go binary and no skips.
+  TS reference test children clear switch variables to avoid accidentally
+  comparing Go against itself.
 
 ## Review fixes worth keeping
 
@@ -712,7 +731,8 @@ hash cases. The TS side was already correct.
 
 ## Coverage and annotation audit
 
-- The map above covers all 56 `src/**/*.ts` files and every target exists.
+- The map covers all 56 engine TS files and every target exists. The 57th
+  TS file, `src/impl-switch.ts`, is adapter-only and intentionally unmapped.
 - An ad-hoc static audit checked exported TS function/const-arrow names against
   Go source; no missing exported callable was found. It is name-level only, its
   extraction regex is not committed, and it is not proof that each function
@@ -779,11 +799,22 @@ than it states.
 - TypeScript reference: `main` at `6cefd81`, synced as `d163dae`, passed
   `pnpm build && pnpm test` with 13 suites and gofmt/diffcheck (job
   `jmvmt2rg9e72051`). The port-bug script still declares 25 cases.
+- W5 switch integration at `a0dcc6e` (coordinator-run):
+  - `pnpm check && pnpm test && git diff --check` passed all 14 suites,
+    including `impl-switch` with a real Go binary and no skips;
+    job `jmvmturpj72c707`.
+  - After that TS build: gofmt, full offline Go vet/test, `-tags parity
+    ./parity/`, Windows vet and Darwin vet passed; job `jmvmtvf3pa16619`.
+  - Muse reviewed the switch and its bare-relative/quoting followup clean.
+- Benchmark harness `106940f` was Muse-reviewed and coordinator-run on frozen
+  TS `6cefd81` / Go `5f28d88` artifacts: 30 samples per side per route, seeds
+  42 and 73, all four CLI routes byte-matched and three MCP routes had identical
+  ToolResult payloads (envelope key order differs, explicitly flagged). Every
+  timed sample passed validation; provenance artifact pins matched. Results,
+  profiling evidence and limitations are in `scripts/bench-ts-go.md`.
 - Not verified / pending:
-  - `CAVE_TOOLS_IMPL=go` integration, missing-binary behaviour, and the
-    switch parity case (W5 switch worktree; no claim here).
-  - W5 parity expansion and benchmark harness; the sync gate above ran the
-    existing parity scopes, not the final expanded suite.
+  - W5 parity expansion; the sync gate above ran the existing parity scopes,
+    not the final expanded suite.
   - Brotli and stacked `Content-Encoding` parity (unresolved/deferred).
   - Windows runtime behavior: only `GOOS=windows go vet` is claimed. The
     Unix-socket daemon interop tests skip on Windows, so named-pipe interop is

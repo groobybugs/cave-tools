@@ -5,7 +5,8 @@ dependencies, no new Go modules, nothing installed. The Go binary is built
 locally and offline (`GOPROXY=off GOSUMDB=off`) as `cave-tools-go` (never
 `cave-tools`, never installed); the TS side runs an absolute `dist/cli.js`
 entry directly and is never rebuilt or modified by the harness. Both entry
-paths are explicit flags and every run records the exact commits it measured.
+paths are explicit flags; runs record source refs when available, artifact
+fingerprints and explicit provenance assertions for frozen/prebuilt artifacts.
 
 ## Routes and what "fast" means for each
 
@@ -14,12 +15,12 @@ Core routes (default):
 | route | workload | timing scope |
 |---|---|---|
 | `cli_help_cold` | `help` (startup + tool help load) | fresh process per sample — **TS: Node startup remains in every sample** |
-| `cli_filter_medium` | `filter --json` on ~32 KiB deterministic output | fresh process per sample (startup + full compression pipeline) |
-| `cli_filter_large` | `filter --json` on ~450 KiB deterministic output | same; exercises archive-handle path |
+| `cli_filter_medium` | `filter --json`, 50,864-byte JSON input fixture | fresh process per sample (startup + full compression pipeline) |
+| `cli_filter_large` | `filter --json`, 685,296-byte JSON input fixture | same; exercises archive-handle path |
 | `cli_read_cold` | `read <fixture>` | fresh process per sample = dedup miss / first-full read (file cache is in-memory per process) |
 | `mcp_read_first` | `tools/call cave__read`, fresh session id | warm persistent MCP server; timed value is the tools/call roundtrip only |
 | `mcp_read_dedup` | `tools/call cave__read`, same session + unchanged file | same session; dedup stub path |
-| `mcp_compress` | `tools/call cave__compress` (~25 KiB text) | same session |
+| `mcp_compress` | `tools/call cave__compress` (31,922-byte text fixture) | same session |
 
 Optional (off by default, deferred):
 
@@ -63,8 +64,10 @@ normalization:
   (400 lines), `filter-medium.json`, `filter-large.json`. SHA-256 of every
   fixture is recorded in the results.
 - Session policy: CLI routes auto-generate a per-process session; MCP routes
-  use `bench-mcp-<repeat>` (fresh per repeat → first read is a dedup miss, the
-  paired second read is a hit).
+  use `bench-first-*`, `bench-dedup-*` and `bench-compress-*`. First reads use
+  fresh sessions; dedup calls have their own untimed first read in the same
+  per-repeat session. A non-stub read uses the normal default 200-line limit,
+  not the entire 121,178-byte source file.
 - Absolute entry paths: `--ts-cli` (required), `--go-src` (go module dir to
   build from, offline) or `--go-bin` (prebuilt binary).
 
@@ -177,11 +180,75 @@ binary came from a git HEAD:
   harness now pins distinct keys, but (2) daemon-served `read` dedup did not
   honor per-`--session` isolation in smoke (a second `--session` still got a
   dedup stub from the daemon's cache, and a Go-side first read returned a
-  stub while TS returned full output). That is a real behavioral divergence
-  worth a parity fix, not a benchmark detail; the route stays out of the core
-  comparison until it is resolved.
+  stub while TS returned full output). This remains an unresolved smoke
+  observation, not proof of a Go regression: isolate daemon-key sharing,
+  session scope and TS reference behavior before assigning a production fix.
+  The route stays out of the core comparison until resolved.
 - Archive paths in `filter` outputs are absolute; both sides share one sandbox
   data dir precisely so these stay byte-identical (not normalized away).
 - Single runs carry machine noise; rerun with different `--seed` values and
   compare p50/p95 across runs before drawing conclusions.
 - No hyperfine or any new tool: the harness is one dependency-free script.
+
+## Measured baseline — 2026-10-24
+
+Coordinator-run, 30 timed samples per side per route, two independently
+interleaved orders (seeds 42 and 73), harness `106940f`. Linux x64, Intel Core
+Ultra 9 275HX (24 logical CPUs), Node 24.19.0, Go 1.26.3. Desktop applications
+were active; this was not a dedicated benchmark machine. No coordinator
+build/test workload ran concurrently with timing. Memory and daemon phases
+were off.
+
+Frozen TS artifacts matched `main` `6cefd81` byte-for-byte. The Go binary was
+built at `5f28d88` with `-trimpath -ldflags '-X main.version=0.6.1'`; its engine
+matches `d163dae` (later changes were docs/provenance comments). It has no
+embedded VCS stamp, so the coordinator's build log, explicit build label and
+binary hash establish provenance, not a guessed checkout HEAD. Artifact pins:
+
+- TS `.js` dist manifest SHA-256:
+  `9cee457204a46424a00152dc5ff3acce09fa010dcff32df241a0c7fd62206da4`
+- Go binary SHA-256:
+  `cc8d06fb328885cd397a25eb23d7eb9707c5cd0b0a0a217cae5e2dd163718a28`
+
+Seed 42 results (milliseconds). All 30 samples per side were valid.
+
+### CLI — byte-identical stdout, stderr and exit
+
+| Route | TS p50 | Go p50 | TS p95 | Go p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Help / process startup | 44.1 | 3.8 | 48.1 | 4.5 |
+| Medium filter | 42.2 | 19.7 | 46.5 | 21.1 |
+| Large filter | 53.8 | 169.6 | 56.4 | 177.4 |
+| First read, default limit | 44.5 | 4.8 | 50.4 | 5.1 |
+
+### Warm MCP — payload-equivalent, envelope bytes differ
+
+These remain in `summary.flagged`, not `summary.matched`: JSON-RPC key order
+differs. Canonical ToolResult payload hashes matched across TS/Go for every
+paired sample, including dynamic dedup stubs. Both sides satisfied full-read
+versus stub invariants. No content text was normalized.
+
+| Route | TS p50 | Go p50 | TS p95 | Go p95 |
+| --- | ---: | ---: | ---: | ---: |
+| First read, default limit | 0.9 | 0.7 | 3.1 | 1.5 |
+| Cached unchanged read | 0.4 | 0.2 | 1.1 | 0.8 |
+| Compress text | 0.5 | 2.6 | 0.8 | 3.2 |
+
+Seed 73 reproduced the direction: large filter TS/Go p50 52.0/170.9 ms,
+MCP compression 0.6/2.6 ms. Cached-read medians were both about 0.4 ms; do not
+claim a robust cached-read speedup from sub-millisecond noise. First-versus-last
+10-sample medians did not show accumulating large-filter latency in either run.
+
+A separate Go CPU/allocation profile of the same large-filter pipeline (30
+iterations, no process startup) measured 157.6 ms/op and 10.7 MB allocated per
+call (not RSS). `RedactSecrets` accounted for 82.6% of sampled CPU; regex
+execution overall 95.9%, `ApplyBudget` 13.8%, and `ArchiveHandle` 1.2%.
+Cumulative percentages overlap. The measured hotspot is repeated regex
+matching/case folding, not primarily SQLite or startup. No production
+optimization was made. Redaction must not be disabled or moved after
+truncation to improve benchmark numbers.
+
+Raw JSON, provenance, CPU/memory profiles and the temporary profiling harness
+are retained locally under `.context/go-port-benchmarks/2026-10-24/` (not shipped
+as package files). This is workload-specific evidence, not a global Go speedup,
+extra token-savings claim, or full migration acceptance.
