@@ -6,7 +6,8 @@ package compression
 
 import (
 	"strings"
-	"unicode"
+
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 )
 
 // CommentConfig describes how one language marks comments.
@@ -80,7 +81,7 @@ func isDocComment(line string, config CommentConfig) bool {
 	if !config.PreserveDoc {
 		return false
 	}
-	trimmed := strings.TrimSpace(line)
+	trimmed := jsre.Trim(line)
 	return strings.HasPrefix(trimmed, "///") ||
 		strings.HasPrefix(trimmed, "/**") ||
 		strings.HasPrefix(trimmed, "//!")
@@ -110,7 +111,7 @@ func AggressiveCompress(content string, ext string) string {
 		}
 
 		// Preserve shebang
-		if i == 0 && strings.HasPrefix(strings.TrimLeftFunc(line, unicode.IsSpace), "#!") {
+		if i == 0 && strings.HasPrefix(jsre.TrimStart(line), "#!") {
 			result = append(result, line)
 			continue
 		}
@@ -130,7 +131,7 @@ func AggressiveCompress(content string, ext string) string {
 		}
 
 		if config.BlockStart != "" && strings.Contains(line, config.BlockStart) {
-			trimmed := strings.TrimSpace(line)
+			trimmed := jsre.Trim(line)
 			if !isDocComment(trimmed, config) {
 				startIdx := strings.Index(line, config.BlockStart)
 				endIdx := strings.Index(line[startIdx+len(config.BlockStart):], config.BlockEnd)
@@ -139,7 +140,7 @@ func AggressiveCompress(content string, ext string) string {
 					blockNesting = 1
 				}
 				// Keep code before block comment
-				before := strings.TrimRightFunc(line[:startIdx], unicode.IsSpace)
+				before := jsre.TrimEnd(line[:startIdx])
 				if before != "" {
 					result = append(result, before)
 				}
@@ -153,7 +154,7 @@ func AggressiveCompress(content string, ext string) string {
 			idx := strings.Index(codeLine, marker)
 			for idx != -1 {
 				if !isInsideString(codeLine, idx) && !isDocComment(codeLine[idx:], config) {
-					codeLine = strings.TrimRightFunc(codeLine[:idx], unicode.IsSpace)
+					codeLine = jsre.TrimEnd(codeLine[:idx])
 					break
 				}
 				next := strings.Index(codeLine[idx+1:], marker)
@@ -165,7 +166,7 @@ func AggressiveCompress(content string, ext string) string {
 			}
 		}
 
-		trimmed := strings.TrimSpace(codeLine)
+		trimmed := jsre.Trim(codeLine)
 		if trimmed == "" {
 			if len(result) > 0 && result[len(result)-1] != "" {
 				result = append(result, "")

@@ -81,3 +81,28 @@ func repeatString(s string, n int) []string {
 	}
 	return out
 }
+
+// TestCollapseRepetitionJSWhitespace is the Muse regression: the guard is
+// current.trim().length > 0 with JS trim, so a U+FEFF-only run is blank (not
+// collapsed) while a U+0085-only run is not blank (collapsed). Go's
+// strings.TrimSpace gets both backwards. Expected results come from node.
+func TestCollapseRepetitionJSWhitespace(t *testing.T) {
+	feffLines := append(repeatString("\ufeff", 20), "tail")
+	feffText := strings.Join(feffLines, "\n")
+	if got := CollapseRepetition(feffText); got != feffText {
+		t.Errorf("FEFF-only run collapsed: %q, want unchanged %q", got, feffText)
+	}
+
+	spaceLines := append(repeatString(" ", 20), "tail")
+	spaceText := strings.Join(spaceLines, "\n")
+	if got := CollapseRepetition(spaceText); got != spaceText {
+		t.Errorf("space-only run collapsed: %q, want unchanged %q", got, spaceText)
+	}
+
+	nelLines := append(repeatString("\u0085", 20), "tail")
+	nelText := strings.Join(nelLines, "\n")
+	want := "\u0085\n… 19 identical lines elided …\ntail"
+	if got := CollapseRepetition(nelText); got != want {
+		t.Errorf("NEL-only run = %q, want %q", got, want)
+	}
+}

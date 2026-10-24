@@ -30,6 +30,13 @@ func TestClassifyCommand(t *testing.T) {
 		{name: "kubectl get verbatim", command: "kubectl get pods", want: PolicyVerbatim},
 		{name: "npm install compressible", command: "npm install", want: PolicyCompressible},
 		{name: "echo compressible", command: " echo hi ", want: PolicyCompressible},
+
+		// Muse regression: JS \s matches NBSP and U+FEFF, so classification
+		// must not depend on strings.TrimSpace's ASCII/unicode.IsSpace set.
+		{name: "nbsp ssh passthrough", command: "ssh\u00a0host", want: PolicyPassthrough},
+		{name: "nbsp cat verbatim", command: "cat\u00a0file", want: PolicyVerbatim},
+		{name: "nbsp padded ssh passthrough", command: "\u00a0ssh\u00a0host\u00a0", want: PolicyPassthrough},
+		{name: "bom padded ssh passthrough", command: "\ufeffssh\u00a0host", want: PolicyPassthrough},
 	}
 
 	for _, test := range tests {
