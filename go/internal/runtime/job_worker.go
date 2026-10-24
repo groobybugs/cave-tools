@@ -53,6 +53,12 @@ func (w *jobWorker) run(shell, command string) int {
 	if err != nil {
 		return w.finish(jobInt64Ptr(spawnFailed), nil, err)
 	}
+	// TS opens the log first, then spawn() throws on an empty command: the
+	// worker-error line still lands in the log and the job never reports 0.
+	if command == "" {
+		_ = logFile.Close()
+		return w.finish(jobInt64Ptr(spawnFailed), nil, ErrEmptyCommand)
+	}
 	cmd := shellCommand(shell, command)
 	// TS passes windowsHide: process.platform === "win32"; no `detached`.
 	configureSpawn(cmd, false)

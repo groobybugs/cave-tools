@@ -123,6 +123,26 @@ func TestStartJobFastCommand(t *testing.T) {
 	}
 }
 
+// TestStartJobEmptyCommand matches the TS bash_start case: the job starts and
+// is recorded, but the worker never gets a shell (Node's spawn rejects the
+// empty file), so the job exits 127 with a worker-error line.
+func TestStartJobEmptyCommand(t *testing.T) {
+	job := jobsStartAndWait(t, "", "test-jobs-empty")
+	if job.State != storage.JobExited {
+		t.Fatalf("state = %q, want exited", job.State)
+	}
+	if job.ExitCode == nil || *job.ExitCode != 127 {
+		t.Fatalf("exitCode = %v, want 127", job.ExitCode)
+	}
+	log := jobsReadFile(t, job.LogPath)
+	if !strings.Contains(log, `[cave-job worker-error="The argument 'file' cannot be empty. Received ''"]`) {
+		t.Fatalf("log = %q", log)
+	}
+	if !strings.Contains(log, "[cave-job exit=127]") {
+		t.Fatalf("log = %q", log)
+	}
+}
+
 // Mirrors test.mjs case 7: a non-zero exit surfaces the exit code.
 func TestStartJobExitCode(t *testing.T) {
 	job := jobsStartAndWait(t, "exit 7", "test-jobs-exit")
@@ -652,6 +672,32 @@ func TestRunJobWorker(t *testing.T) {
 		}
 		log := jobsReadFile(t, logPath)
 		if !strings.Contains(log, `[cave-job worker-error="spawn /nonexistent-shell ENOENT"]`) {
+			t.Fatalf("log = %q", log)
+		}
+		if !strings.Contains(log, "[cave-job exit=127]") {
+			t.Fatalf("log = %q", log)
+		}
+		result := jobsReadDurableResult(t, resultPath)
+		if result.ExitCode == nil || *result.ExitCode != 127 || result.Signal != nil {
+			t.Fatalf("result = %+v", result)
+		}
+	})
+
+	t.Run("empty command records worker-error", func(t *testing.T) {
+		dir := t.TempDir()
+		logPath := filepath.Join(dir, "job.log")
+		resultPath := filepath.Join(dir, "job.result.json")
+		if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+			t.Fatalf("write log: %v", err)
+		}
+		code := RunJobWorker([]string{"j-worker-empty", logPath, resultPath, "/bin/sh", ""})
+		// Node's spawn throws for an empty file, so the job never starts and
+		// must not be reported as a successful empty command.
+		if code != 127 {
+			t.Fatalf("worker exit = %d, want 127", code)
+		}
+		log := jobsReadFile(t, logPath)
+		if !strings.Contains(log, `[cave-job worker-error="The argument 'file' cannot be empty. Received ''"]`) {
 			t.Fatalf("log = %q", log)
 		}
 		if !strings.Contains(log, "[cave-job exit=127]") {
