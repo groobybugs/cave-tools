@@ -80,7 +80,7 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/compression/archive.ts` | `go/internal/compression/archive.go` | W1c |
 | `src/compression/utils.ts` | `go/internal/compression/utils.go` | W2d |
 | `src/compression/structured.ts` | `go/internal/compression/structured.go` | W2d |
-| `src/tools/read.ts` | `go/internal/tools/read.go` | W2e |
+| `src/tools/read.ts` | `go/internal/tools/read/read.go` | W3a |
 | `src/tools/line-range.ts` | `go/internal/tools/line_range.go` | W2e |
 | `src/tools/edit.ts` | `go/internal/tools/edit.go` | W2f |
 | `src/tools/edit-match.ts` | `go/internal/tools/edit_match.go` | W2f |
