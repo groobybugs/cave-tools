@@ -82,11 +82,11 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/compression/structured.ts` | `go/internal/compression/structured.go` | W2d |
 | `src/tools/read.ts` | `go/internal/tools/read.go` | W2e |
 | `src/tools/line-range.ts` | `go/internal/tools/line_range.go` | W2e |
-| `src/tools/edit.ts` | `go/internal/tools/edit.go` | W2f |
+| `src/tools/edit.ts` | `go/internal/tools/edit/edit.go` | W3b |
 | `src/tools/edit-match.ts` | `go/internal/tools/edit_match.go` | W2f |
 | `src/tools/replacers.ts` | `go/internal/tools/replacers.go` | W2f |
-| `src/tools/write.ts` | `go/internal/tools/write.go` | W2f |
-| `src/tools/apply-patch.ts` | `go/internal/tools/apply_patch.go` | W2f |
+| `src/tools/write.ts` | `go/internal/tools/write/write.go` | W3b |
+| `src/tools/apply-patch.ts` | `go/internal/tools/applypatch/apply_patch.go` | W3b |
 | `src/tools/bash.ts` | `go/internal/tools/bash.go` | W2g |
 | `src/tools/bash-start.ts` | `go/internal/tools/bash_start.go` | W2g |
 | `src/tools/bash-status.ts` | `go/internal/tools/bash_status.go` | W2g |
