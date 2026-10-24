@@ -437,6 +437,20 @@ Accepted runtime deviations (W1b, Muse review):
 
 - `daemon/control` (Go `bins` run / CLI exec helpers): output above the TS `maxBuffer` is parsed in Go instead of rejected with a maxBuffer error (Muse W2k, low).
 
+Accepted compression deviations (W2d, Muse review):
+
+- Lone-surrogate JSON escapes (`"\uD800"`) decode to U+FFFD in Go, because Go
+  strings cannot hold a lone surrogate; TS keeps the surrogate code unit. Only
+  reachable with deliberately malformed JSON text.
+- `compressXML` returns `nil` for every error. TS has exactly one error today
+  (`errUnparseableXML`), so callers observe the same results; a future TS error
+  path would need a matching Go branch.
+- `buildStats` returns a copy of `savingsByTool` where TS aliases the live
+  `byTool` object. Nothing mutates a snapshot after it is returned, so the
+  emitted rows are identical.
+- `GetRtkTopPassthrough` breaks equal-count ties in byte order; TS uses
+  `localeCompare` (ICU), so mixed-case/prefix order can differ for tied counts.
+
 ### TS bugs found while porting
 
 - `src/storage/db.ts:595` (and the `try/catch` at `src/storage/db.ts:405-414`):
