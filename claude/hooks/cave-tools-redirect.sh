@@ -20,7 +20,8 @@
 #   hint   → exits 0, no blocking (rules injected only; model self-corrects)
 #   enforce → blocks Read/Grep/Glob/WebFetch/WebSearch
 #   strict → above + blocks Edit/Write when no prior cave__read of the target,
-#            + blocks Bash (stream monitors and background jobs still allowed)
+#            + blocks Bash on hosts without the native output filter
+#              (not Claude Code; stream monitors and background jobs allowed)
 #
 # Wire via PreToolUse matcher including both Claude and Grok names, e.g.:
 #   Read|Grep|Glob|Edit|Write|WebFetch|WebSearch|Bash
@@ -181,6 +182,13 @@ case "$TOOL" in
     [ "$MODE" != "strict" ] && exit 0
     # Explicit opt-out for the session/command.
     [ "${CAVE_TOOLS_ALLOW_BASH:-0}" = "1" ] && exit 0
+    # Claude Code compresses native Bash output after it runs (PostToolUse
+    # filter hook), so strict leaves it alone there. Hosts without that
+    # filter (Grok, Gemini, Antigravity) keep the block.
+    IS_CLAUDE=$(printf '%s' "$INPUT" | jq -r '
+      if .hook_event_name == "PreToolUse" and (.tool_name | type) == "string" then "1" else "0" end
+    ' 2>/dev/null)
+    [ "$IS_CLAUDE" = "1" ] && exit 0
     # Background jobs and stream monitors must keep the built-in: cave__bash
     # captures output to completion and would burn the turn.
     BG=$(printf '%s' "$INPUT" | jq -r '

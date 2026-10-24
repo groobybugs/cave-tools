@@ -30,7 +30,7 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 
 - Use `cave__read` instead of Read — optimized drop-in replacement (dedup cache + line budgets). Since 0.2.0 also returns image files (png/jpg/jpeg/gif/webp/bmp/svg up to 5 MB) as MCP image blocks.
 - Use `cave__grep`, `cave__find`, `cave__ls` instead of shell/Glob/Grep.
-- Shell, Claude Code / opencode: native Bash/shell is fine (not in `strict` on Claude). Its output is auto-compressed after it runs (Claude: successful commands only, via PostToolUse; opencode: via `execute.after`). Never prefix `cave-tools` or `rtk` yourself. `cave__bash` also works (RTK rewrite, compresses failures too, max timeout 10min).
+- Shell, Claude Code / opencode: native Bash/shell is fine in every mode. Its output is auto-compressed after it runs (Claude: successful commands only, via PostToolUse; opencode: via `execute.after`). Never prefix `cave-tools` or `rtk` yourself. `cave__bash` also works (RTK rewrite, compresses failures too, max timeout 10min).
 - Shell, other hosts (Codex, Grok, Gemini, Antigravity, Kiro, Hermes, Cursor, ZCode): native shell output is NOT compressed. Use `cave__bash`; if MCP is down, run `cave-tools bash -- '<cmd>'` in the native shell.
 - Long jobs: native background (`run_in_background`, Monitor) for servers, watchers and streams — its output is never compressed. Use `cave__bash_start` when a long job's final output should be compressed: returns a jobId, poll `cave__bash_status` (`wait` up to 60s), stop `cave__bash_stop`. Jobs survive server restarts; `cave-tools jobs` lists/kills them. Never `sleep`-poll.
 - `[cave: full output … at <path>]` means output was trimmed: `cave__read` offset/limit or `cave__grep` that path; don't re-run the command.
@@ -53,7 +53,7 @@ Default level: **enforce**. Switch: `/cave-tools off|hint|enforce|strict`.
 | **off** | Skill dormant. No SessionStart injection, no per-turn reinforcement, no PreToolUse blocking |
 | **hint** | Rules injected at SessionStart + reinforced every turn. No blocking — Claude self-corrects |
 | **enforce** | Above + PreToolUse blocks Read/Grep/Glob/WebFetch/WebSearch with error pointing to cave-tools equivalent. Default |
-| **strict** | Above + blocks built-in Bash (background jobs and stream monitors still pass) and blocks Edit/Write when target was not first read via cave__read. Tightest |
+| **strict** | Above + blocks Edit/Write when target was not first read via cave__read. Native Bash stays allowed on Claude Code and opencode (output filtered); hosts without the filter (Grok, Gemini, Antigravity) block it except background jobs and stream monitors. Tightest |
 
 ## Edit Safety
 
@@ -96,5 +96,5 @@ Prefer cave tools over built-ins (same results, fewer tokens):
 - `cave__invalidate` after outside edits. Read before edit, never parallel. No writes in Plan Mode.
 | **hint** | Advisory; built-ins allowed. |
 | **enforce** | Built-in Read/Grep/Glob/WebFetch/WebSearch are blocked. |
-| **strict** | Also blocks native Bash (background/monitors OK); Edit/Write need prior cave__read; range/move need hash. |
+| **strict** | Above + Edit/Write need prior cave__read; range/move need hash. |
 <!-- cave-tools-compact-end -->

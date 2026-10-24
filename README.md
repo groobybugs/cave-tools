@@ -382,11 +382,11 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
    | `off`      | exits 0, no blocking (skill dormant)                                                    |
    | `hint`     | exits 0, no blocking (rules injected only; model self-corrects)                         |
    | `enforce`  | blocks `Read`/`Grep`/`Glob`/`WebFetch`/`WebSearch` and points the agent at the `cave__*` equivalent (default) |
-   | `strict`   | above + blocks `Bash` (except background jobs and stream monitors) + `Edit`/`Write` on a path that was not previously read via `cave__read` |
+   | `strict`   | above + blocks `Edit`/`Write` on a path that was not previously read via `cave__read`. Native `Bash` stays allowed on Claude Code (output filtered after it runs); hosts without that filter (Grok, Gemini, Antigravity) block it except background jobs and stream monitors |
 
    When the flag file is missing the script defaults to `enforce`, preserving the original blocker behavior. `Read` calls for image/PDF/SVG extensions pass through because `cave__read` returns those as MCP `image`/`resource` blocks and some clients handle the built-in path more directly.
 
-3. Restart Claude Code. Built-in `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, and (in `strict` mode) `Bash` plus `Edit`/`Write` now exit with a helpful error pointing the agent at the `cave__*` equivalent. The harness retries with the suggested tool automatically.
+3. Restart Claude Code. Built-in `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, and (in `strict` mode) `Edit`/`Write` now exit with a helpful error pointing the agent at the `cave__*` equivalent. The harness retries with the suggested tool automatically.
 
 ### Kimi Code CLI (`~/.kimi-code/mcp.json` + `~/.kimi-code/config.toml`)
 

@@ -3677,6 +3677,28 @@ process.exit(1);
   }
 
   {
+    console.log("Testing strict mode native Bash policy per host:");
+    const root = mkdtempSync("/tmp/ctr-");
+    writeFileSync(join(root, ".cave-tools-active"), "strict");
+    const script = join(process.cwd(), "claude", "hooks", "cave-tools-redirect.sh");
+    const run = (input) => spawnSync("bash", [script], {
+      encoding: "utf8",
+      input: JSON.stringify(input),
+      env: { ...process.env, CLAUDE_CONFIG_DIR: root, CAVE_TOOLS_ALLOW_BASH: "0" },
+    });
+    try {
+      const claude = run({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "git status" } });
+      assert.equal(claude.status, 0, claude.stderr);
+      assert.doesNotMatch(claude.stdout, /deny/, "Claude strict allows native Bash (output filtered after run)");
+      const grok = run({ toolName: "Bash", toolInput: { command: "git status" } });
+      assert.match(grok.stdout, /deny/, "Grok strict still blocks native Bash (no output filter)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    console.log("strict native Bash policy tests passed\n");
+  }
+
+  {
     console.log("Testing CLI bash exit codes, stderr, raw, -- separator:");
     const cliPath = join(process.cwd(), "dist", "cli.js");
     const root = mkdtempSync("/tmp/ctb-");

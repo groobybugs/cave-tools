@@ -204,7 +204,7 @@ function fallbackRuleset(mode) {
     '- `cave__invalidate` after outside edits. Read before edit, never parallel. No writes in Plan Mode.\n' +
     '| **hint** | Advisory; built-ins allowed. |\n' +
     '| **enforce** | Built-in Read/Grep/Glob/WebFetch/WebSearch are blocked. |\n' +
-    '| **strict** | Also blocks native Bash (background/monitors OK); Edit/Write need prior cave__read; range/move need hash. |',
+    '| **strict** | Above + Edit/Write need prior cave__read; range/move need hash. |',
     mode
   );
 }
