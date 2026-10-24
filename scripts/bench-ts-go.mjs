@@ -41,11 +41,20 @@
  *   --routes <csv>      subset of route ids
  *   --daemon            ALSO run the optional daemon_cli_read route (off by default)
  *   --memory            ALSO run the optional memory phase (off by default)
+ *
+ * Provenance (recorded + checked; mismatches are reported, never accepted silently):
+ *   --expect-ts-commit <sha>          expected TS repo commit
+ *   --expect-ts-dist-sha256 <hex>     expected TS dist-tree manifest hash (frozen dist pin)
+ *   --expect-go-commit <sha>          expected Go source commit (go-src repo HEAD, or the
+ *                                     prebuilt binary's own embedded vcs.revision)
+ *   --expect-go-binary-sha256 <hex>   expected sha256 of the measured Go binary
+ *   --go-bin-ref <label>              asserted provenance label for a prebuilt --go-bin
+ *                                     (e.g. "5f28d88 build job <id>"); never inferred from HEAD
  */
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -67,6 +76,7 @@ function parseArgs(argv) {
     routes: null,
     daemon: false,
     memory: false,
+    provenance: { expectTsCommit: null, expectGoCommit: null, expectGoBinarySha256: null, expectTsDistSha256: null, goBinRef: null },
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -82,6 +92,11 @@ function parseArgs(argv) {
       case "--routes": cfg.routes = new Set(next().split(",")); break;
       case "--daemon": cfg.daemon = true; break;
       case "--memory": cfg.memory = true; break;
+      case "--expect-ts-commit": cfg.provenance.expectTsCommit = next(); break;
+      case "--expect-go-commit": cfg.provenance.expectGoCommit = next(); break;
+      case "--expect-go-binary-sha256": cfg.provenance.expectGoBinarySha256 = next(); break;
+      case "--expect-ts-dist-sha256": cfg.provenance.expectTsDistSha256 = next(); break;
+      case "--go-bin-ref": cfg.provenance.goBinRef = next(); break;
       default:
         console.error(`bench-ts-go: unknown argument "${flag}"`);
         process.exit(2);
@@ -103,6 +118,16 @@ function parseArgs(argv) {
 }
 
 // --------------------------------------------------------------- utilities
+
+// Best-effort synchronous cleanup so a failed run never leaks MCP children or
+// sandbox daemons. Tasks guard themselves against already-cleaned resources.
+const cleanupTasks = [];
+function runCleanup() {
+  for (const fn of cleanupTasks.reverse()) {
+    try { fn(); } catch { /* best effort */ }
+  }
+  cleanupTasks.length = 0;
+}
 
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
@@ -358,6 +383,12 @@ class McpClient {
     this.pending = new Map();
     this.stderrChunks = [];
     this.nextId = 10;
+    this.closed = false;
+    cleanupTasks.push(() => {
+      if (!this.closed) {
+        try { this.child.kill("SIGKILL"); } catch { /* already gone */ }
+      }
+    });
     this.child.stdout.on("data", (chunk) => this._onData(chunk));
     this.child.stderr.on("data", (chunk) => this.stderrChunks.push(chunk));
   }
@@ -406,6 +437,7 @@ class McpClient {
   id() { return this.nextId++; }
 
   async close() {
+    this.closed = true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
     await new Promise((resolve) => {
       const timer = setTimeout(() => { this.child.kill("SIGKILL"); resolve(); }, 5000);
@@ -428,6 +460,33 @@ function compressFrame(client, session) {
   });
 }
 
+// Untimed session warmups: one read of a separate file plus one compress, so
+// the timed calls hit warm tool code paths on both sides.
+async function warmupClient(client) {
+  await readFrame(client, "warmup");
+  await compressFrame(client, "warmup");
+}
+
+// Per-route MCP session prefixes, so no route's cache state can leak into
+// another route's samples.
+const MCP_SESSION_PREFIX = {
+  read_first: "bench-first",
+  read_dedup: "bench-dedup",
+  compress: "bench-compress",
+};
+
+// One MCP route invocation in the exact shape timing uses. read_dedup performs
+// an untimed paired first read in the same session so the measured call is the
+// dedup-stub path.
+async function mcpInvoke(client, call, session) {
+  if (call === "read_first") return readFrame(client, session);
+  if (call === "read_dedup") {
+    await readFrame(client, session);
+    return readFrame(client, session);
+  }
+  return compressFrame(client, session);
+}
+
 function frameText(msg) {
   const content = msg?.result?.content;
   if (Array.isArray(content) && content[0] && typeof content[0].text === "string") return content[0].text;
@@ -445,6 +504,67 @@ function canonicalJSON(value) {
   return JSON.stringify(value) ?? "null";
 }
 
+// The dedup stub embeds its session tag and read count by design
+// (src/compression/utils.ts readStubFor), so its payload identity is this
+// pattern — not a literal hash, which would false-positive on every sample
+// the moment its session name differs. Format check, not output normalization.
+const READ_STUB_RE = /^<file unchanged since read #\d+ \(session [^)]*\)\. Use force=true to re-read\.>$/;
+
+// Per-sample payload identity for MCP responses: hash + text length of the
+// ToolResult payload only (never the raw frame, whose request-id digits vary
+// across samples).
+function resultIdentity(msg) {
+  const text = frameText(msg);
+  return {
+    result_sha256: sha256(Buffer.from(canonicalJSON(msg?.result ?? null), "utf8")),
+    text_sha256: sha256(Buffer.from(text, "utf8")),
+    text_length: text.length,
+    is_stub: text.includes("file unchanged"),
+    is_error: Boolean(msg?.result?.isError),
+  };
+}
+
+// Env sanitization for both sides, mirroring the runtime's own
+// isSubagentContext() detection (src/compression/utils.ts): CAVE_TOOLS_FORCE_FRESH
+// ("1"/"true"), the known subagent keys and any *_TASK_ID/TASK_ID key force
+// fresh reads and would destroy the dedup-stub route. Also drop implementation
+// switch inputs (CAVE_TOOLS_IMPL, CAVE_TOOLS_GO_BIN). Nothing else is removed
+// (PATH and ordinary env pass through untouched).
+const KNOWN_SUBAGENT_KEYS = ["CLINE_TASK_ID", "CLAUDE_CODE_SUBAGENT", "ANTHROPIC_SUBAGENT", "CURSOR_TASK_ID"];
+const TASK_ID_STYLE = /(?:^|_)TASK_ID$/;
+const ENV_SWITCH_KEYS = ["CAVE_TOOLS_IMPL", "CAVE_TOOLS_GO_BIN"];
+
+function sanitizeInheritedEnv(base) {
+  const env = { ...base };
+  const stripped = [];
+  for (const key of Object.keys(env)) {
+    if (key === "CAVE_TOOLS_FORCE_FRESH" || KNOWN_SUBAGENT_KEYS.includes(key) ||
+        TASK_ID_STYLE.test(key) || ENV_SWITCH_KEYS.includes(key)) {
+      stripped.push(key);
+      delete env[key];
+    }
+  }
+  return { env, stripped: stripped.sort() };
+}
+
+// Content fingerprint of a dist tree (sorted relpath + size + content sha256),
+// so a frozen TS dist can be pinned with --expect-ts-dist-sha256.
+function distManifestSha256(distDir) {
+  const lines = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(".js")) {
+        const buf = readFileSync(full);
+        lines.push(`${path.relative(distDir, full)}\0${buf.length}\0${sha256(buf)}`);
+      }
+    }
+  };
+  walk(distDir);
+  return sha256(Buffer.from(lines.join("\n"), "utf8"));
+}
+
 // ------------------------------------------------------------- validation
 
 function compareOutputs(ts, go) {
@@ -456,8 +576,8 @@ function compareOutputs(ts, go) {
     exit_equal: exitEqual,
     stdout_equal: stdoutEqual,
     stderr_equal: stderrEqual,
-    ts: { exit: ts.code, stdout_bytes: ts.stdout.length, stderr_bytes: ts.stderr.length, stdout_sha256: sha256(ts.stdout) },
-    go: { exit: go.code, stdout_bytes: go.stdout.length, stderr_bytes: go.stderr.length, stdout_sha256: sha256(go.stdout) },
+    ts: { exit: ts.code, stdout_bytes: ts.stdout.length, stderr_bytes: ts.stderr.length, stdout_sha256: sha256(ts.stdout), stderr_sha256: sha256(ts.stderr) },
+    go: { exit: go.code, stdout_bytes: go.stdout.length, stderr_bytes: go.stderr.length, stdout_sha256: sha256(go.stdout), stderr_sha256: sha256(go.stderr) },
     first_diff: stdoutEqual ? null : firstDiff(ts.stdout, go.stdout),
   };
 }
@@ -498,8 +618,9 @@ async function main() {
   // pointing it at this worktree's dist keeps the Go daemon key distinct from
   // the TS daemon key (which TS derives from its own dist), so --daemon runs
   // never share a socket with the TS daemon or the live user daemon.
+  const { env: sanitizedBase, stripped: strippedEnvKeys } = sanitizeInheritedEnv(process.env);
   const childEnv = {
-    ...process.env,
+    ...sanitizedBase,
     HOME: path.join(sandbox, "home"),
     CAVE_TOOLS_DATA_DIR: path.join(sandbox, "data"),
     CLAUDE_CONFIG_DIR: path.join(sandbox, "claude"),
@@ -565,6 +686,16 @@ async function main() {
       clock: "performance.now() wall time around the whole invocation / MCP roundtrip",
       order_randomization: "per-repeat seeded coin flip, recorded per route as repeat_orders",
       env_policy: "identical child env for both sides; shared bench-owned sandbox (HOME/CAVE_TOOLS_DATA_DIR/CLAUDE_CONFIG_DIR/XDG_RUNTIME_DIR); CAVE_TOOLS_DAEMON=0 except daemon_cli_read; live user state never touched",
+      sanitized_env: {
+        policy: [
+          "CAVE_TOOLS_FORCE_FRESH",
+          "known subagent keys: CLINE_TASK_ID, CLAUDE_CODE_SUBAGENT, ANTHROPIC_SUBAGENT, CURSOR_TASK_ID",
+          "TASK_ID-style keys (/(?:^|_)TASK_ID$/)",
+          "implementation switch keys: CAVE_TOOLS_IMPL, CAVE_TOOLS_GO_BIN",
+        ],
+        stripped_from_inherited: strippedEnvKeys,
+      },
+      mcp_session_prefixes: { read_first: "bench-first", read_dedup: "bench-dedup", compress: "bench-compress" },
       run_dir: runDir,
       sandbox,
     },
@@ -574,6 +705,65 @@ async function main() {
     memory: {},
     notes: [],
   };
+
+  // ----------------------------------------------------------- provenance
+  // Frozen-path / prebuilt-binary provenance: content fingerprint of the TS
+  // dist tree, `go version -m` build info for the Go binary (module + vcs
+  // metadata embedded by the Go toolchain), and optional expected refs. A
+  // prebuilt --go-bin is never attributed to a git HEAD: its source ref comes
+  // from vcs.revision in its own build info or from the asserted --go-bin-ref
+  // label. Mismatches are recorded and noted, never silently accepted.
+  const tsDistDir = path.join(tsRepo, "dist");
+  const goVersionM = (() => {
+    const res = spawnSync("go", ["version", "-m", goBin], { encoding: "utf8", timeout: 60_000 });
+    return res.status === 0 ? res.stdout.trim().split("\n").slice(0, 60).join("\n") : null;
+  })();
+  const vcsRevision = /^\s*vcs\.revision=(.+)$/m.exec(goVersionM ?? "")?.[1]?.trim() ?? null;
+  const vcsTime = /^\s*vcs\.time=(.+)$/m.exec(goVersionM ?? "")?.[1]?.trim() ?? null;
+  const vcsModified = /^\s*vcs\.modified=(.+)$/m.exec(goVersionM ?? "")?.[1]?.trim() ?? null;
+  const goLdflags = `-X main.version=${readPackageVersion(path.resolve(goSrc, "..")) ?? "0.6.1"}`;
+  report.provenance = {
+    ts_dist_manifest_sha256: existsSync(tsDistDir) ? distManifestSha256(tsDistDir) : null,
+    go_binary: {
+      path: goBin,
+      sha256: sha256(readFileSync(goBin)),
+      built_from_source: !cfg.goBin,
+      ref_label: cfg.provenance.goBinRef,
+      build_command: cfg.goBin
+        ? null
+        : `go build -ldflags "${goLdflags}" -o <run>/bin/cave-tools-go ./cmd/cave-tools-go  (cwd ${goSrc}, GOPROXY=off GOSUMDB=off)`,
+      vcs_revision: vcsRevision,
+      vcs_time: vcsTime,
+      vcs_modified: vcsModified,
+      go_version_m: goVersionM,
+    },
+    expected: {
+      ts_commit: cfg.provenance.expectTsCommit,
+      ts_dist_manifest_sha256: cfg.provenance.expectTsDistSha256,
+      go_commit: cfg.provenance.expectGoCommit,
+      go_binary_sha256: cfg.provenance.expectGoBinarySha256,
+    },
+    mismatches: [],
+  };
+  const provenanceCheck = (name, expected, actual) => {
+    if (expected == null) return;
+    if (String(expected).toLowerCase() !== String(actual).toLowerCase()) {
+      report.provenance.mismatches.push({ name, expected, actual });
+      report.notes.push(`provenance mismatch: ${name} expected ${expected}, got ${actual ?? "null"}`);
+    }
+  };
+  provenanceCheck("ts_commit", cfg.provenance.expectTsCommit, report.metadata.refs.ts_commit);
+  provenanceCheck("ts_dist_manifest_sha256", cfg.provenance.expectTsDistSha256, report.provenance.ts_dist_manifest_sha256);
+  provenanceCheck("go_binary_sha256", cfg.provenance.expectGoBinarySha256, report.provenance.go_binary.sha256);
+  // go_commit: source ref of the measured Go binary — built-from-source uses
+  // the go-src repo commit, prebuilt uses its own embedded vcs.revision.
+  provenanceCheck("go_commit", cfg.provenance.expectGoCommit, report.metadata.refs.go_commit ?? vcsRevision);
+  if (cfg.goBin && vcsRevision == null && cfg.provenance.goBinRef == null) {
+    report.notes.push(
+      "prebuilt go binary carries no vcs.revision build stamp and no --go-bin-ref label: its " +
+      "source ref is unproven (binary sha256 recorded; supply the build-job ref explicitly)",
+    );
+  }
 
   // ---------------------------------------------------------- validation
   console.error(`bench-ts-go: run ${runId} — validating ${routes.length} route(s) before timing`);
@@ -590,6 +780,11 @@ async function main() {
     }
     const pid = daemonStatusPid(impl);
     daemonRunning[impl.label] = pid !== null;
+    if (pid !== null) {
+      cleanupTasks.push(() => {
+        if (daemonRunning[impl.label]) daemonStop(impl);
+      });
+    }
     return pid;
   }
   function daemonStop(impl) {
@@ -625,43 +820,59 @@ async function main() {
       continue;
     }
     if (route.kind === "mcp") {
-      // One fresh session per side; validate the whole timed triple at once.
-      const frames = {};
+      // Validate this route's own call shape once per side, in a session whose
+      // prefix matches timing (bench-val-<call>), and record per-side payload
+      // refs (canonical result hash + text hash/length + stub flag) that the
+      // per-sample checks compare against.
+      const call = route.call;
+      const responses = {};
+      const identities = {};
       for (const impl of Object.values(impls)) {
         const client = new McpClient(impl);
         client.readFixture = path.join(fxD, "read-fixture.txt");
         client.compressText = compressText;
         await client.initialize();
-        await readFrame(client, "warmup"); // untimed warmup on a separate file is done inside timing; here just the triple
-        const first = await readFrame(client, "bench-val");
-        const dedup = await readFrame(client, "bench-val");
-        const comp = await compressFrame(client, "bench-val");
-        frames[impl.label] = { read_first: first, read_dedup: dedup, compress: comp, stderr: Buffer.concat(client.stderrChunks) };
+        await warmupClient(client);
+        const res = await mcpInvoke(client, call, `bench-val-${call}`);
+        responses[impl.label] = res;
+        identities[impl.label] = resultIdentity(res.msg);
         await client.close();
       }
-      for (const call of ["read_first", "read_dedup", "compress"]) {
-        const ts = frames.ts[call];
-        const go = frames.go[call];
-        const cmp = compareOutputs({ stdout: ts.raw, code: 0, stderr: Buffer.alloc(0) }, { stdout: go.raw, code: 0, stderr: Buffer.alloc(0) });
-        cmp.exit_equal = true;
-        cmp.stderr_equal = true;
-        cmp.match = cmp.stdout_equal;
-        cmp.result_match = canonicalJSON(ts.msg?.result ?? null) === canonicalJSON(go.msg?.result ?? null);
-        cmp.envelope_only_drift = !cmp.match && cmp.result_match;
-        report.validation[`${route.id}:${call}`] = {
-          ...cmp,
-          ts_text_length: frameText(ts.msg).length,
-          go_text_length: frameText(go.msg).length,
-          ts_is_error: Boolean(ts.msg?.result?.isError),
-          go_is_error: Boolean(go.msg?.result?.isError),
-        };
+      const cmp = compareOutputs(
+        { stdout: responses.ts.raw, code: 0, stderr: Buffer.alloc(0) },
+        { stdout: responses.go.raw, code: 0, stderr: Buffer.alloc(0) },
+      );
+      cmp.exit_equal = true;
+      cmp.stderr_equal = true;
+      cmp.match = cmp.stdout_equal;
+      cmp.result_match = canonicalJSON(responses.ts.msg?.result ?? null) === canonicalJSON(responses.go.msg?.result ?? null);
+      cmp.envelope_only_drift = !cmp.match && cmp.result_match;
+      const entry = {
+        ...cmp,
+        ts_result_sha256: identities.ts.result_sha256,
+        go_result_sha256: identities.go.result_sha256,
+        ts_text_sha256: identities.ts.text_sha256,
+        go_text_sha256: identities.go.text_sha256,
+        ts_text_length: identities.ts.text_length,
+        go_text_length: identities.go.text_length,
+        ts_is_stub: identities.ts.is_stub,
+        go_is_stub: identities.go.is_stub,
+        ts_is_error: identities.ts.is_error,
+        go_is_error: identities.go.is_error,
+        invariant: call === "read_first" ? "first read in session must be full (not a stub)"
+          : call === "read_dedup" ? "paired re-read in session must be the dedup stub"
+          : "none",
+      };
+      const invariantOk = call === "read_first" ? (!identities.ts.is_stub && !identities.go.is_stub)
+        : call === "read_dedup" ? (identities.ts.is_stub && identities.go.is_stub)
+        : true;
+      entry.invariant_ok = invariantOk;
+      if (!invariantOk) {
+        report.notes.push(
+          `mcp ${route.id}: validation-run invariant violated (ts_is_stub=${identities.ts.is_stub}, go_is_stub=${identities.go.is_stub}) — route flagged`,
+        );
       }
-      if (route.call === "read_dedup") {
-        const stub = frameText(frames.ts.read_dedup.msg);
-        if (!stub.includes("file unchanged")) {
-          report.notes.push("mcp_read_dedup: dedup stub not observed on TS validation run (second read returned full output)");
-        }
-      }
+      report.validation[`${route.id}:${call}`] = entry;
       continue;
     }
     // CLI and daemon routes: one plain run per side.
@@ -693,7 +904,7 @@ async function main() {
       client.readFixture = path.join(fxD, "read-fixture.txt");
       client.compressText = compressText;
       await client.initialize();
-      await readFrame(client, "warmup"); // untimed: separate file, warms tool code paths
+      await warmupClient(client); // untimed read + compress warmups
       mcpClients[impl.label] = client;
     }
   }
@@ -716,30 +927,45 @@ async function main() {
         let sample;
         if (route.kind === "mcp") {
           const client = mcpClients[label];
-          const session = `bench-mcp-${r}`;
+          const session = `${MCP_SESSION_PREFIX[route.call]}-${r}`;
+          // read_dedup: untimed paired first read keeps this call a dedup hit
+          // within its own per-route session.
+          if (route.call === "read_dedup") await readFrame(client, session);
           const t0 = performance.now();
-          let res;
-          if (route.call === "read_first") res = await readFrame(client, session);
-          else if (route.call === "read_dedup") {
-            // The paired first read keeps this call a dedup hit within the
-            // same session; it is timed by the mcp_read_first route itself.
-            await readFrame(client, session);
-            const t1 = performance.now();
-            res = await readFrame(client, session);
-            sample = {
-              r, ms: performance.now() - t1,
-              exit: res.msg?.result?.isError ? 1 : 0,
-              stdout_bytes: res.raw.length, stderr_bytes: 0,
-            };
-          } else res = await compressFrame(client, session);
-          if (!sample) {
-            sample = {
-              r, ms: performance.now() - t0,
-              exit: res.msg?.result?.isError ? 1 : 0,
-              stdout_bytes: res.raw.length, stderr_bytes: 0,
-            };
+          const res = route.call === "compress"
+            ? await compressFrame(client, session)
+            : await readFrame(client, session);
+          const ms = performance.now() - t0;
+          // Payload identity is computed AFTER the captured timer and checked
+          // against this side's own validation refs — canonical result hash +
+          // text length, never raw frame length (request-id digits vary per
+          // sample). Invariants: read_first must be full, read_dedup the stub.
+          const id = resultIdentity(res.msg);
+          const vEntry = report.validation[`${route.id}:${route.call}`];
+          // read_dedup: stub-pattern identity (session tag + read count are
+          // contractually variable). read_first / compress: literal canonical
+          // result hash + text length against this side's refs.
+          const payloadMatch = route.call === "read_dedup"
+            ? id.is_stub && READ_STUB_RE.test(frameText(res.msg))
+            : id.result_sha256 === vEntry[`${label}_result_sha256`] && id.text_length === vEntry[`${label}_text_length`];
+          const invariantOk = route.call === "read_first" ? !id.is_stub
+            : route.call === "read_dedup" ? id.is_stub
+            : true;
+          sample = {
+            r, ms,
+            exit: id.is_error ? 1 : 0,
+            stdout_bytes: res.raw.length,
+            stderr_bytes: 0,
+            result_sha256: id.result_sha256,
+            text_length: id.text_length,
+            is_stub: id.is_stub,
+          };
+          sample.valid = !id.is_error && payloadMatch && invariantOk;
+          if (!sample.valid) {
+            sample.invalid_reason = !invariantOk
+              ? `invariant violated: expected ${route.call === "read_first" ? "full read" : "dedup stub"}, got ${id.is_stub ? "stub" : "full"}`
+              : "result payload hash/length deviated from this side's validation run";
           }
-          sample.valid = sample.exit === 0;
         } else {
           const stdinBuf = route.stdin ? stdinBufs[route.stdin] : null;
           const out = runCliRaw(impl, route.argv(r), stdinBuf, route.daemonEnv ? daemonEnv : null);
@@ -747,12 +973,17 @@ async function main() {
             r, ms: out.ms, exit: out.code,
             stdout_bytes: out.stdout.length, stderr_bytes: out.stderr.length,
           };
-          // Each sample is checked against ITS OWN side's validated exit code
-          // and stdout length, so a flagged content difference never voids a
-          // sample while a real drift still does.
+          // Hash + exit checks computed after the captured timer and compared
+          // against this side's validated reference — content hashes, not just
+          // lengths. A flagged cross-side content difference never voids a
+          // sample while a real per-side drift still does.
+          const outHash = sha256(out.stdout);
+          const errHash = sha256(out.stderr);
+          sample.stdout_sha256 = outHash;
+          sample.stderr_sha256 = errHash;
           const expect = report.validation[route.id][label];
-          sample.valid = out.code === expect.exit && out.stdout.length === expect.stdout_bytes;
-          if (!sample.valid) sample.invalid_reason = "exit code or stdout length deviated from this side's validation run";
+          sample.valid = out.code === expect.exit && outHash === expect.stdout_sha256 && errHash === expect.stderr_sha256;
+          if (!sample.valid) sample.invalid_reason = "exit code or stdout/stderr hash deviated from this side's validation run";
         }
         samples[label].push(sample);
       }
@@ -816,16 +1047,16 @@ async function main() {
     }
     // MCP server memory: VmHWM after one validated triple (Linux /proc).
     if (mcpRoutes.length > 0) {
-      const mem = { method: "/proc/<pid>/status VmHWM of a fresh MCP server after init + warmup + one triple (not /usr/bin/time)", ts: [], go: [] };
+      const mem = { method: "/proc/<pid>/status VmHWM of a fresh MCP server after init + warmups + one validated triple (not /usr/bin/time)", ts: [], go: [] };
       for (const impl of Object.values(impls)) {
         const client = new McpClient(impl);
         client.readFixture = path.join(fxD, "read-fixture.txt");
         client.compressText = compressText;
         await client.initialize();
-        await readFrame(client, "warmup");
-        await readFrame(client, "mem");
-        await readFrame(client, "mem");
-        await compressFrame(client, "mem");
+        await warmupClient(client);
+        await mcpInvoke(client, "read_first", "mem-first");
+        await mcpInvoke(client, "read_dedup", "mem-dedup");
+        await mcpInvoke(client, "compress", "mem-compress");
         const statusPath = `/proc/${client.child.pid}/status`;
         let vmHwm = null;
         if (existsSync(statusPath)) {
@@ -868,6 +1099,11 @@ async function main() {
       ts_p95_ms: t.stats.ts.p95_ms,
       go_p95_ms: t.stats.go.p95_ms,
       p50_ratio_ts_over_go: t.p50_ratio_ts_over_go,
+      // For MCP routes: whether the ToolResult payloads are equivalent even
+      // when the byte-strict envelope comparison flagged the route.
+      payload_equivalent: t.validation_key.includes(":")
+        ? (report.validation[t.validation_key]?.result_match ?? null)
+        : t.output_match,
     };
     (t.excluded_from_matched_summary ? report.summary.flagged : report.summary.matched).push(row);
   }
@@ -892,9 +1128,11 @@ async function main() {
   }
   console.log(`\nresults: ${outPath}`);
   console.log(`sha256:  ${sha256(readFileSync(outPath))}`);
+  runCleanup();
 }
 
 main().catch((error) => {
   console.error("bench-ts-go: failed:", error);
+  runCleanup();
   process.exit(1);
 });

@@ -45,6 +45,14 @@ normalization:
   daemon are never touched; `CAVE_TOOLS_DAEMON=0` everywhere except the
   explicit `--daemon` route fixture.
 - `CAVE_TOOLS_PROFILE=full`, `CAVE_TOOLS_STATUS_RTK=0`, `LC_ALL=C.UTF-8`.
+- Inherited env is sanitized identically for both sides, mirroring the
+  runtime's own `isSubagentContext()` detection (`src/compression/utils.ts`):
+  `CAVE_TOOLS_FORCE_FRESH`, the known subagent keys (`CLINE_TASK_ID`,
+  `CLAUDE_CODE_SUBAGENT`, `ANTHROPIC_SUBAGENT`, `CURSOR_TASK_ID`), any
+  `TASK_ID`-style key, and the implementation switch inputs (`CAVE_TOOLS_IMPL`,
+  `CAVE_TOOLS_GO_BIN`) are stripped — otherwise the dedup-stub route would be
+  silently disabled. Nothing else is removed (PATH passes through); the exact
+  stripped keys are recorded in `config.sanitized_env`.
 - `CAVE_TOOLS_GO_DIST_DIR` points at this worktree's `dist/`. Only the Go
   runtime reads it (daemon build fingerprint, `go/internal/daemon/paths.go`);
   TS ignores it and fingerprints its own dist via `import.meta.url`. This
@@ -69,9 +77,28 @@ collected but kept out of `summary.matched` and reported under
 `summary.flagged`. Nothing is normalized or stripped to force a match. For MCP
 routes the raw response line is still the gating comparison; a scoped
 diagnostic `result_match` (canonical JSON of the `result` payload) separates
-tool-output drift from wire-envelope drift. During timing every sample is
-re-checked against its own side's validated exit code and stdout length;
-deviating samples are marked `valid: false`, excluded from statistics and
+tool-output drift from wire-envelope drift (`envelope_only_drift` rows stay
+flagged/payload-equivalent and never enter the matched summary).
+
+Per-sample re-checks during timing (computed **outside** the captured timer):
+
+- CLI routes: exit code + **stdout/stderr sha256** compared against that
+  side's validated reference (content hashes, not lengths).
+- MCP routes: canonical ToolResult payload hash + payload text length against
+  that side's validated refs — never raw frame length, whose request-id digits
+  vary per sample. Exception by contract: the dedup stub embeds its session
+  tag and read count, so `mcp_read_dedup` is checked against the stub format
+  pattern instead of a literal hash (format check, not output normalization).
+  Route invariants are enforced for **both** sides:
+  `mcp_read_first` must return the full read (not a stub), `mcp_read_dedup`
+  must return the dedup stub. Violations mark the sample invalid with the
+  invariant spelled out.
+- MCP sessions are prefixed per route (`bench-first-*`, `bench-dedup-*`,
+  `bench-compress-*`) so no route's cache state leaks into another's samples;
+  `read_dedup` performs its paired first read untimed inside its own session.
+  Both sides get untimed read + compress warmups before timing.
+
+Deviating samples are marked `valid: false`, excluded from statistics and
 listed in the JSON.
 
 ## Timing
@@ -112,6 +139,27 @@ node scripts/bench-ts-go.mjs \
 Raw JSON results (metadata, machine/runtime/commit refs, fixture hashes,
 validation, per-sample timings, stats, memory) land at `--out`. Smoke runs use
 `--repeats 2`.
+
+## Provenance (frozen paths and prebuilt binaries)
+
+The results pin what was actually measured and refuse to pretend a prebuilt
+binary came from a git HEAD:
+
+- `ts_dist_manifest_sha256` — content fingerprint of the measured TS dist tree
+  (sorted relpath + size + sha256 per `.js`); pin with
+  `--expect-ts-dist-sha256`.
+- `go_binary.sha256` + `go version -m` build info (toolchain, module versions,
+  embedded `vcs.revision`/`vcs.time`/`vcs.modified`), plus the exact build
+  command/ldflags when built from `--go-src`.
+- Source ref of the Go binary: the `--go-src` repo commit when built in-run;
+  the binary's own embedded `vcs.revision` (or the asserted `--go-bin-ref`
+  label, e.g. `5f28d88 build job <id>`) when prebuilt — never the current
+  checkout's HEAD.
+- `--expect-ts-commit`, `--expect-go-commit`, `--expect-go-binary-sha256` are
+  checked against the actual values; mismatches land in
+  `provenance.mismatches` and `notes` (the run continues, nothing is silently
+  accepted). If a prebuilt binary carries no VCS stamp and no `--go-bin-ref`
+  label, the results say the source ref is unproven rather than guessing one.
 
 ## Known limitations
 
