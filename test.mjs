@@ -3669,6 +3669,10 @@ process.exit(1);
       ["my key sk-ant-abcdefghijklmnopqrstuvwxyz12345 end", "my key [REDACTED:Anthropic key] end"],
       ["id AKIAABCDEFGHIJKLMNOP x", "id [REDACTED:AWS key] x"],
       ["token=ghp_abcdefghijklmnopqrstuvwxyz0123456789", "token=[REDACTED:API key param]"],
+      ["redis://:pw@cache:6379", "redis://:[REDACTED:Database URL]@cache:6379"],
+      ["postgresql://app:s3cret@db/x", "postgresql://app:[REDACTED:Database URL]@db/x"],
+      ["mongodb+srv://u:pw1@c.example.net/db", "mongodb+srv://u:[REDACTED:Database URL]@c.example.net/db"],
+      ["rediss://u:pw2@cache:6380", "rediss://u:[REDACTED:Database URL]@cache:6380"],
     ];
     for (const [input, expected] of cases) {
       assert.equal(redactSecrets(input), expected, input);

@@ -19,7 +19,12 @@ function rpc(method: string): Promise<{ result?: { pid?: number; buildId?: strin
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       for (const line of buffer.split("\n").slice(0, -1)) {
-        const msg = JSON.parse(line);
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue; // a malformed line must not crash the CLI
+        }
         if (msg.id === (method === "hello" ? 1 : 2)) {
           clearTimeout(timer);
           socket.destroy();

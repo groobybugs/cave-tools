@@ -37,12 +37,15 @@ function globToRegExp(pattern: string): RegExp {
 function spawnBin(command: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string; code: number | null; error?: Error }> {
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd, env: getEnv(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf-8")));
-    child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf-8")));
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.on("error", (error) => resolve({ stdout: "", stderr: "", code: null, error }));
-    child.on("close", (code) => resolve({ stdout, stderr, code }));
+    // Decode once so a multibyte char split across chunks stays intact.
+    child.on("close", (code) =>
+      resolve({ stdout: Buffer.concat(stdout).toString("utf-8"), stderr: Buffer.concat(stderr).toString("utf-8"), code }),
+    );
   });
 }
 
@@ -168,7 +171,8 @@ export async function rgGrep(input: {
     const text = String(event.data?.lines?.text ?? "").replace(/\r?\n$/, "");
     matches.push({
       path: relative,
-      line: Number(event.data?.line_number),
+      // rg omits line_number for some inputs; 0 means "unknown line".
+      line: Number.isFinite(event.data?.line_number) ? Number(event.data.line_number) : 0,
       text: text.length > MAX_LINE_LENGTH ? `${text.slice(0, MAX_LINE_LENGTH)}...` : text,
     });
     if (matches.length > input.limit) break;

@@ -106,12 +106,15 @@ function exeName(tool: SearchBin): string {
   return process.platform === "win32" ? `${tool}.exe` : tool;
 }
 
+// Uses the call env, like whichOnPath: daemon clients get their own bin dir.
 export function binDir(): string {
+  const env = getEnv();
   if (process.platform === "win32") {
-    const root = process.env.LOCALAPPDATA || path.join(homedir(), "AppData", "Local");
+    const home = env.USERPROFILE || homedir();
+    const root = env.LOCALAPPDATA || path.join(home, "AppData", "Local");
     return path.join(root, "cave-tools", "bin");
   }
-  return path.join(homedir(), ".local", "share", "cave-tools", "bin");
+  return path.join(env.HOME || homedir(), ".local", "share", "cave-tools", "bin");
 }
 
 export function cachedBinPath(tool: SearchBin): string {
@@ -158,12 +161,11 @@ export function whichUserFd(): string | null {
 function run(command: string, args: string[]): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
-    let stderr = "";
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf-8");
-    });
+    const stderr: Buffer[] = [];
+    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.on("error", (error) => resolve({ code: null, stderr: error.message }));
-    child.on("close", (code) => resolve({ code, stderr }));
+    // Decode once so a multibyte char split across chunks stays intact.
+    child.on("close", (code) => resolve({ code, stderr: Buffer.concat(stderr).toString("utf-8") }));
   });
 }
 

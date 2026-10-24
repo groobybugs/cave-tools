@@ -30,15 +30,16 @@ const TS_PATTERNS = [
     kind: "enum" as const,
     regex: /^(\s*)(export\s+)?enum\s+(\w+)/,
   },
-  {
-    kind: "const" as const,
-    regex:
-      /^(\s*)(export\s+)?(const|let|var)\s+(\w+)(?:\s*:\s*([^=]+))?\s*=/,
-  },
+  // Arrow functions before plain const: the const pattern matches them too.
   {
     kind: "fn" as const,
     regex:
       /^(\s*)(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(([^)]*)\)(?:\s*:\s*([^=]+))?\s*=>/,
+  },
+  {
+    kind: "const" as const,
+    regex:
+      /^(\s*)(export\s+)?(const|let|var)\s+(\w+)(?:\s*:\s*([^=]+))?\s*=/,
   },
 ];
 
@@ -83,14 +84,16 @@ function extractTsSignatures(content: string): Signature[] {
 
       const indent = match[1]?.length ?? 0;
       const isExported = !!match[2];
-      const isAsync = !!(match[3]?.trim() === "async");
+      // function pattern: async in group 3; arrow pattern: group 5.
+      const isArrow = pattern.kind === "fn" && /^(const|let|var)$/.test(match[3] ?? "");
+      const isAsync = (isArrow ? match[5] : match[3])?.trim() === "async";
 
       let name: string;
       let params = "";
       let returnType = "";
 
       if (pattern.kind === "fn") {
-        if (match[0].includes("function")) {
+        if (!isArrow) {
           name = match[4] ?? "";
           params = match[5] ?? "";
           returnType = (match[6] ?? "").trim();
