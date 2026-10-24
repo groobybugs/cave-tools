@@ -10,12 +10,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 	"github.com/groobybugs/cave-tools/go/internal/storage"
 )
 
@@ -37,7 +37,7 @@ const JobWorkerCommand = "__job-worker"
 //
 // TODO(jsre): compile through go/internal/jsre once W1a lands it, so `\s`
 // keeps JS whitespace semantics.
-var exitMarker = regexp.MustCompile(`\[cave-job exit=(-?\d+)(?: signal=(\w+))?\]\s*$`)
+var exitMarker = jsre.MustCompile(`\[cave-job exit=(-?\d+)(?: signal=(\w+))?\]\s*$`, "")
 
 // closeWaiters are the close-waiters for jobs started by this server process,
 // keyed by jobId.

@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
+
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
 )
 
@@ -627,7 +629,7 @@ func migrateReadRegistry(conn queryer) error {
 	}
 	now := time.Now().UnixMilli()
 	for _, line := range strings.Split(string(raw), "\n") {
-		path := strings.TrimSpace(line)
+		path := jsre.Trim(line)
 		if path == "" {
 			continue
 		}

@@ -45,6 +45,20 @@ func TestGlobToRegExp(t *testing.T) {
 			match:   []string{"[a]$"},
 			nomatch: []string{"a", "[a]"},
 		},
+		{
+			// The glob source is fed to jsre; JS whitespace characters are
+			// literals in a glob and must survive the translation.
+			name:    "unicode whitespace is literal",
+			pattern: "a\u00a0*",
+			match:   []string{"a\u00a0b", "a\u00a0"},
+			nomatch: []string{"a b", "ab"},
+		},
+		{
+			name:    "bom is literal",
+			pattern: "\ufeffa?",
+			match:   []string{"\ufeffab"},
+			nomatch: []string{"\ufeffa", "ab"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -90,6 +104,19 @@ func TestParsePathLines(t *testing.T) {
 	}
 	if zero := parsePathLines(stdout, 0); len(zero) != 0 {
 		t.Fatalf("parsePathLines(limit 0) = %#v", zero)
+	}
+
+	// Muse regression: line.trim() strips U+FEFF but keeps U+0085, the
+	// opposite of strings.TrimSpace.
+	jsWhitespace := parsePathLines("\ufeffa.ts\nb.ts\u0085\n", 10)
+	wantJS := []string{"a.ts", "b.ts\u0085"}
+	if len(jsWhitespace) != len(wantJS) {
+		t.Fatalf("parsePathLines(JS whitespace) = %#v, want %#v", jsWhitespace, wantJS)
+	}
+	for index := range wantJS {
+		if jsWhitespace[index] != wantJS[index] {
+			t.Fatalf("parsePathLines(JS whitespace)[%d] = %q, want %q", index, jsWhitespace[index], wantJS[index])
+		}
 	}
 }
 
@@ -241,6 +268,13 @@ func TestRgFilesRipgrepError(t *testing.T) {
 	if err == nil || err.Error() != "boom" {
 		t.Fatalf("RgFiles error = %v, want boom", err)
 	}
+
+	// stderr.trim() in TS strips U+FEFF; strings.TrimSpace would keep it.
+	env["RGMOCK_ERR"] = "boom\ufeff"
+	_, err = RgFiles(ctx, t.TempDir(), "*.ts", 10, true)
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("RgFiles error = %q, want boom", err)
+	}
 }
 
 func TestRgFilesNoBinsUsesNodeFinder(t *testing.T) {
@@ -369,6 +403,58 @@ func TestRgGrepParsesMatches(t *testing.T) {
 			t.Fatal("Truncated = false")
 		}
 		env["RGMOCK_EXIT"] = ""
+	})
+
+	// Muse regression: the error text is stderr.trim() in TS, so U+FEFF is
+	// stripped while strings.TrimSpace would keep it.
+	t.Run("stderr trim uses JS whitespace", func(t *testing.T) {
+		env := GetEnv(ctx)
+		env["RGMOCK_EXIT"] = "3"
+		env["RGMOCK_ERR"] = "boom\ufeff"
+		if err := os.WriteFile(mockPath(t, ctx, "RGMOCK"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := RgGrep(ctx, RgGrepInput{Cwd: t.TempDir(), Pattern: "x", Limit: 10})
+		if err == nil || err.Error() != "boom" {
+			t.Fatalf("error = %q, want %q", err, "boom")
+		}
+		env["RGMOCK_EXIT"] = ""
+		env["RGMOCK_ERR"] = ""
+	})
+
+	t.Run("invalid pattern trim uses JS whitespace", func(t *testing.T) {
+		env := GetEnv(ctx)
+		env["RGMOCK_EXIT"] = "2"
+		env["RGMOCK_ERR"] = "regex parse error: bad\ufeff"
+		if err := os.WriteFile(mockPath(t, ctx, "RGMOCK"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := RgGrep(ctx, RgGrepInput{Cwd: t.TempDir(), Pattern: "[", Limit: 10})
+		if err == nil || err.Error() != "regex parse error: bad" {
+			t.Fatalf("error = %q, want %q", err, "regex parse error: bad")
+		}
+		env["RGMOCK_EXIT"] = ""
+		env["RGMOCK_ERR"] = ""
+	})
+
+	// A U+FEFF-only line is blank after JS trim, so it is skipped instead of
+	// failing JSON parsing.
+	t.Run("bom only line is skipped", func(t *testing.T) {
+		env := GetEnv(ctx)
+		env["RGMOCK_EXIT"] = ""
+		env["RGMOCK_ERR"] = ""
+		body := "\ufeff\n" +
+			`{"type":"match","data":{"path":{"text":"a.ts"},"lines":{"text":"x\n"},"line_number":1}}` + "\n"
+		if err := os.WriteFile(mockPath(t, ctx, "RGMOCK"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		result, err := RgGrep(ctx, RgGrepInput{Cwd: t.TempDir(), Pattern: "x", Limit: 10})
+		if err != nil {
+			t.Fatalf("RgGrep: %v", err)
+		}
+		if len(result.Matches) != 1 || result.Matches[0] != (GrepMatch{Path: "a.ts", Line: 1, Text: "x"}) {
+			t.Fatalf("matches = %#v", result.Matches)
+		}
 	})
 }
 

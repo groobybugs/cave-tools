@@ -14,6 +14,8 @@ import (
 	goruntime "runtime"
 	"strings"
 	"sync"
+
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 )
 
 const (
@@ -142,7 +144,7 @@ func isRegistrablePath(filePath string) bool {
 	}
 	// Consumers compare the exact tool argument; surrounding whitespace never
 	// round-trips reliably.
-	if strings.TrimSpace(filePath) != filePath {
+	if jsre.Trim(filePath) != filePath {
 		return false
 	}
 	return filepath.IsAbs(filePath)
@@ -211,7 +213,7 @@ func seedKnown(state *registryState, registry string) {
 	}
 	raw := decodeUTF8Replace(buffer[:read])
 	for _, line := range strings.Split(raw, "\n") {
-		path := strings.TrimSpace(line)
+		path := jsre.Trim(line)
 		if path == "" {
 			continue
 		}

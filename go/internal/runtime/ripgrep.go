@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 )
 
 const maxRecordBytes = 64 * 1024
@@ -75,7 +77,7 @@ func globToRegExp(pattern string) *regexp.Regexp {
 			source.WriteByte(char)
 		}
 	}
-	return regexp.MustCompile("^" + source.String() + "$")
+	return jsre.MustCompile("^"+source.String()+"$", "")
 }
 
 type spawnBinResult struct {
@@ -111,7 +113,7 @@ func parsePathLines(stdout string, limit int) []string {
 	lines := strings.Split(stdout, "\n")
 	result := make([]string, 0, len(lines))
 	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
+		trimmed := jsre.Trim(line)
 		for strings.HasPrefix(trimmed, "./") || strings.HasPrefix(trimmed, ".\\") {
 			trimmed = trimmed[2:]
 		}
@@ -209,7 +211,7 @@ func RgFiles(ctx context.Context, cwd, pattern string, limit int, hidden bool) (
 		return findWithNode(cwd, pattern, limit, hidden), nil
 	}
 	if result.Code != 0 && result.Code != 1 {
-		return nil, fmt.Errorf("%s", firstNonEmpty(strings.TrimSpace(result.Stderr),
+		return nil, fmt.Errorf("%s", firstNonEmpty(jsre.Trim(result.Stderr),
 			fmt.Sprintf("ripgrep exited with code %d", result.Code)))
 	}
 	return parsePathLines(result.Stdout, limit), nil
@@ -257,16 +259,16 @@ func RgGrep(ctx context.Context, input RgGrepInput) (RgGrepResult, error) {
 		return RgGrepResult{}, fmt.Errorf("Failed to run ripgrep: %s", result.Err.Error())
 	}
 	if result.Code == 2 && isInvalidPattern(result.Stderr) {
-		return RgGrepResult{}, fmt.Errorf("%s", strings.TrimSpace(result.Stderr))
+		return RgGrepResult{}, fmt.Errorf("%s", jsre.Trim(result.Stderr))
 	}
 	if result.Code != 0 && result.Code != 1 && result.Code != 2 {
-		return RgGrepResult{}, fmt.Errorf("%s", firstNonEmpty(strings.TrimSpace(result.Stderr),
+		return RgGrepResult{}, fmt.Errorf("%s", firstNonEmpty(jsre.Trim(result.Stderr),
 			fmt.Sprintf("ripgrep exited with code %d", result.Code)))
 	}
 
 	matches := []GrepMatch{}
 	for _, line := range strings.Split(result.Stdout, "\n") {
-		if strings.TrimSpace(line) == "" {
+		if jsre.Trim(line) == "" {
 			continue
 		}
 		if len(line) > maxRecordBytes {

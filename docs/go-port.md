@@ -156,8 +156,8 @@ each other's running jobs.
 
 ```
 types     <- nobody (leaf)
-runtime   <- types
-storage   <- nobody (stdlib + modernc.org/sqlite only; data-dir is SQLite-free)
+runtime   <- types, storage, jsre
+storage   <- jsre (stdlib + modernc.org/sqlite otherwise; data-dir is SQLite-free)
 jsre      <- nobody (leaf; stdlib only)
 compression <- types, runtime, storage, jsre
 tools     <- types, runtime, storage, compression
@@ -218,6 +218,11 @@ parts := jsre.SplitWS(line)              // not strings.Fields
   reviewer can diff the Go literal against `src/` by eye. Never call
   `regexp.Compile`/`regexp.MustCompile` on a TS pattern, and never re-implement
   `\s` by hand at a call site.
+- The same rule covers JS regexes that come from Node rather than from `src/`
+  (for example the cmd.exe detection in `process_windows.go`) and patterns
+  assembled at runtime (for example `globToRegExp` in `ripgrep.go`). Only
+  Go-only regexes with no JS origin may use the `regexp` package directly, and
+  they must be named in the worker's report.
 - Supported flags: `g` (no-op: use `FindAll*`/`ReplaceAll*`), `i`, `m`, `s`,
   `u` (no-op for pattern syntax). Anything else is an error instead of being
   silently ignored.

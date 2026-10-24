@@ -214,6 +214,37 @@ func TestExtractArchiveAndFindExtractedBinary(t *testing.T) {
 	})
 }
 
+// TestExtractArchiveTrimsStderrLikeJS is the Muse regression for the
+// "tar/zip extract failed" messages: TS uses stderr.trim(), which strips
+// U+FEFF, while strings.TrimSpace keeps it.
+func TestExtractArchiveTrimsStderrLikeJS(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("the fake tar is a /bin/sh script; the zip fallback uses powershell on windows")
+	}
+	binDir := t.TempDir()
+	// stderr is "boom\uFEFF" (EF BB BF are the UTF-8 bytes of U+FEFF).
+	writeScript(t, binDir, "tar", "#!/bin/sh\nprintf 'boom\\357\\273\\277' >&2\nexit 1\n")
+	t.Setenv("PATH", binDir)
+
+	ctx := w1bCtx(t, t.TempDir(), nil)
+	tests := []struct {
+		extension string
+		want      string
+	}{
+		{"tar.gz", "boom"},
+		{"zip", "boom"},
+	}
+	for _, test := range tests {
+		t.Run(test.extension, func(t *testing.T) {
+			archive := filepath.Join(t.TempDir(), "archive."+test.extension)
+			err := extractArchive(ctx, archive, t.TempDir(), test.extension)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("extractArchive(%s) error = %q, want %q", test.extension, err, test.want)
+			}
+		})
+	}
+}
+
 func TestEnsureBinsResolvesFromPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

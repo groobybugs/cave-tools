@@ -36,6 +36,18 @@ func TestCaveToolsDataDirResolution(t *testing.T) {
 			want:     filepath.Join(home, ".cache", "cave-tools"),
 		},
 		{
+			// Muse regression: JS trim strips U+FEFF and NBSP.
+			name:     "bom and nbsp override is trimmed",
+			override: "\ufeff\u00a0/var/tmp/cave-data\u00a0\ufeff",
+			want:     "/var/tmp/cave-data",
+		},
+		{
+			// U+0085 is not JS whitespace, so trim keeps it and it is used.
+			name:     "nel override is kept",
+			override: "\u0085/var/tmp/cave-data",
+			want:     "\u0085/var/tmp/cave-data",
+		},
+		{
 			name:     "relative override is kept as written",
 			override: "data",
 			want:     "data",
