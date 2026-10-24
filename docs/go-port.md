@@ -10,15 +10,18 @@ deviations and limitations".
 
 ## Status
 
-- W0–W4 are integrated on `go-port` at `02890a1` (proof-coercion fix
-  `fa5d968` included). Every one of the 56 `src/**/*.ts` files listed below
-  has a mapped Go implementation on this branch.
-- Source truth for the TypeScript reference is `main` at `6cefd81`. The Go
-  branch has not merged that commit yet; the W5 sync is a separate, active
-  task. Do not read the file map below as "main 6cefd81 is fully mirrored".
-- W5 (main sync, parity, implementation switch, benchmark, docs) is in
-  progress in separate worktrees. Nothing in this document claims those
-  changes are merged or tested unless it names a test and result.
+- W0–W4 are integrated on `go-port` (proof-coercion fix `fa5d968` included).
+  The W5 main sync is now merged at `d163dae`; every one of the 56
+  `src/**/*.ts` files listed below has a mapped Go implementation.
+- Source truth for the TypeScript reference is `main` at `6cefd81`.
+  `d163dae` merges that commit: `src/`, `claude/`, `scripts/`, `rules/`,
+  `AGENTS.md` and `CLAUDE.md` have zero diff against `6cefd81`. The sync adds
+  two Go mirrors (the CLI instruction text and the bash tool metadata) and
+  exact init/metadata tests; see "Verification status".
+- W5 is **not complete**. Main sync is done; parity expansion, the
+  implementation switch and the benchmark remain on separate worktrees.
+  Nothing in this document claims those are merged or tested unless it names
+  a test and result.
 - TypeScript remains the default implementation. `CAVE_TOOLS_IMPL=go` is
   **not integrated yet**; see "Implementations switch".
 
@@ -147,10 +150,11 @@ W3a–e are the tools, W4i/j/k are the surfaces.
 | `src/cli-tools.ts` | `go/internal/cli/cli_tools.go` | W4k |
 | `src/status-ui.ts` | `go/internal/cli/status_ui.go` | W2k |
 
-All 56 rows were checked against the tree at `02890a1`: every TS file exists,
-every Go target exists, and no `src/**/*.ts` file is missing from the table.
-The map itself is not proof of function coverage; see "Coverage and annotation
-audit".
+All 56 rows were checked against the tree at `02890a1` and again after the
+`d163dae` sync: every TS file exists, every Go target exists, and no
+`src/**/*.ts` file is missing from the table. The sync changed guidance text
+in `src/cli.ts`/`src/tools/bash.ts`, not the file mapping. The map itself is
+not proof of function coverage; see "Coverage and annotation audit".
 
 `go/internal/cli` additionally holds helpers that belong to the two CLI files
 above rather than separate TS modules: `status_summary.go` (the
@@ -503,9 +507,10 @@ into W3. W5 is not finished.
   - W4i: MCP server (`index`, `dispatch`, `tool-list`) and dispatch integration.
   - W4j: daemon server/client plus transport.
   - W4k: CLI (`cli`, `cli-tools`) and the `cave-tools-go` executable wiring.
-- **W5 integration (in progress)**: sync to `main` `6cefd81`, remaining parity,
-  `CAVE_TOOLS_IMPL=go` switch, benchmark harness, final docs/audit. These are
-  separate worktrees; this document does not claim they are merged.
+- **W5 integration (partial)**: main sync completed at `d163dae` (shared
+  files zero diff vs `6cefd81`; two Go mirrors plus exact init/metadata tests).
+  Remaining: parity expansion, `CAVE_TOOLS_IMPL=go` switch, benchmark harness
+  and final docs/audit. W5 is not complete.
 
 ### Ownership per worker
 
@@ -526,14 +531,14 @@ into W3. W5 is not finished.
 | W4i | `go/internal/server/index.go`, `dispatch.go`, `tool_list.go` + tests |
 | W4j | `go/internal/daemon/server.go`, `client.go`, `paths_*.go`, `transport_*.go` + tests |
 | W4k | `go/internal/cli/`, `go/cmd/cave-tools-go/` + tests |
-| W5 | parity expansion, launcher switch, benchmark, sync, docs/audit |
+| W5 | main sync (done at `d163dae`), remaining parity expansion, launcher switch, benchmark, docs/audit |
 
 `go.mod` is W0-only: later waves must not add dependencies. If one is truly
 needed, ask the coordinator.
 
 ## Implementations switch (W5, pending)
 
-Default stays TypeScript. The switch is **not integrated** at `02890a1`, so
+Default stays TypeScript. The switch is **not integrated** at `d163dae`, so
 there is no tested `CAVE_TOOLS_IMPL=go` path yet. Planned contract:
 
 1. `src/cli.ts` gets a shim before heavy imports: when
@@ -576,7 +581,7 @@ touching budgets or status:
 
 ## Known deviations and limitations
 
-These are verified against the code and tests at `02890a1`. They are **not**
+These are verified against the code and tests at `d163dae`. They are **not**
 blanket parity claims and none of them is labelled "accepted parity"; each
 needs a follow-up decision or stays a documented limit.
 
@@ -658,8 +663,9 @@ The port found these in the TS implementation. They are fixed in TS on `main`
 (`ebe616e` "fix: TS bugs found by the Go port", `1b3fbbc` for the daemon,
 `7c81d32` for the strict edit proofs, `9ee4fb1` for the webfetch HTML fix and
 `e840aad` for the websearch stream cap). The Go side mirrors the fixed
-behaviour on this branch. Main `6cefd81` is newer and its Go sync is still
-pending.
+behaviour on this branch. Main `6cefd81` is synced as `d163dae`; the only Go
+changes it required were the CLI instruction text and bash tool metadata, not
+new handler behaviour.
 
 | # | Bug | Fixed in TS | Mirrored in Go |
 | --- | --- | --- | --- |
@@ -717,26 +723,45 @@ hash cases. The TS side was already correct.
 Evidence recorded for this document. Do not turn any line into a broader claim
 than it states.
 
-- Run in this worktree (`migration/w5-docs` at `02890a1`):
+- Run on this docs branch before the sync merge (tip `6d64a7a`, code baseline
+  `02890a1`):
   - `go test ./internal/tools/edit -run TestDifferentialAgainstTypeScript -count=1`
     → enforce and strict: 94 cases, 3 schemas, 0 result mismatches, 90 files
     identical in each mode.
   - `go test ./internal/tools/webfetch ./internal/tools/websearch -run 'TestPortBugs16ListMarkers|TestPortBugs17InheritedObjectKeys|TestStreamingResponseStopsAtCapAndCloses|TestStreamingDeclaredOversizeDoesNotRead|TestCollectBoundedResponseStopsAtCap' -count=1`
     → 5 tests passed in 2 packages (targeted HTML/cap mirrors).
-  - Map/path audit: 56/56 rows, all TS and Go target files present.
+  - Map/path audit: 56/56 rows, all TS and Go target files present; rechecked
+    after merging `d163dae`.
+- W5 main sync at `d163dae` (coordinator evidence, not rerun in this docs
+  task):
+  - `src/`, `claude/`, `scripts/`, `rules/`, `AGENTS.md` and `CLAUDE.md` have
+    zero diff against `main` `6cefd81`.
+  - Two Go mirrors: the CLI instruction constant in `internal/cli/cli.go` and
+    the `cave__bash` description/schema in `internal/tools/bash/bash.go`.
+    `TestInitInstructionsMatchTypeScript` runs `node dist/cli.js init` and
+    byte-compares `CLAUDE.md`/`AGENTS.md`; bash `TestToolMetadata` pins the
+    exact description and full input schema, and the CLI help golden pins the
+    user-visible description.
+  - `pnpm build && pnpm test` → 13 suites, plus gofmt/diffcheck PASS;
+    job `jmvmt2rg9e72051`.
+  - After that build: full offline Go vet/test, parity scope `./parity` plus
+    `webfetch`, `websearch` and `compress`, race on `cli`/`bash`/`edit`, and
+    Windows+Darwin vet all PASS; job `jmvmt3fh0d37266`.
+  - Job `jmvmt2rgb996949` was deliberately canceled during a concurrent TS
+    build and is superseded by `jmvmt3fh0d37266`; it is not evidence.
 - Coordinator evidence for W4 (not rerun in this docs task): final combined
   offline gate at `ba8d079` — gofmt, vet, full tests, parity with 430
   web+CLI/daemon roundtrip comparisons, race packages, Windows/darwin vet;
   job `jobjmvm1wsiz04fecf`. Treat the job id as a pointer, not a substitute for
   rerunning at release.
-- TS reference: `main` at `e840aad` passed `pnpm build && pnpm test` with 12
-  suites and 25 port-bug tests (coordinator run). Main is now `6cefd81`; its
-  additional shell-guidance changes and suite totals are not restated here
-  until the W5 sync runs them against the Go branch.
+- TypeScript reference: `main` at `6cefd81`, synced as `d163dae`, passed
+  `pnpm build && pnpm test` with 13 suites and gofmt/diffcheck (job
+  `jmvmt2rg9e72051`). The port-bug script still declares 25 cases.
 - Not verified / pending:
   - `CAVE_TOOLS_IMPL=go` integration, missing-binary behaviour, and the
     switch parity case (W5 switch worktree; no claim here).
-  - Go sync to `main` `6cefd81` (W5 sync worktree).
+  - W5 parity expansion and benchmark harness; the sync gate above ran the
+    existing parity scopes, not the final expanded suite.
   - Brotli and stacked `Content-Encoding` parity (unresolved/deferred).
   - Windows runtime behavior: only `GOOS=windows go vet` is claimed. The
     Unix-socket daemon interop tests skip on Windows, so named-pipe interop is
