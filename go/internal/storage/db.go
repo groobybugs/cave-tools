@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"net/url"
 	"os"
@@ -544,8 +545,12 @@ func migrateLifetime(conn queryer) error {
 func migrateSessions(conn queryer) error {
 	entries, err := os.ReadDir(SessionsDir())
 	if err != nil {
-		// No legacy sessions dir.
-		return nil
+		// No legacy sessions dir. Anything else (e.g. ENOTDIR) fails openDb,
+		// as TS readdirSync does.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
 	for _, entry := range entries {
 		name := entry.Name()
@@ -571,18 +576,42 @@ func migrateSessions(conn queryer) error {
 }
 
 // legacySessionAcceptedByTS reports whether TS's upsertSessionStats would
-// accept this legacy file: it throws on a missing or null cache, savings,
-// rtk or bounces object (property access on undefined/null) and binds NULL
-// into budgets_json NOT NULL when budgets is missing. TS skips those files.
+// store this legacy file. TS throws on a missing or null cache, savings, rtk
+// or bounces object (property access), and SQLite rejects a missing or null
+// leaf bound into a NOT NULL sessions column, or a missing budgets key
+// (JSON.stringify(undefined) binds NULL). TS skips those files.
 func legacySessionAcceptedByTS(raw []byte) bool {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return false
 	}
-	for _, key := range []string{"cache", "savings", "rtk", "bounces"} {
-		v, ok := fields[key]
-		if !ok || string(v) == "null" {
+	present := func(m map[string]json.RawMessage, key string) bool {
+		v, ok := m[key]
+		return ok && string(v) != "null"
+	}
+	for _, key := range []string{"sessionStart", "updatedAt"} {
+		if !present(fields, key) {
 			return false
+		}
+	}
+	leaves := map[string][]string{
+		"cache":   {"hits", "misses", "filesTracked"},
+		"savings": {"totalCalls", "rawChars", "compressedChars", "compressionSavedChars", "dedupSavedChars", "savedChars"},
+		"rtk":     {"rewrites", "alreadyWrapped", "passthrough"},
+		"bounces": {"totalBounces", "totalWastedChars"},
+	}
+	for obj, keys := range leaves {
+		if !present(fields, obj) {
+			return false
+		}
+		var inner map[string]json.RawMessage
+		if err := json.Unmarshal(fields[obj], &inner); err != nil {
+			return false
+		}
+		for _, key := range keys {
+			if !present(inner, key) {
+				return false
+			}
 		}
 	}
 	_, ok := fields["budgets"]
