@@ -98,8 +98,8 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/tools/webfetch.ts` | `go/internal/tools/webfetch/webfetch.go` | W3d |
 | `src/tools/websearch.ts` | `go/internal/tools/websearch/websearch.go` | W3d |
 | `src/tools/compress.ts` | `go/internal/tools/compress/compress.go` | W3d |
-| `src/tools/status.ts` | `go/internal/tools/status.go` | W2h |
-| `src/tools/configure.ts` | `go/internal/tools/configure.go` | W2h |
+| `src/tools/status.ts` | `go/internal/tools/status/status.go` | W3e |
+| `src/tools/configure.ts` | `go/internal/tools/configure/configure.go` | W3e |
 | `src/runtime/tool-errors.ts` | `go/internal/runtime/tool_errors.go` | W2h |
 | `src/runtime/tool-errors-cli.ts` | `go/internal/runtime/tool_errors_cli.go` | W2h |
 | `src/index.ts` | `go/internal/server/index.go` | W3i |
