@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -239,6 +240,50 @@ func TestGetJobInfoRecovery(t *testing.T) {
 		stored, err := storage.GetJob(id)
 		if err != nil || stored == nil || stored.State != storage.JobLost {
 			t.Fatalf("stored = %+v, %v; want lost", stored, err)
+		}
+	})
+
+	// TS bug: the lost branch used to synthesize `{...job, state:"lost"}`
+	// instead of returning the stored row, so a recorded exit code or signal
+	// vanished from the result.
+	t.Run("lost returns the stored row", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "lost-row.log")
+		if err := os.WriteFile(logPath, []byte("fake log\n"), 0o600); err != nil {
+			t.Fatalf("write log: %v", err)
+		}
+		exitCode := int64(7)
+		signal := "SIGHUP"
+		record := storage.JobRecord{
+			JobID:     "j-test-lost-row",
+			Pid:       deadPid,
+			SessionID: "test-jobs-recovery",
+			Command:   "fake",
+			StartedAt: time.Now().UnixMilli() - 1000,
+			ExitCode:  &exitCode,
+			Signal:    &signal,
+			State:     storage.JobRunning,
+			LogPath:   logPath,
+		}
+		if err := storage.InsertJob(record); err != nil {
+			t.Fatalf("insert job: %v", err)
+		}
+
+		job, err := GetJobInfo(record.JobID)
+		if err != nil || job == nil {
+			t.Fatalf("GetJobInfo = %+v, %v", job, err)
+		}
+		stored, err := storage.GetJob(record.JobID)
+		if err != nil || stored == nil {
+			t.Fatalf("GetJob = %+v, %v", stored, err)
+		}
+		if job.State != storage.JobLost {
+			t.Fatalf("state = %q, want lost", job.State)
+		}
+		if !reflect.DeepEqual(*job, *stored) {
+			t.Fatalf("lost result = %+v, stored = %+v", *job, *stored)
+		}
+		if job.ExitCode == nil || *job.ExitCode != 7 || job.Signal == nil || *job.Signal != "SIGHUP" {
+			t.Fatalf("lost result dropped the completion fields: %+v", job)
 		}
 	})
 
@@ -601,19 +646,19 @@ func TestRunJobWorker(t *testing.T) {
 			t.Fatalf("write log: %v", err)
 		}
 		code := RunJobWorker([]string{"j-worker-error", logPath, resultPath, "/nonexistent-shell", "echo hi"})
-		// exitCode -1 clamps to 0, matching Node's Math.max(0, Math.min(255, -1)).
-		if code != 0 {
-			t.Fatalf("worker exit = %d, want 0", code)
+		// A spawn failure exits 127 (SPAWN_FAILED), never 0.
+		if code != 127 {
+			t.Fatalf("worker exit = %d, want 127", code)
 		}
 		log := jobsReadFile(t, logPath)
 		if !strings.Contains(log, `[cave-job worker-error="spawn /nonexistent-shell ENOENT"]`) {
 			t.Fatalf("log = %q", log)
 		}
-		if !strings.Contains(log, "[cave-job exit=-1]") {
+		if !strings.Contains(log, "[cave-job exit=127]") {
 			t.Fatalf("log = %q", log)
 		}
 		result := jobsReadDurableResult(t, resultPath)
-		if result.ExitCode == nil || *result.ExitCode != -1 || result.Signal != nil {
+		if result.ExitCode == nil || *result.ExitCode != 127 || result.Signal != nil {
 			t.Fatalf("result = %+v", result)
 		}
 	})

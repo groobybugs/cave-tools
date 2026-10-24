@@ -287,7 +287,7 @@ export function buildStats(b: StatsBucket = statsBucket()): PersistedStats {
       passthrough: b.rtkPassthrough,
     },
     budgets: getAllBudgets(),
-    bounces: getBounceStats(),
+    bounces: getBounceStats(b),
   };
 }
 
@@ -596,6 +596,8 @@ export async function resetStats(): Promise<void> {
   statsBucket().cacheHits = 0;
   statsBucket().cacheMisses = 0;
   statsBucket().dedupSavedChars = 0;
+  statsBucket().rangeEchoSavedChars = 0;
+  statsBucket().rangeEditCount = 0;
   statsBucket().rtkRewrites = 0;
   statsBucket().rtkAlreadyWrapped = 0;
   statsBucket().rtkPassthrough = 0;
@@ -702,18 +704,18 @@ export function shouldForceFull(filePath: string): boolean {
   return stats.bounces / stats.totalReads >= BOUNCE_RATE_THRESHOLD;
 }
 
-export function getBounceStats(): {
+export function getBounceStats(b: StatsBucket = statsBucket()): {
   totalBounces: number;
   totalWastedChars: number;
   byExtension: Record<string, BounceStats>;
 } {
   const byExtension: Record<string, BounceStats> = {};
-  for (const [ext, stats] of statsBucket().perExtension) {
+  for (const [ext, stats] of b.perExtension) {
     byExtension[ext] = { ...stats };
   }
   return {
-    totalBounces: statsBucket().totalBounces,
-    totalWastedChars: statsBucket().totalWastedChars,
+    totalBounces: b.totalBounces,
+    totalWastedChars: b.totalWastedChars,
     byExtension,
   };
 }

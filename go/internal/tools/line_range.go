@@ -301,7 +301,7 @@ func ApplyRangeEdit(content string, startLine, endLine int, replacement string) 
 	for i, r := range region {
 		regionTexts[i] = r.Text
 	}
-	replacedChars := len(strings.Join(regionTexts, "\n"))
+	replacedChars := utf16Len(strings.Join(regionTexts, "\n"))
 
 	fallback := dominantEol(segs)
 	var following *lineSeg
@@ -425,7 +425,7 @@ func ApplyMoveLines(content string, startLine, endLine, insertBefore int) MoveLi
 	for i, b := range block {
 		blockTexts[i] = b.Text
 	}
-	movedChars := len(strings.Join(blockTexts, "\n"))
+	movedChars := utf16Len(strings.Join(blockTexts, "\n"))
 	without := make([]lineSeg, 0, len(w)-blockLen)
 	without = append(without, w[:startLine-1]...)
 	without = append(without, w[endLine:]...)
@@ -476,7 +476,7 @@ type VerifyRangeChecksumResult struct {
 // port of src/tools/line-range.ts:verifyRangeChecksum
 func VerifyRangeChecksum(content string, startLine, endLine int, expected string) VerifyRangeChecksumResult {
 	want := strings.ToLower(jsre.Trim(expected))
-	if len(want) < 4 {
+	if utf16Len(want) < 4 {
 		return VerifyRangeChecksumResult{
 			Error: "expected_range_checksum must be at least 4 hex characters",
 		}

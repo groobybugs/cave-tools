@@ -142,6 +142,28 @@ func TestDaemonStatusErrorReplyIsNotRunning(t *testing.T) {
 	}
 }
 
+// port of scripts/test-port-bugs.mjs #13: a malformed reply line must be
+// skipped instead of crashing the CLI, and the next valid line still counts.
+func TestDaemonStatusSkipsMalformedReplyLine(t *testing.T) {
+	startFakeDaemon(t, func(conn net.Conn, id int, method string) bool {
+		if method == "hello" {
+			fmt.Fprint(conn, "not json\n"+rpcReplyLine(1, `{"pid":42,"buildId":"b"}`))
+		}
+		return true
+	})
+	var out bytes.Buffer
+	code, err := DaemonStatus(&out)
+	if err != nil {
+		t.Fatalf("DaemonStatus: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("running pid 42")) {
+		t.Fatalf("stdout = %q, want running pid 42", out.String())
+	}
+}
+
 // port of test.mjs daemon stop.
 func TestDaemonStop(t *testing.T) {
 	startFakeDaemon(t, func(conn net.Conn, id int, method string) bool {

@@ -227,7 +227,7 @@ type rgEvent struct {
 		Lines *struct {
 			Text *string `json:"text"`
 		} `json:"lines"`
-		LineNumber *json.Number `json:"line_number"`
+		LineNumber json.RawMessage `json:"line_number"`
 	} `json:"data"`
 }
 
@@ -301,10 +301,14 @@ func RgGrep(ctx context.Context, input RgGrepInput) (RgGrepResult, error) {
 			text = text[:len(text)-1]
 		}
 
+		// rg omits line_number for some inputs; 0 means "unknown line".
 		lineNumber := int64(0)
-		if event.Data != nil && event.Data.LineNumber != nil {
-			if parsed, err := event.Data.LineNumber.Int64(); err == nil {
-				lineNumber = parsed
+		if event.Data != nil && len(event.Data.LineNumber) > 0 {
+			// Only a JSON number counts (Number.isFinite); strings, null and
+			// out-of-range literals become 0.
+			var parsed float64
+			if err := json.Unmarshal(event.Data.LineNumber, &parsed); err == nil {
+				lineNumber = int64(parsed)
 			}
 		}
 		if utf16Length(text) > maxLineLength {

@@ -173,9 +173,27 @@ type JobRecord struct {
 // port of src/storage/db.ts:updateJobState (update parameter)
 type JobUpdate struct {
 	State    JobState
-	EndedAt  *int64
-	ExitCode *int64
-	Signal   *string
+	EndedAt  Optional[int64]
+	ExitCode Optional[int64]
+	Signal   Optional[string]
+}
+
+// Optional distinguishes TS's `field?: T` (omitted, keep the column) from
+// `field: null` (write NULL) and `field: value` (write the value), which
+// updateJobState needs.
+type Optional[T any] struct {
+	Set   bool
+	Value *T
+}
+
+// Some marks a field as present with a value.
+func Some[T any](value T) Optional[T] {
+	return Optional[T]{Set: true, Value: &value}
+}
+
+// Null marks a field as present with a NULL value.
+func Null[T any]() Optional[T] {
+	return Optional[T]{Set: true}
 }
 
 // SessionRow mirrors the sessions table's columns.
@@ -563,12 +581,9 @@ func migrateSessions(conn queryer) error {
 		if err != nil {
 			continue
 		}
-		var stats PersistedStats
-		if err := json.Unmarshal(raw, &stats); err != nil {
+		stats, ok := normalizeLegacyStats(raw)
+		if !ok {
 			// Skip corrupt legacy session files.
-			continue
-		}
-		if !legacySessionAcceptedByTS(raw) {
 			continue
 		}
 		// TS catches per file and keeps going.
@@ -577,47 +592,120 @@ func migrateSessions(conn queryer) error {
 	return nil
 }
 
-// legacySessionAcceptedByTS reports whether TS's upsertSessionStats would
-// store this legacy file. TS throws on a missing or null cache, savings, rtk
-// or bounces object (property access), and SQLite rejects a missing or null
-// leaf bound into a NOT NULL sessions column, or a missing budgets key
-// (JSON.stringify(undefined) binds NULL). TS skips those files.
-func legacySessionAcceptedByTS(raw []byte) bool {
+// normalizeLegacyStats fills the sections and leaves an older session file
+// may lack, the way a fresh session would, so the NOT NULL columns accept the
+// row instead of the whole session being dropped.
+// port of src/storage/db.ts:normalizeLegacyStats
+func normalizeLegacyStats(raw []byte) (PersistedStats, bool) {
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return false
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return PersistedStats{}, false
 	}
-	present := func(m map[string]json.RawMessage, key string) bool {
-		v, ok := m[key]
-		return ok && string(v) != "null"
+	pid, ok := legacyFiniteNumber(fields["pid"])
+	if !ok {
+		return PersistedStats{}, false
 	}
-	for _, key := range []string{"sessionStart", "updatedAt"} {
-		if !present(fields, key) {
-			return false
+
+	cache := legacyObject(fields["cache"])
+	savings := legacyObject(fields["savings"])
+	rtk := legacyObject(fields["rtk"])
+	bounces := legacyObject(fields["bounces"])
+
+	byTool := make(map[string]ToolSavings)
+	for name, entry := range legacyObject(savings["byTool"]) {
+		values := legacyObject(entry)
+		byTool[name] = ToolSavings{
+			Calls:           legacyNumber(values["calls"]),
+			RawChars:        legacyNumber(values["rawChars"]),
+			CompressedChars: legacyNumber(values["compressedChars"]),
+			SavedChars:      legacyNumber(values["savedChars"]),
 		}
 	}
-	leaves := map[string][]string{
-		"cache":   {"hits", "misses", "filesTracked"},
-		"savings": {"totalCalls", "rawChars", "compressedChars", "compressionSavedChars", "dedupSavedChars", "savedChars"},
-		"rtk":     {"rewrites", "alreadyWrapped", "passthrough"},
-		"bounces": {"totalBounces", "totalWastedChars"},
-	}
-	for obj, keys := range leaves {
-		if !present(fields, obj) {
-			return false
-		}
-		var inner map[string]json.RawMessage
-		if err := json.Unmarshal(fields[obj], &inner); err != nil {
-			return false
-		}
-		for _, key := range keys {
-			if !present(inner, key) {
-				return false
-			}
+	byExtension := make(map[string]BounceStats)
+	for name, entry := range legacyObject(bounces["byExtension"]) {
+		values := legacyObject(entry)
+		byExtension[name] = BounceStats{
+			TotalReads:  legacyNumber(values["totalReads"]),
+			Bounces:     legacyNumber(values["bounces"]),
+			WastedChars: legacyNumber(values["wastedChars"]),
 		}
 	}
-	_, ok := fields["budgets"]
-	return ok
+	budgets := make(map[string]BudgetConfig)
+	for name, entry := range legacyObject(fields["budgets"]) {
+		var config BudgetConfig
+		if json.Unmarshal(entry, &config) == nil {
+			budgets[name] = config
+		}
+	}
+
+	return PersistedStats{
+		Pid:          int64(pid),
+		SessionStart: legacyNumber(fields["sessionStart"]),
+		UpdatedAt:    legacyNumber(fields["updatedAt"]),
+		Cache: CacheStats{
+			Hits:         legacyNumber(cache["hits"]),
+			Misses:       legacyNumber(cache["misses"]),
+			Total:        legacyNumber(cache["total"]),
+			HitRate:      legacyFloat(cache["hitRate"]),
+			FilesTracked: legacyNumber(cache["filesTracked"]),
+		},
+		Savings: SavingsStats{
+			TotalCalls:            legacyNumber(savings["totalCalls"]),
+			RawChars:              legacyNumber(savings["rawChars"]),
+			CompressedChars:       legacyNumber(savings["compressedChars"]),
+			CompressionSavedChars: legacyNumber(savings["compressionSavedChars"]),
+			DedupSavedChars:       legacyNumber(savings["dedupSavedChars"]),
+			SavedChars:            legacyNumber(savings["savedChars"]),
+			EstimatedTokensSaved:  legacyNumber(savings["estimatedTokensSaved"]),
+			ByTool:                byTool,
+		},
+		Rtk: RtkStats{
+			Rewrites:       legacyNumber(rtk["rewrites"]),
+			AlreadyWrapped: legacyNumber(rtk["alreadyWrapped"]),
+			Passthrough:    legacyNumber(rtk["passthrough"]),
+		},
+		Budgets: budgets,
+		Bounces: BounceSummary{
+			TotalBounces:     legacyNumber(bounces["totalBounces"]),
+			TotalWastedChars: legacyNumber(bounces["totalWastedChars"]),
+			ByExtension:      byExtension,
+		},
+	}, true
+}
+
+// legacyFiniteNumber mirrors Number.isFinite: only JSON numbers qualify, so
+// strings, nulls, objects and out-of-range literals are rejected.
+func legacyFiniteNumber(raw json.RawMessage) (float64, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var value float64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+// legacyNumber is TS's num(v): a finite number keeps its value, anything else
+// becomes 0.
+func legacyNumber(raw json.RawMessage) int64 {
+	value, _ := legacyFiniteNumber(raw)
+	return int64(value)
+}
+
+// legacyFloat is legacyNumber for the one rate field (cache.hitRate).
+func legacyFloat(raw json.RawMessage) float64 {
+	value, _ := legacyFiniteNumber(raw)
+	return value
+}
+
+// legacyObject is TS's obj(v): anything that is not a JSON object becomes {}.
+func legacyObject(raw json.RawMessage) map[string]json.RawMessage {
+	var fields map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return map[string]json.RawMessage{}
+	}
+	return fields
 }
 
 // port of src/storage/db.ts:migrateReadRegistry
@@ -1153,11 +1241,33 @@ func UpdateJobState(jobID string, update JobUpdate) error {
 	if err != nil {
 		return err
 	}
-	_, err = conn.Exec(
-		`UPDATE jobs SET state = ?, ended_at = ?, exit_code = ?, signal = ? WHERE job_id = ?`,
-		string(update.State), anyInt64(update.EndedAt), anyInt64(update.ExitCode), anyString(update.Signal), jobID,
-	)
+	// Only the fields the caller provides are written; omitted ones keep their
+	// value, so a state-only update no longer erases a recorded exit code.
+	sets := []string{"state = ?"}
+	values := []any{string(update.State)}
+	if update.EndedAt.Set {
+		sets = append(sets, "ended_at = ?")
+		values = append(values, optionalValue(update.EndedAt))
+	}
+	if update.ExitCode.Set {
+		sets = append(sets, "exit_code = ?")
+		values = append(values, optionalValue(update.ExitCode))
+	}
+	if update.Signal.Set {
+		sets = append(sets, "signal = ?")
+		values = append(values, optionalValue(update.Signal))
+	}
+	values = append(values, jobID)
+	_, err = conn.Exec("UPDATE jobs SET "+strings.Join(sets, ", ")+" WHERE job_id = ?", values...)
 	return err
+}
+
+// optionalValue maps a three-state field onto a driver argument.
+func optionalValue[T any](field Optional[T]) any {
+	if field.Value == nil {
+		return nil
+	}
+	return *field.Value
 }
 
 // port of src/storage/db.ts:getJob
