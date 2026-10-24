@@ -1,14 +1,17 @@
 // Command cave-tools-go is the Go port of the cave-tools CLI and MCP server.
 //
-// Wave 0 ships only the version probe; every other command is a stub so the
-// binary can be built, tested and wired into the parity harness while the
-// remaining packages are ported (see docs/go-port.md).
+// main only handles process wiring: it dispatches the durable job worker
+// selector before any flag parsing, stamps the package version and forwards
+// argv/stdin/stdout/stderr to cli.Run.
 package main
 
 import (
-	"fmt"
+	"context"
 	"io"
 	"os"
+
+	"github.com/groobybugs/cave-tools/go/internal/cli"
+	"github.com/groobybugs/cave-tools/go/internal/runtime"
 )
 
 // version is the package.json version this port targets. Override it at build
@@ -20,22 +23,19 @@ import (
 var version = "0.6.1"
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Args, os.Stdin, os.Stdout, os.Stderr))
 }
 
-// run executes one CLI invocation and returns its exit code.
-func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 1 && args[0] == "--version" {
-		fmt.Fprintf(stdout, "cave-tools-go %s\n", version)
-		return 0
+// run executes one binary invocation and returns its exit code. The durable
+// job worker selector is checked before cli.Run so `__job-worker` can never be
+// parsed as a normal command.
+func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(argv) > 1 && argv[1] == runtime.JobWorkerCommand {
+		return runtime.RunJobWorker(argv[2:])
 	}
-
-	// TS treats no argv as the MCP server, so name that command in the stub
-	// message instead of reporting an empty argv0.
-	command := "mcp"
-	if len(args) > 0 {
-		command = args[0]
+	args := []string{}
+	if len(argv) > 1 {
+		args = argv[1:]
 	}
-	fmt.Fprintf(stderr, "cave-tools-go: not implemented yet: %s\n", command)
-	return 2
+	return cli.Run(context.Background(), args, stdin, stdout, stderr, version)
 }

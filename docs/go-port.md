@@ -110,9 +110,16 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/daemon/control.ts` | `go/internal/daemon/control.go` | W3j |
 | `src/daemon/paths.ts` | `go/internal/daemon/paths.go` | W3j |
 | `src/daemon-client.ts` | `go/internal/daemon/client.go` | W4j |
-| `src/cli.ts` | `go/internal/cli/cli.go` | W3k |
-| `src/cli-tools.ts` | `go/internal/cli/cli_tools.go` | W3k |
-| `src/status-ui.ts` | `go/internal/cli/status_ui.go` | W3k |
+| `src/cli.ts` | `go/internal/cli/cli.go` | W4k |
+| `src/cli-tools.ts` | `go/internal/cli/cli_tools.go` | W4k |
+| `src/status-ui.ts` | `go/internal/cli/status_ui.go` | W4k |
+
+`go/internal/cli` additionally holds three helpers that belong to the two CLI
+files above rather than separate TS modules: `status_summary.go` (the
+status/statusline half of `cli.ts`), `cli_raw.go` and `cli_platform_*.go` (raw
+shell execution and Win32 `cmd.exe` quoting), and `integration.go` /
+`bindings_*.go` (the server/daemon seams `cli-tools.ts` reaches through its
+lazy imports).
 
 `src/cli.ts` maps to `go/internal/cli/cli.go`, not to the binary: `cmd/cave-tools-go/main.go`
 is the OS entry point and only forwards `os.Args[1:]`, stdout and stderr to
@@ -140,7 +147,7 @@ cave-tools-go __job-worker <jobId> <logPath> <resultPath> <shell> <command>
 passes it as `StartDurableBackgroundOptions.WorkerPath` to
 `runtime.StartDurableBackgroundCommand`, which invokes the current executable
 with `WorkerPath` first. `cmd/cave-tools-go/main.go` must check for it before
-any flag parsing (W3k wiring):
+any flag parsing (W4k wiring):
 
 ```go
 if len(os.Args) > 1 && os.Args[1] == runtime.JobWorkerCommand {
@@ -360,7 +367,7 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
   - e: tools status + configure; runtime/tool-errors + tool-errors-cli
   - i: dispatch + tool-list + profile + index (MCP stdio server via go-sdk)
   - j: daemon server/client/control/paths
-  - k: CLI — cli, cli-tools, status-ui (incl. raw, filter --json)
+  - k (W4k): CLI — cli, cli-tools, status-ui (incl. raw, filter --json)
 - W4: integration — full parity suite, `CAVE_TOOLS_IMPL=go` switch in the launcher, docs.
 
 ### Ownership per worker
@@ -380,7 +387,7 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
 | W3e | `go/internal/tools/{status,configure}.go`, `go/internal/runtime/{tool_errors,tool_errors_cli}.go` + tests |
 | W4i | `go/internal/server/*.go` + tests |
 | W3j | `go/internal/daemon/*.go` + tests |
-| W3k | `go/internal/cli/*.go`, `go/cmd/cave-tools-go/main.go` + tests |
+| W4k | `go/internal/cli/*.go`, `go/cmd/cave-tools-go/main.go` + tests |
 | W4 | integration, launcher switch, full parity suite |
 
 `go.mod` is W0-only: later waves must not add dependencies. If one is truly
@@ -430,7 +437,7 @@ Accepted runtime deviations (W1b, Muse review):
 
 - Fallback file finder (no rg/fd) sorts byte-wise; TS uses `localeCompare` (ICU), so mixed-case order can differ.
 - `RunCommand` options `MaxBytes`/`MaxLines`/`ForceKillAfterMs` treat 0 as "use default"; TS `??` keeps an explicit 0. No TS caller passes 0.
-- `BinResolution` uses `""` for a missing binary where TS uses `null`. W3k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
+- `BinResolution` uses `""` for a missing binary where TS uses `null`. W4k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
 - Job `.result.json` with a fractional `exitCode` (only reachable by hand-editing the sidecar) is truncated to an integer in Go; TS keeps the fraction.
 
 - `daemon/control` (Go `bins` run / CLI exec helpers): output above the TS `maxBuffer` is parsed in Go instead of rejected with a maxBuffer error (Muse W2k, low).
