@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,7 @@ const { extractSignatures } = await import(join(ROOT, "dist/compression/signatur
 const { classifyCommand } = await import(join(ROOT, "dist/compression/classify.js"));
 const { redactSecrets } = await import(join(ROOT, "dist/compression/redact.js"));
 const { runWithContext } = await import(join(ROOT, "dist/runtime/context.js"));
+const { webfetchTool } = await import(join(ROOT, "dist/tools/webfetch.js"));
 
 let passed = 0;
 let failed = 0;
@@ -45,6 +47,25 @@ async function test(name, fn) {
   }
 }
 const ctx = (cwd, env) => ({ sessionId: "port-bugs", cwd, env, clientId: "test" });
+async function renderHtml(html, format) {
+  const server = createServer((_req, res) => {
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.end(html);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = server.address();
+    const result = await webfetchTool.handler({
+      url: `http://127.0.0.1:${port}/fixture`,
+      format,
+      redact_secrets: false,
+    });
+    assert.equal(result.isError, undefined, result.content[0].text);
+    return result.content[0].text;
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
 const job = (over) => ({
   jobId: `pb-${Math.random().toString(36).slice(2)}`,
   pid: 999999,
@@ -236,6 +257,21 @@ await test("15 resetStats clears range-edit counters", async () => {
   assert.ok(stats.getRangeEditStats().edits > 0);
   await stats.resetStats();
   assert.deepEqual(stats.getRangeEditStats(), { edits: 0, echoSavedChars: 0, estimatedTokensSaved: 0 });
+});
+
+await test("16 webfetch markdown renders list markers and blockquote prefixes", async () => {
+  const html = "<ul><li>one</li><li>two</li></ul><ol><li>first</li><li>second</li></ol><blockquote>quoted</blockquote>";
+  assert.equal(
+    await renderHtml(html, "markdown"),
+    "- one\n\n- two\n\n1. first\n\n2. second\n\n> quoted",
+  );
+  assert.equal(await renderHtml(html, "text"), "one\ntwo\nfirst\nsecond\nquoted");
+});
+
+await test("17 webfetch markdown treats inherited object keys as ordinary tags", async () => {
+  const html = "<constructor>Alpha</constructor><toString>Beta</toString><h2>Real</h2>";
+  assert.equal(await renderHtml(html, "markdown"), "AlphaBeta\n\n## Real");
+  assert.equal(await renderHtml(html, "text"), "AlphaBetaReal");
 });
 
 console.log(`port-bugs: ${passed} passed, ${failed} failed`);
