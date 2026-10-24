@@ -62,7 +62,7 @@ func runNode(t *testing.T, nodePath, distDB, dataDir, script string) string {
 
 // interopSession returns a session row that exercises every nested map.
 func interopSession(pid int64) PersistedStats {
-	maxChars := int64(4000)
+	maxChars := float64(4000)
 	return PersistedStats{
 		Pid:          pid,
 		SessionStart: 111,

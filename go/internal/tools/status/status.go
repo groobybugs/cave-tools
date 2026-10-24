@@ -11,10 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
-	"github.com/groobybugs/cave-tools/go/internal/storage"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
 
@@ -28,66 +26,6 @@ var Tool = types.ToolDefinition{
 	Handler:     handleStatus,
 }
 
-// defaultBudgetOrder is the TS `budgets` object's insertion order.
-// port of src/tools/status.ts:statusTool.handler
-var defaultBudgetOrder = []string{"bash", "read", "grep", "web", "find", "ls"}
-
-var (
-	budgetOrderMu    sync.Mutex
-	extraBudgetNames []string
-)
-
-// RecordBudgetSet preserves the insertion order of budgets added through
-// cave__configure. TS keeps it in the module's object; Go maps lose it, and
-// the status report iterates Object.entries(budgets).
-func RecordBudgetSet(name string) {
-	budgetOrderMu.Lock()
-	defer budgetOrderMu.Unlock()
-	for _, known := range defaultBudgetOrder {
-		if known == name {
-			return
-		}
-	}
-	for _, known := range extraBudgetNames {
-		if known == name {
-			return
-		}
-	}
-	extraBudgetNames = append(extraBudgetNames, name)
-}
-
-// orderedBudgetNames returns TS's Object.entries(budgets) key order.
-func orderedBudgetNames(budgets map[string]storage.BudgetConfig) []string {
-	budgetOrderMu.Lock()
-	extras := append([]string(nil), extraBudgetNames...)
-	budgetOrderMu.Unlock()
-
-	names := make([]string, 0, len(budgets))
-	seen := make(map[string]bool, len(budgets))
-	for _, name := range defaultBudgetOrder {
-		if _, ok := budgets[name]; ok {
-			names = append(names, name)
-			seen[name] = true
-		}
-	}
-	for _, name := range extras {
-		if _, ok := budgets[name]; ok && !seen[name] {
-			names = append(names, name)
-			seen[name] = true
-		}
-	}
-	// Budgets set outside configure (tests) are not ordered; sort them so the
-	// report stays deterministic.
-	remaining := make([]string, 0)
-	for name := range budgets {
-		if !seen[name] {
-			remaining = append(remaining, name)
-		}
-	}
-	sort.Strings(remaining)
-	return append(names, remaining...)
-}
-
 // handleStatus builds the status report.
 // port of src/tools/status.ts:statusTool.handler
 func handleStatus(ctx context.Context, args map[string]any) (types.ToolResult, error) {
@@ -95,29 +33,27 @@ func handleStatus(ctx context.Context, args map[string]any) (types.ToolResult, e
 	stats := compression.GetCacheStats(ctx)
 	savings := compression.GetSavingsStats(ctx)
 	rtk := compression.GetRtkStats(ctx)
-	bounces := compression.GetBounceStats(ctx)
+	bounces := compression.GetBounceStatsView(ctx)
 	rangeEdits := compression.GetRangeEditStats(ctx)
 	archives := compression.GetArchiveStats()
-	budgets := compression.GetAllBudgets()
+	budgets := compression.GetAllBudgetEntries()
 	rtkAvailable := compression.IsRtkAvailable()
 	compressionPct := compression.ReductionPercent(
 		savings.RawChars,
 		savings.CompressionSavedChars,
 	)
 
-	bounceExts := make([]string, 0, len(bounces.ByExtension))
-	for ext, entry := range bounces.ByExtension {
+	bounceExts := make([]string, 0, len(bounces.Order))
+	for _, ext := range bounces.Order {
+		entry := bounces.Summary.ByExtension[ext]
 		if entry.Bounces > 0 {
 			bounceExts = append(bounceExts, ext)
 		}
 	}
 	sort.SliceStable(bounceExts, func(i, j int) bool {
-		left := bounces.ByExtension[bounceExts[i]]
-		right := bounces.ByExtension[bounceExts[j]]
-		if left.Bounces != right.Bounces {
-			return left.Bounces > right.Bounces
-		}
-		return bounceExts[i] < bounceExts[j]
+		left := bounces.Summary.ByExtension[bounceExts[i]]
+		right := bounces.Summary.ByExtension[bounceExts[j]]
+		return left.Bounces > right.Bounces
 	})
 	if len(bounceExts) > 5 {
 		bounceExts = bounceExts[:5]
@@ -157,11 +93,11 @@ func handleStatus(ctx context.Context, args map[string]any) (types.ToolResult, e
 		"  Est. tokens saved:  " + strconv.FormatInt(rangeEdits.EstimatedTokensSaved, 10),
 		"",
 		"Bounces (trimmed read → full re-read):",
-		"  Total bounces:      " + strconv.FormatInt(bounces.TotalBounces, 10),
-		"  Wasted chars:       " + strconv.FormatInt(bounces.TotalWastedChars, 10),
+		"  Total bounces:      " + strconv.FormatInt(bounces.Summary.TotalBounces, 10),
+		"  Wasted chars:       " + strconv.FormatInt(bounces.Summary.TotalWastedChars, 10),
 	}
 	for _, ext := range bounceExts {
-		entry := bounces.ByExtension[ext]
+		entry := bounces.Summary.ByExtension[ext]
 		percent := "0"
 		if entry.TotalReads > 0 {
 			percent = jsToFixed((float64(entry.Bounces)/float64(entry.TotalReads))*100, 0)
@@ -183,13 +119,13 @@ func handleStatus(ctx context.Context, args map[string]any) (types.ToolResult, e
 		"",
 		"Budget Configuration:",
 	)
-	for _, name := range orderedBudgetNames(budgets) {
-		budget := budgets[name]
-		line := "  " + name + ": max=" + strconv.FormatInt(budget.MaxLines, 10) +
-			", head=" + strconv.FormatInt(budget.HeadLines, 10) +
-			", tail=" + strconv.FormatInt(budget.TailLines, 10)
-		if budget.MaxChars != nil && *budget.MaxChars != 0 {
-			line += ", chars=" + strconv.FormatInt(*budget.MaxChars, 10)
+	for _, entry := range budgets {
+		budget := entry.Budget
+		line := "  " + entry.Name + ": max=" + jsNumberToString(budget.MaxLines) +
+			", head=" + jsNumberToString(budget.HeadLines) +
+			", tail=" + jsNumberToString(budget.TailLines)
+		if budget.MaxChars != nil && *budget.MaxChars != 0 && !math.IsNaN(*budget.MaxChars) {
+			line += ", chars=" + jsNumberToString(*budget.MaxChars)
 		}
 		lines = append(lines, line)
 	}
@@ -203,6 +139,59 @@ func yesNo(value bool) string {
 		return "Yes"
 	}
 	return "No"
+}
+
+// jsNumberToString mirrors ECMAScript Number::toString(10).
+func jsNumberToString(value float64) string {
+	if math.IsNaN(value) {
+		return "NaN"
+	}
+	if math.IsInf(value, 1) {
+		return "Infinity"
+	}
+	if math.IsInf(value, -1) {
+		return "-Infinity"
+	}
+	if value == 0 {
+		return "0"
+	}
+	negative := value < 0
+	if negative {
+		value = -value
+	}
+	repr := strconv.FormatFloat(value, 'e', -1, 64)
+	mantissa, exponentPart, _ := strings.Cut(repr, "e")
+	exponent, _ := strconv.Atoi(exponentPart)
+	digits := strings.Replace(mantissa, ".", "", 1)
+	n := len(digits)
+	k := exponent + 1
+	var out string
+	switch {
+	case k > 0 && k <= 21:
+		if n <= k {
+			out = digits + strings.Repeat("0", k-n)
+		} else {
+			out = digits[:k] + "." + digits[k:]
+		}
+	case k <= 0 && k > -6:
+		out = "0." + strings.Repeat("0", -k) + digits
+	default:
+		if n == 1 {
+			out = digits
+		} else {
+			out = digits[:1] + "." + digits[1:]
+		}
+		exponentOut := k - 1
+		if exponentOut >= 0 {
+			out += "e+" + strconv.Itoa(exponentOut)
+		} else {
+			out += "e-" + strconv.Itoa(-exponentOut)
+		}
+	}
+	if negative {
+		return "-" + out
+	}
+	return out
 }
 
 // jsToFixed mirrors Number.prototype.toFixed, including its round-half-away

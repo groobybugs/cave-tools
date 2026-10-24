@@ -907,6 +907,168 @@ func TestEditStrictBatch(t *testing.T) {
 	}
 }
 
+// TS 7c81d32 (scripts/test-port-bugs.mjs 18-21): strict proofs must be
+// nonempty strings. A stringified null/number/boolean must not satisfy the
+// gate, and a rejected edit must leave the file untouched.
+func TestEditStrictProofValues(t *testing.T) {
+	h := newHarness(t)
+	h.env["CAVE_TOOLS_MODE"] = "strict"
+	strictProof := "STRICT: range/move edit requires expected_hash or expected_range_checksum"
+
+	nullHash := h.fixture("strict-null-hash.txt", "alpha\nbeta\n")
+	h.rejectsUnchanged(nullHash, map[string]any{
+		"file_path": nullHash, "start_line": 1, "end_line": 1,
+		"content": "ALPHA", "expected_hash": nil,
+	}, strictProof)
+
+	nullChecksum := h.fixture("strict-null-checksum.txt", "alpha\nbeta\n")
+	h.rejectsUnchanged(nullChecksum, map[string]any{
+		"file_path": nullChecksum, "start_line": 1, "end_line": 1,
+		"insert_before": 3, "expected_range_checksum": nil,
+	}, strictProof)
+
+	numberChecksum := h.fixture("strict-number-checksum.txt", "alpha\nbeta\n")
+	h.rejectsUnchanged(numberChecksum, map[string]any{
+		"file_path": numberChecksum, "start_line": 1, "end_line": 1,
+		"content": "ALPHA", "expected_range_checksum": 42,
+	}, strictProof)
+
+	boolChecksum := h.fixture("strict-bool-checksum.txt", "alpha\nbeta\n")
+	h.rejectsUnchanged(boolChecksum, map[string]any{
+		"file_path": boolChecksum, "start_line": 1, "end_line": 1,
+		"content": "ALPHA", "expected_range_checksum": false,
+	}, strictProof)
+
+	batchNullHash := h.fixture("strict-batch-null-hash.txt", "alpha\nbeta\n")
+	h.rejectsUnchanged(batchNullHash, map[string]any{
+		"file_path":     batchNullHash,
+		"expected_hash": nil,
+		"edits": []any{
+			map[string]any{"start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": nil},
+		},
+	}, "edits[0]: "+strictProof)
+
+	batchNullChecksum := h.fixture("strict-batch-null-checksum.txt", "alpha\nbeta\n")
+	h.rejectsUnchanged(batchNullChecksum, map[string]any{
+		"file_path": batchNullChecksum,
+		"edits": []any{
+			map[string]any{"start_line": 1, "end_line": 1, "insert_before": 3, "expected_range_checksum": nil},
+		},
+	}, "edits[0]: "+strictProof)
+
+	batchNumberChecksum := h.fixture("strict-batch-number-checksum.txt", "alpha\nbeta\n")
+	h.rejectsUnchanged(batchNumberChecksum, map[string]any{
+		"file_path": batchNumberChecksum,
+		"edits": []any{
+			map[string]any{"start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": 42},
+		},
+	}, "edits[0]: "+strictProof)
+
+	// Valid string proofs still pass the gate and edit the file.
+	validHash := h.fixture("strict-valid-hash.txt", "alpha\nbeta\n")
+	hash := compression.HashContent([]byte(h.read(validHash)))
+	h.mustSucceed(h.run(map[string]any{
+		"file_path": validHash, "start_line": 1, "end_line": 1,
+		"content": "ALPHA", "expected_hash": hash,
+	}), "strict valid hash")
+	if got := h.read(validHash); got != "ALPHA\nbeta\n" {
+		t.Fatalf("strict valid hash content = %q", got)
+	}
+
+	validChecksum := tools.RangeChecksum([]string{"alpha", "beta", ""}, 1, 1)
+	validMove := h.fixture("strict-valid-move.txt", "alpha\nbeta\n")
+	h.mustSucceed(h.run(map[string]any{
+		"file_path": validMove, "start_line": 1, "end_line": 1,
+		"insert_before": 3, "expected_range_checksum": validChecksum,
+	}), "strict valid move checksum")
+	if got := h.read(validMove); got != "beta\nalpha\n" {
+		t.Fatalf("strict valid move content = %q", got)
+	}
+
+	validBatchRange := h.fixture("strict-valid-batch-range.txt", "alpha\nbeta\n")
+	h.mustSucceed(h.run(map[string]any{
+		"file_path": validBatchRange,
+		"edits": []any{
+			map[string]any{"start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": validChecksum},
+		},
+	}), "strict valid batch range checksum")
+	if got := h.read(validBatchRange); got != "ALPHA\nbeta\n" {
+		t.Fatalf("strict valid batch range content = %q", got)
+	}
+
+	validBatchMove := h.fixture("strict-valid-batch-move.txt", "alpha\nbeta\n")
+	h.mustSucceed(h.run(map[string]any{
+		"file_path": validBatchMove,
+		"edits": []any{
+			map[string]any{"start_line": 1, "end_line": 1, "insert_before": 3, "expected_range_checksum": validChecksum},
+		},
+	}), "strict valid batch move checksum")
+	if got := h.read(validBatchMove); got != "beta\nalpha\n" {
+		t.Fatalf("strict valid batch move content = %q", got)
+	}
+}
+
+// TS Number(null) == 0: an explicit null end_line (or a null start_line on
+// the batch delete:true path) parses as 0, while an absent key stays NaN.
+func TestEditNullLineNumbers(t *testing.T) {
+	h := newHarness(t)
+
+	insertFile := h.fixture("null-end-range.txt", "line1\nline2\n")
+	message := h.mustSucceed(h.run(map[string]any{
+		"file_path": insertFile, "start_line": 1, "end_line": nil, "content": "INSERTED",
+	}), "single range null end_line")
+	if !strings.Contains(message, "(insert lines 1-0)") {
+		t.Fatalf("single range message = %q", message)
+	}
+	if got := h.read(insertFile); got != "INSERTED\nline1\nline2\n" {
+		t.Fatalf("single range content = %q", got)
+	}
+
+	batchFile := h.fixture("null-end-range-batch.txt", "line1\nline2\n")
+	h.mustSucceed(h.run(map[string]any{
+		"file_path": batchFile,
+		"edits":     []any{map[string]any{"start_line": 1, "end_line": nil, "content": "INSERTED"}},
+	}), "batch range null end_line")
+	if got := h.read(batchFile); got != "INSERTED\nline1\nline2\n" {
+		t.Fatalf("batch range content = %q", got)
+	}
+
+	moveFile := h.fixture("null-end-move.txt", "line1\nline2\n")
+	h.rejectsUnchanged(moveFile, map[string]any{
+		"file_path": moveFile, "start_line": 1, "end_line": nil, "insert_before": 3,
+	}, "move requires end_line >= start_line >= 1")
+
+	batchMoveFile := h.fixture("null-end-move-batch.txt", "line1\nline2\n")
+	h.rejectsUnchanged(batchMoveFile, map[string]any{
+		"file_path": batchMoveFile,
+		"edits":     []any{map[string]any{"start_line": 1, "end_line": nil, "insert_before": 3}},
+	}, "edits[0]: move requires end_line >= start_line >= 1")
+
+	// Absent keys stay NaN in Number(): the integer gate still fires.
+	missingEnd := h.fixture("missing-end.txt", "line1\nline2\n")
+	h.rejectsUnchanged(missingEnd, map[string]any{
+		"file_path": missingEnd, "start_line": 1, "content": "X",
+	}, "start_line and end_line must be integers for range mode")
+	missingEndBatch := h.fixture("missing-end-batch.txt", "line1\nline2\n")
+	h.rejectsUnchanged(missingEndBatch, map[string]any{
+		"file_path": missingEndBatch,
+		"edits":     []any{map[string]any{"start_line": 1, "content": "X"}},
+	}, "edits[0]: start_line and end_line must be integers")
+
+	// Batch delete:true reaches parsing with a null start_line; Number(null)
+	// is 0, so the range bounds check (not the integer gate) rejects it.
+	deleteFile := h.fixture("null-start-delete.txt", "line1\nline2\n")
+	h.rejectsUnchanged(deleteFile, map[string]any{
+		"file_path": deleteFile,
+		"edits":     []any{map[string]any{"start_line": nil, "end_line": 2, "delete": true}},
+	}, "edits[0]: start_line must be >= 1 (got 0)")
+
+	// A non-number end_line is still rejected by the field-type gate.
+	h.rejectsUnchanged(insertFile, map[string]any{
+		"file_path": insertFile, "start_line": 1, "end_line": "1", "content": "X",
+	}, "end_line must be a number")
+}
+
 func TestEditReliability(t *testing.T) {
 	h := newHarness(t)
 

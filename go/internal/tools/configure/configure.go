@@ -6,13 +6,14 @@ package configure
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
 	"github.com/groobybugs/cave-tools/go/internal/jsre"
-	"github.com/groobybugs/cave-tools/go/internal/tools/status"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
 
@@ -43,23 +44,21 @@ func handleConfigure(ctx context.Context, args map[string]any) (types.ToolResult
 		maxLines := jsNumberOr(args["max_lines"], 100)
 		headLines := jsNumberOr(args["head_lines"], 50)
 		tailLines := jsNumberOr(args["tail_lines"], 50)
-		var maxChars *int64
+		var maxChars *float64
 		if value, ok := args["max_chars"]; ok {
-			if number, ok := jsNumber(value); ok && number != 0 {
-				truncated := int64(math.Trunc(number))
-				maxChars = &truncated
+			if number, ok := jsNumber(value); ok && jsNumberTruthy(number) {
+				maxChars = &number
 			}
 		} else {
 			maxChars = compression.GetBudget(toolName).MaxChars
 		}
 
-		compression.SetBudget(ctx, toolName, int64(math.Trunc(maxLines)), int64(math.Trunc(headLines)), int64(math.Trunc(tailLines)), maxChars)
-		status.RecordBudgetSet(toolName)
+		compression.SetBudget(ctx, toolName, maxLines, headLines, tailLines, maxChars)
 
 		text := "Set budget for " + toolName + ": max=" + jsNumberToString(maxLines) +
 			", head=" + jsNumberToString(headLines) + ", tail=" + jsNumberToString(tailLines)
-		if maxChars != nil && *maxChars != 0 {
-			text += ", chars=" + strconv.FormatInt(*maxChars, 10)
+		if maxChars != nil && jsNumberTruthy(*maxChars) {
+			text += ", chars=" + jsNumberToString(*maxChars)
 		}
 		return types.ToolResult{Content: []types.Content{types.Text(text)}}, nil
 
@@ -147,6 +146,11 @@ func jsNumberOr(value any, fallback float64) float64 {
 	return number
 }
 
+// jsNumberTruthy is JS ToBoolean for a number.
+func jsNumberTruthy(value float64) bool {
+	return value != 0 && !math.IsNaN(value)
+}
+
 // jsNumber mirrors JS Number(value); ok is false for NaN.
 // port of src/tools/configure.ts:Number
 func jsNumber(value any) (float64, bool) {
@@ -226,22 +230,74 @@ func jsNumberFromString(raw string) (float64, bool) {
 	case "-Infinity":
 		return math.Inf(-1), true
 	}
-	if strings.HasPrefix(text, "0x") || strings.HasPrefix(text, "0X") {
-		parsed, err := strconv.ParseUint(text[2:], 16, 64)
-		if err != nil {
+	for _, prefix := range []struct {
+		marker string
+		base   int
+	}{
+		{"0x", 16}, {"0X", 16},
+		{"0b", 2}, {"0B", 2},
+		{"0o", 8}, {"0O", 8},
+	} {
+		if !strings.HasPrefix(text, prefix.marker) {
+			continue
+		}
+		digits := text[len(prefix.marker):]
+		if digits == "" || !validRadixDigits(digits, prefix.base) {
 			return 0, false
 		}
-		return float64(parsed), true
+		parsed, ok := new(big.Int).SetString(digits, prefix.base)
+		if !ok {
+			return 0, false
+		}
+		number, _ := new(big.Float).SetInt(parsed).Float64()
+		return number, true
+	}
+	// Number("Inf"), Number("NaN") and other words are NaN; ParseFloat would
+	// otherwise accept "Inf"/"infinity". A decimal literal starts with a
+	// digit, '.', or a sign followed by one of those.
+	unsigned := text
+	if strings.HasPrefix(unsigned, "+") || strings.HasPrefix(unsigned, "-") {
+		unsigned = unsigned[1:]
+	}
+	if unsigned == "" || (unsigned[0] != '.' && (unsigned[0] < '0' || unsigned[0] > '9')) {
+		return 0, false
+	}
+	if strings.ContainsRune(text, '_') || strings.ContainsAny(unsigned, "xXpP") {
+		return 0, false
 	}
 	parsed, err := strconv.ParseFloat(text, 64)
 	if err != nil {
-		return 0, false
+		if !errors.Is(err, strconv.ErrRange) {
+			return 0, false
+		}
 	}
 	return parsed, true
 }
 
-// jsNumberToString mirrors the Number::toString output for budget values.
-// port of src/tools/configure.ts:configureTool.handler
+// validRadixDigits accepts only the digit alphabet for a JS 0x/0b/0o literal
+// (no sign, underscore, fraction or exponent).
+func validRadixDigits(text string, base int) bool {
+	for i := 0; i < len(text); i++ {
+		char := text[i]
+		var value int
+		switch {
+		case char >= '0' && char <= '9':
+			value = int(char - '0')
+		case char >= 'a' && char <= 'f':
+			value = int(char-'a') + 10
+		case char >= 'A' && char <= 'F':
+			value = int(char-'A') + 10
+		default:
+			return false
+		}
+		if value >= base {
+			return false
+		}
+	}
+	return true
+}
+
+// jsNumberToString mirrors ECMAScript Number::toString(10).
 func jsNumberToString(number float64) string {
 	if math.IsNaN(number) {
 		return "NaN"
@@ -252,8 +308,44 @@ func jsNumberToString(number float64) string {
 	if math.IsInf(number, -1) {
 		return "-Infinity"
 	}
-	if number == math.Trunc(number) && math.Abs(number) < 1e21 {
-		return strconv.FormatFloat(number, 'f', 0, 64)
+	if number == 0 {
+		return "0"
 	}
-	return strconv.FormatFloat(number, 'g', -1, 64)
+	negative := number < 0
+	if negative {
+		number = -number
+	}
+	repr := strconv.FormatFloat(number, 'e', -1, 64)
+	mantissa, exponentPart, _ := strings.Cut(repr, "e")
+	exponent, _ := strconv.Atoi(exponentPart)
+	digits := strings.Replace(mantissa, ".", "", 1)
+	n := len(digits)
+	k := exponent + 1
+	var out string
+	switch {
+	case k > 0 && k <= 21:
+		if n <= k {
+			out = digits + strings.Repeat("0", k-n)
+		} else {
+			out = digits[:k] + "." + digits[k:]
+		}
+	case k <= 0 && k > -6:
+		out = "0." + strings.Repeat("0", -k) + digits
+	default:
+		if n == 1 {
+			out = digits
+		} else {
+			out = digits[:1] + "." + digits[1:]
+		}
+		exponentOut := k - 1
+		if exponentOut >= 0 {
+			out += "e+" + strconv.Itoa(exponentOut)
+		} else {
+			out += "e-" + strconv.Itoa(-exponentOut)
+		}
+	}
+	if negative {
+		return "-" + out
+	}
+	return out
 }

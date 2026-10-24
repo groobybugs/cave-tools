@@ -100,8 +100,8 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/tools/compress.ts` | `go/internal/tools/compress/compress.go` | W3d |
 | `src/tools/status.ts` | `go/internal/tools/status/status.go` | W3e |
 | `src/tools/configure.ts` | `go/internal/tools/configure/configure.go` | W3e |
-| `src/runtime/tool-errors.ts` | `go/internal/runtime/tool_errors.go` | W2h |
-| `src/runtime/tool-errors-cli.ts` | `go/internal/runtime/tool_errors_cli.go` | W2h |
+| `src/runtime/tool-errors.ts` | `go/internal/runtime/tool_errors.go` | W3e |
+| `src/runtime/tool-errors-cli.ts` | `go/internal/runtime/tool_errors_cli.go` | W3e |
 | `src/index.ts` | `go/internal/server/index.go` | W3i |
 | `src/dispatch.ts` | `go/internal/server/dispatch.go` | W3i |
 | `src/tool-list.ts` | `go/internal/server/tool_list.go` | W3i |
@@ -355,8 +355,9 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
   - e: tools read + line-range
   - f: tools edit + edit-match + replacers + write + apply-patch
   - g: tools bash + bash-start + bash-status + bash-stop + grep + find + ls + invalidate
-  - h: tools webfetch + websearch + compress + status + configure; runtime/tool-errors + tool-errors-cli
+  - h: tools webfetch + websearch + compress
 - W3 (parallel):
+  - e: tools status + configure; runtime/tool-errors + tool-errors-cli
   - i: dispatch + tool-list + profile + index (MCP stdio server via go-sdk)
   - j: daemon server/client/control/paths
   - k: CLI — cli, cli-tools, status-ui (incl. raw, filter --json)
@@ -375,7 +376,8 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
 | W2e | `go/internal/tools/{read,line_range}.go` + tests |
 | W2f | `go/internal/tools/{edit,edit_match,replacers,write,apply_patch}.go` + tests |
 | W2g | `go/internal/tools/{bash,bash_start,bash_status,bash_stop,grep,find,ls,invalidate}.go` + tests |
-| W2h | `go/internal/tools/{webfetch,websearch,compress,status,configure}.go`, `go/internal/runtime/{tool_errors,tool_errors_cli}.go` + tests |
+| W2h | `go/internal/tools/{webfetch,websearch,compress}.go` + tests |
+| W3e | `go/internal/tools/{status,configure}.go`, `go/internal/runtime/{tool_errors,tool_errors_cli}.go` + tests |
 | W3i | `go/internal/server/*.go` + tests |
 | W3j | `go/internal/daemon/*.go` + tests |
 | W3k | `go/internal/cli/*.go`, `go/cmd/cave-tools-go/main.go` + tests |
@@ -449,11 +451,36 @@ Accepted compression deviations (W2d, Muse review):
 - `GetRtkTopPassthrough` breaks equal-count ties in byte order; TS uses
   `localeCompare` (ICU), so mixed-case/prefix order can differ for tied counts.
 
+### W3e Muse-review fixes (budgets and status ordering)
+
+The W3e review found three gaps. They are fixed on the Go side; TS is unchanged
+and remains the reference.
+
+- `storage.BudgetConfig` stores TS numbers as `float64` (the old shared
+  `int64` API truncated `max_chars: 12.7` to `12`). `configure` prints and
+  stores the same number, `status` prints it with ECMAScript
+  `Number::toString`, and `Number()` accepts JS binary/octal literals
+  (`0b11`, `0o17`). Non-finite budget fields serialize as `null`, exactly like
+  `JSON.stringify`; `maxChars` stays omitted when TS holds `undefined`.
+- `truncateLines`/`truncateChars` keep fractional `maxLines`/`headLines`/
+  `tailLines`/`maxChars` and the omitted/dropped marker arithmetic. Numbers are
+  coerced to integers only inside `Array.prototype.slice`/
+  `String.prototype.slice`, matching `ToIntegerOrInfinity`; `Infinity`,
+  negative values and empty-string filtering follow TS.
+- Status no longer approximates ordering with alphabetical sorts. Budget names
+  follow `Object.entries` (integer-like keys ascending first, then insertion
+  order) and bounce ties keep the per-extension `Map` insertion order.
+- `TestHandlerParity` for `cave__status` runs the Go handler in a fresh
+  test-binary process pinned to a temp data dir, so a cached storage singleton
+  or the real user cache cannot make it pass incidentally. The configure parity
+  case also compares `configure` → `status` → `applyBudget` output against TS.
+
 ### TS bugs found while porting
 
 The port found these in the TS implementation. All are fixed in TS on `main`
-(commit `ebe616e` "fix: TS bugs found by the Go port", and `1b3fbbc` for the
-daemon) and the Go side now mirrors the fixed behaviour. The regression cases
+(commit `ebe616e` "fix: TS bugs found by the Go port", `1b3fbbc` for the
+daemon, and `7c81d32` for the strict edit proofs) and the Go side now mirrors
+the fixed behaviour. The regression cases
 live in `scripts/test-port-bugs.mjs` (plus the single-group redaction block in
 `test.mjs`) and are ported to the matching `*_test.go`.
 
@@ -471,3 +498,12 @@ live in `scripts/test-port-bugs.mjs` (plus the single-group redaction block in
 | 10 | `src/compression/classify.ts` `/^aws\s+.*\b--output\s+json\b/i` never matched: `\b` between a space and `-` is not a word boundary. | `/^aws\s.*\s--output(?:\s+|=)json\b/i`. | same source through `jsre`. |
 | 11 | `src/compression/redact.ts` dropped the private-key END marker and the database URL's `@`, and missed `postgresql`, `mongodb+srv`, `rediss` URLs and empty users. | 3-group patterns keep the delimiters; scheme variants added. | same patterns and `${1}…${3}` replacements. |
 | 12 | `src/daemon/control.ts` `rpc` parsed every reply line with an unguarded `JSON.parse`, so one malformed line crashed `daemon status`/`stop`. | `try/catch` + `continue` (`1b3fbbc`). | `daemon/control.go` already skipped malformed lines; the stale comment was updated. |
+| 13 | `src/tools/edit.ts` strict proof gates stringified `null`/numbers/booleans, so `expected_hash: null` passed strict mode and the edit was written without any proof verification (found in W3b review). | `hasProofValue` requires a nonempty string in the single and batch range/move gates; the batch keeps the legacy top-level hash for its multi-file error but passes the string-only proof to `applyEditsToContent` (`7c81d32`). | `hasProofValue` in `edit.go`; `scripts/test-port-bugs.mjs` cases 18-21 are ported as `TestEditStrictProofValues`. |
+
+Independently of the table, the W3b review found Go's edit handlers rejecting
+an explicit `null` line number where TS's `Number(null) === 0`: Go now
+distinguishes an absent key (`Number(undefined)` is NaN) from a present null in
+single and batch range/move and the batch `delete:true` path, preserving the
+shape gates. The batch planners also stringify a present
+`expected_range_checksum` like TS (`String(null)` is `"null"`), so an explicit
+null fails verification instead of being skipped.
