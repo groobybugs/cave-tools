@@ -364,8 +364,11 @@ func StartDurableBackgroundCommand(ctx context.Context, command string, options 
 // port of src/runtime/process.ts:startBackgroundCommand
 func StartBackgroundCommand(ctx context.Context, command string, options StartBackgroundOptions) *BackgroundHandle {
 	handle := &BackgroundHandle{}
-	// Node's spawn throws for an empty file; this signature has no error slot,
-	// so report it the way every other spawn failure is reported here.
+	// Shape differs from TS: src/runtime/process.ts:startBackgroundCommand lets
+	// Node's spawn throw synchronously for an empty command, while this
+	// signature has no error slot. Instead the handle fires (nil, nil), the same
+	// way every other spawn failure is reported here. The difference is
+	// unobservable in practice: there are no production callers.
 	if command == "" {
 		go handle.fire(nil, nil)
 		return handle
