@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
+	"github.com/groobybugs/cave-tools/go/internal/jsjson"
 	"github.com/groobybugs/cave-tools/go/internal/jsre"
 	"github.com/groobybugs/cave-tools/go/internal/runtime"
 	"github.com/groobybugs/cave-tools/go/internal/types"
@@ -292,8 +293,8 @@ func parsePayload(payload string) (string, bool) {
 	if !strings.HasPrefix(trimmed, "{") {
 		return "", false
 	}
-	var parsed any
-	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+	parsed, err := jsjson.Parse(trimmed)
+	if err != nil {
 		return "", false
 	}
 	root, ok := parsed.(map[string]any)

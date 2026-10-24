@@ -133,6 +133,16 @@ func TestParseWebsearchResponse(t *testing.T) {
 	}
 }
 
+// TestParseWebsearchResponseNumberOverflow keeps provider responses whose
+// unrelated numbers overflow float64 parseable, like JSON.parse: 1e400 is
+// Infinity for TS, while encoding/json used to reject the whole body.
+func TestParseWebsearchResponseNumberOverflow(t *testing.T) {
+	body := `{"result":{"content":[{"type":"text","text":"overflow ok"}],"usage":{"count":1e400,"ratio":1e-400}}}`
+	if got, ok := ParseWebsearchResponse(body); !ok || got != "overflow ok" {
+		t.Fatalf("overflow payload = %q, %v", got, ok)
+	}
+}
+
 func TestParseWebsearchResponseRejects(t *testing.T) {
 	tests := []string{
 		"",
