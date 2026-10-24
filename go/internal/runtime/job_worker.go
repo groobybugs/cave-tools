@@ -40,12 +40,18 @@ func RunJobWorker(args []string) int {
 	return worker.run(args[3], args[4])
 }
 
+// spawnFailed is the exit code of a worker whose shell never started: 127,
+// like the shell's "command not found", so a job that never started is never
+// reported as success.
+// port of src/runtime/job-worker.ts:SPAWN_FAILED
+const spawnFailed = 127
+
 // run spawns the shell command with stdout and stderr appended to the log and
 // records completion.
 func (w *jobWorker) run(shell, command string) int {
 	logFile, err := os.OpenFile(w.logPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o666)
 	if err != nil {
-		return w.finish(jobInt64Ptr(-1), nil, err)
+		return w.finish(jobInt64Ptr(spawnFailed), nil, err)
 	}
 	cmd := shellCommand(shell, command)
 	// TS passes windowsHide: process.platform === "win32"; no `detached`.
@@ -56,14 +62,14 @@ func (w *jobWorker) run(shell, command string) int {
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
-		return w.finish(jobInt64Ptr(-1), nil, spawnError(shell, err))
+		return w.finish(jobInt64Ptr(spawnFailed), nil, spawnError(shell, err))
 	}
 	_ = logFile.Close()
 
 	if err := cmd.Wait(); err != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) {
-			return w.finish(jobInt64Ptr(-1), nil, err)
+			return w.finish(jobInt64Ptr(spawnFailed), nil, err)
 		}
 	}
 	code, signal := waitResult(cmd)

@@ -73,8 +73,8 @@ func rpc(method string) (*rpcReply, error) {
 		for scanner.Scan() {
 			var msg rpcReply
 			if json.Unmarshal(scanner.Bytes(), &msg) != nil {
-				// TS lets JSON.parse throw here; a real daemon only writes valid
-				// newline-delimited JSON, so skip garbage instead of crashing.
+				// A malformed reply line must not crash the CLI; TS gained the
+				// same try/catch in 1b3fbbc (scripts/test-port-bugs.mjs #13).
 				continue
 			}
 			if msg.ID == wantID {

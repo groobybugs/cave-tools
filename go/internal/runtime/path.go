@@ -60,7 +60,8 @@ func realpath(value string) (string, error) {
 
 // port of src/runtime/path.ts:realPathSafe
 func RealPathSafe(ctx context.Context, value string) (string, error) {
-	resolved, err := realpath(value)
+	// Resolve relative paths against the call cwd, never the server's.
+	resolved, err := realpath(resolvePath(GetCwd(ctx), value))
 	if err == nil {
 		return resolved, nil
 	}

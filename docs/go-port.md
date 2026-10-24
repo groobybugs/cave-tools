@@ -422,8 +422,6 @@ Default stays TypeScript.
 
 Accepted legacy-migration deviations (one-time import of pre-SQLite files; not worth statement-by-statement emulation):
 
-- A legacy session with `budgets: null` is stored as `{}` (TS stores `null`).
-- A legacy session missing `savings.byTool` or `bounces.byExtension` keeps its row with no tool/bounce rows in Go; TS keeps the row and throws before the tool/bounce rows.
 - String-typed numbers in legacy `lifetime.json` (e.g. `"calls": "5"`) read as 0 in Go; TS lets SQLite coerce them to 5.
 
 Accepted runtime deviations (W1b, Muse review):
@@ -431,20 +429,27 @@ Accepted runtime deviations (W1b, Muse review):
 - Fallback file finder (no rg/fd) sorts byte-wise; TS uses `localeCompare` (ICU), so mixed-case order can differ.
 - `RunCommand` options `MaxBytes`/`MaxLines`/`ForceKillAfterMs` treat 0 as "use default"; TS `??` keeps an explicit 0. No TS caller passes 0.
 - `BinResolution` uses `""` for a missing binary where TS uses `null`. W3k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
-- Child output is decoded once from the full byte buffer; TS decodes per chunk, so a multibyte char split across chunks becomes U+FFFD in TS but decodes correctly in Go.
-
 - Job `.result.json` with a fractional `exitCode` (only reachable by hand-editing the sidecar) is truncated to an integer in Go; TS keeps the fraction.
 
 ### TS bugs found while porting
 
-- `src/storage/db.ts:595` (and the `try/catch` at `src/storage/db.ts:405-414`):
-  `JSON.stringify(stats.budgets)` is `undefined` when a legacy `sessions/*.json`
-  file predates the `budgets` field. better-sqlite3 binds that as `NULL` and
-  `budgets_json TEXT NOT NULL` rejects the row, so `migrateSessions` silently
-  skips the whole session (same for a missing `bounces`/`savings` object).
-  Ported faithfully: Go skips the same legacy files (`legacySessionAcceptedByTS`).
-- `src/storage/db.ts:806` `updateJobState` overwrites `ended_at`, `exit_code`
-  and `signal` with `NULL` whenever the caller omits them (`update.x ?? null`
-  is intentional per call site, but it means a state-only call such as
-  `updateJobState(id, { state: "lost" })` erases a recorded exit code). Go
-  reproduces it exactly; flagging it so the fix lands in TS first if wanted.
+The port found these in the TS implementation. All are fixed in TS on `main`
+(commit `ebe616e` "fix: TS bugs found by the Go port", and `1b3fbbc` for the
+daemon) and the Go side now mirrors the fixed behaviour. The regression cases
+live in `scripts/test-port-bugs.mjs` (plus the single-group redaction block in
+`test.mjs`) and are ported to the matching `*_test.go`.
+
+| # | Bug | Fixed in TS | Mirrored in Go |
+| --- | --- | --- | --- |
+| 1 | `src/storage/db.ts` `migrateSessions`: a legacy session file with a missing `budgets`/`rtk`/`bounces` section or a `null` leaf made `upsertSessionStats` throw, so the whole session was silently dropped. | `normalizeLegacyStats` fills `{}`/0 and skips only files without a finite numeric `pid`. | `normalizeLegacyStats` in `storage/db.go`; `legacySessionAcceptedByTS` deleted. |
+| 2 | `src/storage/db.ts` `updateJobState` wrote all four completion columns every time, so `updateJobState(id, { state: "lost" })` erased a recorded `exit_code`/`signal`/`ended_at`. | only the provided fields are written. | `storage.JobUpdate` uses `Optional[T]` (omitted vs explicit NULL) and `UpdateJobState` builds the SET list. |
+| 3 | `src/runtime/jobs.ts` `getJobInfo` lost branch returned a synthesized object instead of the stored row. | returns `getJob(jobId)`. | `GetJobInfo` re-reads the row and falls back to the old object. |
+| 4 | `src/runtime/job-worker.ts` recorded a spawn failure as exit `-1`, which clamps to 0 and looked like success. | `SPAWN_FAILED = 127` in the log, sidecar and process exit. | `spawnFailed` in `job_worker.go`. |
+| 5 | `src/compression/archive.ts` printed a negative "(N lines archived)" for a few huge lines. | `lines.length <= 30` cuts by chars: first 1000 + last 500, "(N chars archived)". | same in `ArchiveIfLarge`; `utf16Suffix` keeps `slice(-500)` semantics. |
+| 6 | `src/runtime/path.ts` `realPathSafe` resolved relative paths against the server's cwd, so daemon clients got server answers. | resolves against `getCwd()` first. | `RealPathSafe` resolves `resolvePath(GetCwd(ctx), value)` before `realpath`. |
+| 7 | `src/runtime/bins.ts` `binDir` read `process.env`, ignoring the call env. | uses `getEnv()` with `HOME`/`USERPROFILE`/`LOCALAPPDATA` and falls back to `homedir()`. | `BinDir(ctx)` / `CachedBinPath(ctx, tool)`. |
+| 8 | `src/runtime/ripgrep.ts` `Number(event.data?.line_number)` was `NaN` when rg omitted the field, and per-chunk UTF-8 decoding could split a multibyte char. | `Number.isFinite(...) ? ... : 0`; decode once from the concatenated buffers. | `line_number` decoded as a JSON number (else 0); Go already decoded once. |
+| 9 | `src/compression/signatures.ts` ran the const pattern before the arrow pattern, so `const f = (a) => …` was reported as a const and its async flag read the wrong group. | arrow pattern first; `isAsync` from group 5 for arrows. | same order and group selection in `signatures.go`. |
+| 10 | `src/compression/classify.ts` `/^aws\s+.*\b--output\s+json\b/i` never matched: `\b` between a space and `-` is not a word boundary. | `/^aws\s.*\s--output(?:\s+|=)json\b/i`. | same source through `jsre`. |
+| 11 | `src/compression/redact.ts` dropped the private-key END marker and the database URL's `@`, and missed `postgresql`, `mongodb+srv`, `rediss` URLs and empty users. | 3-group patterns keep the delimiters; scheme variants added. | same patterns and `${1}…${3}` replacements. |
+| 12 | `src/daemon/control.ts` `rpc` parsed every reply line with an unguarded `JSON.parse`, so one malformed line crashed `daemon status`/`stop`. | `try/catch` + `continue` (`1b3fbbc`). | `daemon/control.go` already skipped malformed lines; the stale comment was updated. |

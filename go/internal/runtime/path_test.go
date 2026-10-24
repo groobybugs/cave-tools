@@ -110,15 +110,38 @@ func TestRealPathSafe(t *testing.T) {
 		t.Fatalf("RealPathSafe(missing) = %q, want %q", got, want)
 	}
 
-	// fs.realpath resolves relative input against the process cwd, not the
-	// call cwd (a TS quirk ported as-is), so a relative path that exists only
-	// under the call cwd takes the ENOENT fallback: path.resolve(getCwd(), v).
+	// Relative input resolves against the call cwd before realpath, so a
+	// relative symlink under the call cwd is resolved to its target.
 	got, err = RealPathSafe(ctx, "link.txt")
 	if err != nil {
 		t.Fatalf("RealPathSafe(relative): %v", err)
 	}
-	if want := filepath.Join(cwd, "link.txt"); got != want {
-		t.Fatalf("RealPathSafe(relative) = %q, want %q", got, want)
+	if got != wantTarget {
+		t.Fatalf("RealPathSafe(relative) = %q, want %q", got, wantTarget)
+	}
+
+	// A relative path that exists only under the process cwd (not the call
+	// cwd) must not leak the server's answer: ENOENT falls back to the call
+	// cwd path.
+	processOnly := filepath.Join(cwd, "process-only.txt")
+	if err := os.WriteFile(processOnly, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	otherCwd := t.TempDir()
+	got, err = RealPathSafe(w1bCtx(t, otherCwd, nil), "process-only.txt")
+	if err != nil {
+		t.Fatalf("RealPathSafe(server-only relative): %v", err)
+	}
+	if want := filepath.Join(otherCwd, "process-only.txt"); got != want {
+		t.Fatalf("RealPathSafe(server-only relative) = %q, want %q", got, want)
 	}
 }
 

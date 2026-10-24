@@ -606,10 +606,9 @@ func TestJobs(t *testing.T) {
 		t.Fatalf("ListRunningJobs = %+v", running)
 	}
 
-	// TS writes every completion column from the update, so unspecified
-	// fields become NULL.
+	// Only the fields the caller provides are written.
 	killedAt := int64(3_000)
-	if err := UpdateJobState("j1", JobUpdate{State: JobKilled, EndedAt: &killedAt, Signal: &signal}); err != nil {
+	if err := UpdateJobState("j1", JobUpdate{State: JobKilled, EndedAt: Some(killedAt), Signal: Some(signal)}); err != nil {
 		t.Fatalf("UpdateJobState: %v", err)
 	}
 	got, err = GetJob("j1")
@@ -620,9 +619,10 @@ func TestJobs(t *testing.T) {
 		t.Fatalf("updated job = %+v", got)
 	}
 	if got.ExitCode != nil {
-		t.Fatalf("exitCode = %v, want NULL", *got.ExitCode)
+		t.Fatalf("exitCode = %v, want untouched NULL", *got.ExitCode)
 	}
 
+	// A state-only update keeps the recorded completion fields (the TS bug).
 	if err := UpdateJobState("j2", JobUpdate{State: JobLost}); err != nil {
 		t.Fatalf("UpdateJobState state-only: %v", err)
 	}
@@ -630,8 +630,24 @@ func TestJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJob j2: %v", err)
 	}
-	if got.EndedAt != nil || got.ExitCode != nil || got.Signal != nil {
-		t.Fatalf("state-only update must null completion fields: %+v", got)
+	if got.State != JobLost {
+		t.Fatalf("state-only update state = %q, want lost", got.State)
+	}
+	if got.EndedAt == nil || *got.EndedAt != endedAt || got.ExitCode == nil || *got.ExitCode != exitCode ||
+		got.Signal == nil || *got.Signal != signal {
+		t.Fatalf("state-only update erased completion fields: %+v", got)
+	}
+
+	// An explicit NULL still clears a column.
+	if err := UpdateJobState("j2", JobUpdate{State: JobExited, ExitCode: Null[int64]()}); err != nil {
+		t.Fatalf("UpdateJobState null exit code: %v", err)
+	}
+	got, err = GetJob("j2")
+	if err != nil {
+		t.Fatalf("GetJob j2 after null: %v", err)
+	}
+	if got.ExitCode != nil || got.Signal == nil {
+		t.Fatalf("explicit NULL did not clear only exit_code: %+v", got)
 	}
 
 	endedBefore, err := ListJobsEndedBefore(10_000)
@@ -881,11 +897,11 @@ func equalStrings(a, b []string) bool { return slices.Equal(a, b) }
 // contains is strings.Contains with a readable failure message in the caller.
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
 
-// TS migrateSessions skips a legacy file when upsertSessionStats throws: a
-// missing or null cache/savings/rtk/bounces object (property access on
-// undefined) or a missing budgets key (NULL into budgets_json NOT NULL).
-// Other files still migrate.
-func TestLegacyMigrationSkipsFilesTSRejects(t *testing.T) {
+// TestLegacyMigrationNormalizesStats ports the TS fix: older session files may
+// lack sections (budgets, rtk, bounces, ...) or hold nulls, and they now
+// migrate with {} / 0 instead of being dropped. A missing or non-numeric pid
+// still skips the file, exactly like Number.isFinite(raw.pid).
+func TestLegacyMigrationNormalizesStats(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "data")
 	t.Setenv("CAVE_TOOLS_DATA_DIR", dir)
@@ -893,46 +909,80 @@ func TestLegacyMigrationSkipsFilesTSRejects(t *testing.T) {
 	resetDB(t)
 	t.Cleanup(func() { resetDB(t) })
 
-	full := func(pid int) map[string]any {
-		return map[string]any{
-			"pid": pid, "sessionStart": 1, "updatedAt": 2,
-			"cache":   map[string]any{"hits": 0, "misses": 0, "filesTracked": 0},
-			"savings": map[string]any{"totalCalls": 0, "rawChars": 0, "compressedChars": 0, "compressionSavedChars": 0, "dedupSavedChars": 0, "savedChars": 0, "byTool": map[string]any{}},
-			"rtk":     map[string]any{"rewrites": 0, "alreadyWrapped": 0, "passthrough": 0},
-			"bounces": map[string]any{"totalBounces": 0, "totalWastedChars": 0, "byExtension": map[string]any{}},
-			"budgets": map[string]any{},
+	writeRaw := func(name, body string) {
+		t.Helper()
+		path := filepath.Join(dir, "sessions", name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("mkdir sessions: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
 		}
 	}
-	writeJSON(t, filepath.Join(dir, "sessions", "1.json"), full(1))
-	for i, key := range []string{"budgets", "cache", "savings", "rtk", "bounces"} {
-		s := full(10 + i)
-		delete(s, key)
-		writeJSON(t, filepath.Join(dir, "sessions", key+"-missing.json"), s)
-	}
-	nullRtk := full(20)
-	nullRtk["rtk"] = nil
-	writeJSON(t, filepath.Join(dir, "sessions", "rtk-null.json"), nullRtk)
-	// A missing or null leaf binds NULL into a NOT NULL column in TS.
-	emptyCache := full(21)
-	emptyCache["cache"] = map[string]any{}
-	writeJSON(t, filepath.Join(dir, "sessions", "cache-empty.json"), emptyCache)
-	nullLeaf := full(22)
-	nullLeaf["savings"].(map[string]any)["savedChars"] = nil
-	writeJSON(t, filepath.Join(dir, "sessions", "leaf-null.json"), nullLeaf)
-	noPid := full(23)
-	delete(noPid, "updatedAt")
-	writeJSON(t, filepath.Join(dir, "sessions", "no-updated.json"), noPid)
+
+	// The TS port-bugs fixture: no budgets/rtk/bounces/byTool, null leaf.
+	writeRaw("4242.json", `{"pid":4242,"sessionStart":1,"updatedAt":2,"cache":{"hits":1,"misses":null},"savings":{"totalCalls":3}}`)
+	// A numeric pid with every section missing migrates with zeros.
+	writeRaw("4243.json", `{"pid":4243}`)
+	// String-typed leaves become 0 like TS's num(v); they do not skip the file.
+	writeRaw("4245.json", `{"pid":4245,"cache":{"hits":"5"},"rtk":"nope"}`)
+	// Files without a finite numeric pid are skipped.
+	writeRaw("no-pid.json", `{"sessionStart":1}`)
+	writeRaw("string-pid.json", `{"pid":"4244"}`)
+	writeRaw("null-pid.json", `{"pid":null}`)
+	writeRaw("array.json", `[1,2]`)
+	writeRaw("broken.json", `{`)
 
 	rows, err := ListSessionStats(true)
 	if err != nil {
 		t.Fatalf("ListSessionStats: %v", err)
 	}
-	if len(rows) != 1 || rows[0].Pid != 1 {
-		pids := []int64{}
-		for _, r := range rows {
-			pids = append(pids, int64(r.Pid))
+	byPid := map[int64]SessionStatsRow{}
+	for _, row := range rows {
+		byPid[row.Pid] = row
+	}
+	if len(byPid) != 3 {
+		pids := make([]int64, 0, len(byPid))
+		for pid := range byPid {
+			pids = append(pids, pid)
 		}
-		t.Fatalf("migrated pids = %v, want only [1]", pids)
+		slices.Sort(pids)
+		t.Fatalf("migrated pids = %v, want [4242 4243 4245]", pids)
+	}
+
+	full := byPid[4242]
+	if full.Budgets == nil || len(full.Budgets) != 0 {
+		t.Errorf("4242 budgets = %#v, want {}", full.Budgets)
+	}
+	if full.Cache.Hits != 1 || full.Cache.Misses != 0 {
+		t.Errorf("4242 cache = %+v", full.Cache)
+	}
+	if full.Savings.TotalCalls != 3 || full.Rtk.Rewrites != 0 || full.Bounces.TotalBounces != 0 {
+		t.Errorf("4242 = %+v", full)
+	}
+	if full.SessionStart != 1 || full.UpdatedAt != 2 {
+		t.Errorf("4242 timestamps = %d/%d", full.SessionStart, full.UpdatedAt)
+	}
+	if got := byPid[4242].Savings.ByTool; got == nil || len(got) != 0 {
+		t.Errorf("4242 byTool = %#v, want {}", got)
+	}
+
+	empty := byPid[4243]
+	if empty.Cache.Hits != 0 || empty.Savings.TotalCalls != 0 || empty.UpdatedAt != 0 {
+		t.Errorf("4243 = %+v", empty)
+	}
+	if stringStats := byPid[4245]; stringStats.Cache.Hits != 0 || stringStats.Rtk.Rewrites != 0 {
+		t.Errorf("4245 string leaves = %+v", stringStats)
+	}
+
+	// budgets_json is an object, never NULL.
+	conn, err := openDB()
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+	budgets := queryStrings(t, conn, "SELECT budgets_json FROM sessions WHERE pid = 4242")
+	if len(budgets) != 1 || budgets[0] != "{}" {
+		t.Fatalf("budgets_json = %v, want [{}]", budgets)
 	}
 }
 

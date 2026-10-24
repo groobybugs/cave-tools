@@ -67,9 +67,29 @@ func TestRedactSecrets(t *testing.T) {
 			want:  "jwt [REDACTED:JWT]",
 		},
 		{
-			name:  "database url drops the at sign like TS",
+			name:  "database url keeps the at sign",
 			input: "postgres://user:s3cr3tp4ss@host:5432/db",
-			want:  "postgres://user:[REDACTED:Database URL]host:5432/db",
+			want:  "postgres://user:[REDACTED:Database URL]@host:5432/db",
+		},
+		{
+			name:  "postgresql url",
+			input: "postgresql://app:s3cret@db/x",
+			want:  "postgresql://app:[REDACTED:Database URL]@db/x",
+		},
+		{
+			name:  "mongodb srv url",
+			input: "mongodb+srv://u:pw1@c.example.net/db",
+			want:  "mongodb+srv://u:[REDACTED:Database URL]@c.example.net/db",
+		},
+		{
+			name:  "redis url with empty user",
+			input: "redis://:pw@cache:6379",
+			want:  "redis://:[REDACTED:Database URL]@cache:6379",
+		},
+		{
+			name:  "rediss url",
+			input: "rediss://u:pw2@cache:6380",
+			want:  "rediss://u:[REDACTED:Database URL]@cache:6380",
 		},
 		{
 			name:  "api key param beats github token",
@@ -89,12 +109,12 @@ func TestRedactSecrets(t *testing.T) {
 		{
 			name:  "rsa private key block",
 			input: "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----",
-			want:  "-----BEGIN RSA PRIVATE KEY-----[REDACTED:Private key block]",
+			want:  "-----BEGIN RSA PRIVATE KEY-----[REDACTED:Private key block]-----END RSA PRIVATE KEY-----",
 		},
 		{
 			name:  "private key block",
 			input: "-----BEGIN PRIVATE KEY-----\nMIIEow\n-----END PRIVATE KEY-----",
-			want:  "-----BEGIN PRIVATE KEY-----[REDACTED:Private key block]",
+			want:  "-----BEGIN PRIVATE KEY-----[REDACTED:Private key block]-----END PRIVATE KEY-----",
 		},
 		{
 			name:  "no secret",
