@@ -35,10 +35,10 @@ func TestPlatformKey(t *testing.T) {
 
 func TestBinDirAndCachedBinPath(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	ctx := w1bCtx(t, t.TempDir(), map[string]string{"HOME": home, "USERPROFILE": home, "LOCALAPPDATA": ""})
 	t.Setenv("LOCALAPPDATA", "")
 
-	got := BinDir()
+	got := BinDir(ctx)
 	want := filepath.Join(home, ".local", "share", "cave-tools", "bin")
 	if goruntime.GOOS == "windows" {
 		want = filepath.Join(home, "AppData", "Local", "cave-tools", "bin")
@@ -46,8 +46,28 @@ func TestBinDirAndCachedBinPath(t *testing.T) {
 	if got != want {
 		t.Fatalf("BinDir = %q, want %q", got, want)
 	}
-	if got := CachedBinPath(BinRg); got != filepath.Join(want, exeName(BinRg)) {
+	if got := CachedBinPath(ctx, BinRg); got != filepath.Join(want, exeName(BinRg)) {
 		t.Fatalf("CachedBinPath = %q", got)
+	}
+
+	// TS bug: binDir read process.env directly, so a daemon client got the
+	// server's bin dir. It must use the call env.
+	callHome := t.TempDir()
+	callCtx := w1bCtx(t, t.TempDir(), map[string]string{
+		"HOME": callHome, "USERPROFILE": callHome, "LOCALAPPDATA": filepath.Join(callHome, "AppData", "Local"),
+	})
+	callWant := filepath.Join(callHome, ".local", "share", "cave-tools", "bin")
+	if goruntime.GOOS == "windows" {
+		callWant = filepath.Join(callHome, "AppData", "Local", "cave-tools", "bin")
+	}
+	if got := BinDir(callCtx); got != callWant {
+		t.Fatalf("BinDir(call env) = %q, want %q", got, callWant)
+	}
+
+	// Without a call env it falls back to the process home.
+	t.Setenv("HOME", home)
+	if got := BinDir(w1bCtx(t, t.TempDir(), nil)); got != want {
+		t.Fatalf("BinDir(fallback home) = %q, want %q", got, want)
 	}
 }
 
@@ -286,7 +306,8 @@ func TestEnsureBinsResolvesFromPath(t *testing.T) {
 func TestResolveTool(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	cached := filepath.Join(BinDir(), exeName(BinRg))
+	ctx := w1bCtx(t, t.TempDir(), map[string]string{"HOME": home, "USERPROFILE": home, "LOCALAPPDATA": ""})
+	cached := CachedBinPath(ctx, BinRg)
 	if err := os.MkdirAll(filepath.Dir(cached), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +321,7 @@ func TestResolveTool(t *testing.T) {
 		return "", nil
 	}
 
-	ctx := w1bCtx(t, t.TempDir(), map[string]string{"PATH": ""})
+	ctx = w1bCtx(t, t.TempDir(), map[string]string{"PATH": ""})
 	if got := resolveTool(ctx, BinRg, "", nil); got != cached {
 		t.Fatalf("resolveTool cached = %q, want %q", got, cached)
 	}

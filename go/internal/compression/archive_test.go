@@ -147,9 +147,47 @@ func TestArchiveThresholdBoundary(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("at threshold = %+v, %v; want archived", got, err)
 	}
-	// 50000 chars on one line: TS still prints the negative line remainder.
-	if !strings.Contains(got.Summary, "(-29 lines archived)") {
-		t.Fatalf("summary = %q, want (-29 lines archived)", got.Summary)
+	// One huge line: a line-based head/tail would keep everything, so the
+	// summary cuts by chars instead of printing a negative line count.
+	want := strings.Repeat("x", 1000) + "\n\n... (48500 chars archived) ...\n\n" + strings.Repeat("x", 500)
+	if got.Summary != want {
+		t.Fatalf("summary = %q, want %q", got.Summary, want)
+	}
+	if regexp.MustCompile(`-\d+ lines archived`).MatchString(got.Summary) {
+		t.Fatalf("summary = %q, want no negative line count", got.Summary)
+	}
+}
+
+// TestArchiveFewHugeLinesUTF16 pins the char cut to String.prototype.slice
+// semantics: UTF-16 code units, where cutting a surrogate pair leaves a lone
+// surrogate that Node serialises as U+FFFD.
+func TestArchiveFewHugeLinesUTF16(t *testing.T) {
+	// 1 + 30000 astral chars = 60001 UTF-16 units on one line.
+	output := "a" + strings.Repeat("\U0001F600", 30000)
+	got, err := ArchiveIfLarge(output, "emoji")
+	if err != nil || got == nil {
+		t.Fatalf("ArchiveIfLarge = %+v, %v; want archived", got, err)
+	}
+	wantHead := "a" + strings.Repeat("\U0001F600", 499) + "\uFFFD"
+	wantTail := strings.Repeat("\U0001F600", 250)
+	want := wantHead + "\n\n... (58501 chars archived) ...\n\n" + wantTail
+	if got.Summary != want {
+		t.Fatalf("summary = %q, want %q", got.Summary, want)
+	}
+}
+
+// TestArchiveManyLinesKeepsLineSummary covers the unchanged line-based path.
+func TestArchiveManyLinesKeepsLineSummary(t *testing.T) {
+	lines := make([]string, 10000)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+	got, err := ArchiveIfLarge(strings.Join(lines, "\n"), "many")
+	if err != nil || got == nil {
+		t.Fatalf("ArchiveIfLarge = %+v, %v; want archived", got, err)
+	}
+	if !strings.Contains(got.Summary, "(9970 lines archived)") {
+		t.Fatalf("summary = %q, want (9970 lines archived)", got.Summary)
 	}
 }
 

@@ -257,6 +257,10 @@ func ColoredMeter(percent float64, width int, color bool) string {
 	clamped := math.Max(0, math.Min(100, percent))
 	filled := int(math.Round((clamped / 100) * float64(width)))
 	empty := width - filled
+	if math.IsNaN(clamped) {
+		// TS: "x".repeat(NaN) is "", so both halves are empty.
+		filled, empty = 0, 0
+	}
 	fillChar, emptyChar := "█", "░"
 	if UseASCII() {
 		fillChar, emptyChar = "#", "-"

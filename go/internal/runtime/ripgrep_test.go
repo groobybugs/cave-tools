@@ -456,6 +456,33 @@ func TestRgGrepParsesMatches(t *testing.T) {
 			t.Fatalf("matches = %#v", result.Matches)
 		}
 	})
+
+	// TS bug: rg omits line_number for some inputs, and Number(undefined) is
+	// NaN. A missing (or non-numeric) line number must be 0, not NaN.
+	t.Run("missing line number is zero", func(t *testing.T) {
+		env := GetEnv(ctx)
+		env["RGMOCK_EXIT"] = ""
+		env["RGMOCK_ERR"] = ""
+		body := `{"type":"match","data":{"path":{"text":"a.txt"},"lines":{"text":"héllo ✓\n"}}}` + "\n" +
+			`{"type":"match","data":{"path":{"text":"b.txt"},"lines":{"text":"x\n"},"line_number":"5"}}` + "\n"
+		if err := os.WriteFile(mockPath(t, ctx, "RGMOCK"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		result, err := RgGrep(ctx, RgGrepInput{Cwd: t.TempDir(), Pattern: "h", Limit: 10})
+		if err != nil {
+			t.Fatalf("RgGrep: %v", err)
+		}
+		if len(result.Matches) != 2 {
+			t.Fatalf("matches = %#v", result.Matches)
+		}
+		if result.Matches[0].Line != 0 {
+			t.Errorf("missing line_number = %d, want 0", result.Matches[0].Line)
+		}
+		// Number.isFinite("5") is false too: only JSON numbers count.
+		if result.Matches[1].Line != 0 {
+			t.Errorf("string line_number = %d, want 0", result.Matches[1].Line)
+		}
+	})
 }
 
 func TestRgGrepWithoutRipgrep(t *testing.T) {
