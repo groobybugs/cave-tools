@@ -1,7 +1,8 @@
 // Package jsre translates the JavaScript regular expressions used by the
 // TypeScript implementation into RE2 patterns with identical matching, and
 // provides JavaScript's whitespace semantics (`\s`, `String.prototype.trim`,
-// `String.prototype.split(/\s+/)`).
+// `String.prototype.split(/\s+/)`). ToLowerJS mirrors
+// `String.prototype.toLowerCase`, including SpecialCasing and Final_Sigma.
 //
 // Go's RE2 differs from ECMAScript in three ways that matter for the port:
 //

@@ -260,7 +260,7 @@ func checkExpectedHash(expected any, sourceBytes []byte) *types.ToolResult {
 	if expected == nil {
 		return nil
 	}
-	want := strings.ToLower(jsre.Trim(jsStringValue(expected)))
+	want := jsre.ToLowerJS(jsre.Trim(jsStringValue(expected)))
 	if want == "" {
 		return nil
 	}
@@ -298,7 +298,7 @@ func checkRangeChecksumOrError(content string, startLine, endLine int, expected 
 		return errResultPtr("checksum failed")
 	}
 	message := result.Error + "\n" +
-		"expected: " + sliceHex(strings.ToLower(jsre.Trim(jsStringValue(expected))), 0, 16) + "\n" +
+		"expected: " + utf16Slice(jsre.ToLowerJS(jsre.Trim(jsStringValue(expected))), 0, 16) + "\n" +
 		"actual:   " + result.Actual + "\n"
 	if result.Window != "" {
 		message += "window:\n" + result.Window

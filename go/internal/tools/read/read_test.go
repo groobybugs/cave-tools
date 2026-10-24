@@ -860,3 +860,36 @@ func TestSuggestPathsCases(t *testing.T) {
 		t.Fatalf("missing dir = %q, want empty", got)
 	}
 }
+
+// TestSuggestPathsJSUnicodeCase pins String.prototype.toLowerCase parity for
+// non-ASCII names. Values measured with node 24.19.0:
+//
+//	"imatch".toLowerCase()   = "imatch"
+//	"\u0130match".toLowerCase() = "i\u0307match"   (U+0130 -> U+0069 U+0307)
+//	"\u0391\u03a3".toLowerCase() = "\u03b1\u03c2" (final sigma -> U+03C2)
+func TestSuggestPathsJSUnicodeCase(t *testing.T) {
+	dir := t.TempDir()
+	dottedI := "\u0130match.txt"
+	for _, name := range []string{dottedI, "imatch.txt", "\u0391\u03a3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	if got, want := suggestPaths(filepath.Join(dir, "imatch")),
+		"\n\nDid you mean one of these?\n"+filepath.Join(dir, "imatch.txt"); got != want {
+		t.Fatalf("ascii needle = %q, want %q", got, want)
+	}
+	if got, want := suggestPaths(filepath.Join(dir, dottedI)),
+		"\n\nDid you mean one of these?\n"+filepath.Join(dir, dottedI); got != want {
+		t.Fatalf("dotted-I needle = %q, want %q", got, want)
+	}
+	// Word-final sigma lowercases to U+03C2, so the ASCII "σ" needle misses.
+	if got := suggestPaths(filepath.Join(dir, "\u03b1\u03c3")); got != "" {
+		t.Fatalf("sigma needle = %q, want empty", got)
+	}
+	if got, want := suggestPaths(filepath.Join(dir, "\u03b1\u03c2")),
+		"\n\nDid you mean one of these?\n"+filepath.Join(dir, "\u0391\u03a3"); got != want {
+		t.Fatalf("final-sigma needle = %q, want %q", got, want)
+	}
+}

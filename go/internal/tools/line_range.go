@@ -475,7 +475,7 @@ type VerifyRangeChecksumResult struct {
 // match or expected as a prefix of actual (the footer may shorten later).
 // port of src/tools/line-range.ts:verifyRangeChecksum
 func VerifyRangeChecksum(content string, startLine, endLine int, expected string) VerifyRangeChecksumResult {
-	want := strings.ToLower(jsre.Trim(expected))
+	want := jsre.ToLowerJS(jsre.Trim(expected))
 	if utf16Len(want) < 4 {
 		return VerifyRangeChecksumResult{
 			Error: "expected_range_checksum must be at least 4 hex characters",

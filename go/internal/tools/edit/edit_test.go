@@ -1324,3 +1324,32 @@ func TestFindClosestLineHintUTF16(t *testing.T) {
 		t.Fatalf("preview must stop before the emoji: %q", got)
 	}
 }
+
+// TestCheckRangeChecksumOrErrorJSUnicodeCase pins the `expected:` preview,
+// which mirrors `String(expected).trim().toLowerCase().slice(0, 16)` in
+// src/tools/edit.ts. Values measured with node 24.19.0:
+//
+//	"\u0391\u03a3\u0391\u03a3\u0391\u03a3".toLowerCase() = "\u03b1\u03c3\u03b1\u03c3\u03b1\u03c2"
+//	"\u0130".repeat(10).toLowerCase().slice(0, 16)      = "i\u0307".repeat(8)
+//	"\u0130\u03a3\u0130\u03a3".toLowerCase()            = "i\u0307\u03c3i\u0307\u03c2"
+func TestCheckRangeChecksumOrErrorJSUnicodeCase(t *testing.T) {
+	content := "a\nb\nc\n"
+	cases := []struct {
+		name     string
+		expected string
+		wantLine string
+	}{
+		{"final sigma", "\u0391\u03a3\u0391\u03a3\u0391\u03a3", "expected: \u03b1\u03c3\u03b1\u03c3\u03b1\u03c2"},
+		{"dotted I expands", strings.Repeat("\u0130", 10), "expected: " + strings.Repeat("i\u0307", 8)},
+		{"mixed", "\u0130\u03a3\u0130\u03a3", "expected: i\u0307\u03c3i\u0307\u03c2"},
+	}
+	for _, tc := range cases {
+		result := checkRangeChecksumOrError(content, 1, 1, tc.expected)
+		if result == nil || !result.IsError {
+			t.Fatalf("%s: want an error, got %+v", tc.name, result)
+		}
+		if got := resultText(*result); !strings.Contains(got, tc.wantLine+"\n") {
+			t.Fatalf("%s: message %q missing %q", tc.name, got, tc.wantLine)
+		}
+	}
+}
