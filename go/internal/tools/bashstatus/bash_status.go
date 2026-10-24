@@ -92,9 +92,11 @@ func truncateCommand(command string) string {
 
 // nonnegativeInteger is TS's nonnegativeInteger(value, fallback): undefined
 // yields fallback, anything else must parse as a finite non-negative number
-// and is floored. The second result is false where TS returns null.
+// and is floored. The result stays a JS number: values above MaxInt64 must not
+// be clamped because JS compares and prints them as-is. The second result is
+// false where TS returns null.
 // port of src/tools/bash-status.ts:nonnegativeInteger
-func nonnegativeInteger(value any, defined bool, fallback int64) (int64, bool) {
+func nonnegativeInteger(value any, defined bool, fallback float64) (float64, bool) {
 	if !defined {
 		return fallback, true
 	}
@@ -102,17 +104,15 @@ func nonnegativeInteger(value any, defined bool, fallback int64) (int64, bool) {
 	if math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < 0 {
 		return 0, false
 	}
-	if parsed >= math.MaxInt64 {
-		return math.MaxInt64, true
-	}
-	return int64(math.Floor(parsed)), true
+	return math.Floor(parsed), true
 }
 
-// limitIncrementalLines keeps at most maxLines complete lines.
+// limitIncrementalLines keeps at most maxLines complete lines. maxLines stays
+// fractional like TS; the loop compares with `<` before any slice boundary.
 // port of src/tools/bash-status.ts:limitIncrementalLines
-func limitIncrementalLines(text string, maxLines int64) (string, int64, bool) {
+func limitIncrementalLines(text string, maxLines float64) (string, int64, bool) {
 	end := 0
-	for line := int64(0); line < maxLines; line++ {
+	for line := 0; float64(line) < maxLines; line++ {
 		index := strings.Index(text[end:], "\n")
 		if index == -1 {
 			return text, int64(len(text)), false
@@ -230,17 +230,15 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 			"(log output omitted; tail_lines=0 read no log bytes; use cursor=0 to read existing output)",
 		), "\n")
 	case hasCursor:
-		chunk := rt.ReadFileChunk(job.LogPath, cursor, tailReadBytes)
-		budgetLines := int64(compression.GetBudget("bash").MaxLines - 8)
-		if budgetLines < 1 {
-			budgetLines = 1
-		}
-		limitedText, consumedBytes, limited := limitIncrementalLines(chunk.Text, min64(tailLines, budgetLines))
+		chunk := rt.ReadFileChunk(job.LogPath, cursorForRead(cursor), tailReadBytes)
+		budgetLines := math.Max(1, compression.GetBudget("bash").MaxLines-8)
+		limitedText, consumedBytes, limited := limitIncrementalLines(chunk.Text, math.Min(tailLines, budgetLines))
 		nextCursor := chunk.StartCursor + consumedBytes
 		hasMore := nextCursor < chunk.FileSize
 		notes := make([]string, 0, 2)
 		if chunk.CursorReset {
-			notes = append(notes, "cursor_reset: "+strconv.FormatInt(chunk.RequestedCursor, 10)+
+			// TS prints the requested JS number, not a clamped cursor.
+			notes = append(notes, "cursor_reset: "+jsNumberString(cursor)+
 				" exceeded log size; resumed at 0")
 		}
 		if hasMore {
@@ -273,10 +271,9 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 		chunk := rt.ReadFileChunk(job.LogPath, start, tailReadBytes)
 		tail := chunk.Text
 		lines := strings.Split(tail, "\n")
-		lineTruncated := false
-		if int64(len(lines)) > tailLines {
-			tail = strings.Join(lines[len(lines)-int(tailLines):], "\n")
-			lineTruncated = true
+		lineTruncated := float64(len(lines)) > tailLines
+		if lineTruncated {
+			tail = strings.Join(jsSliceFromEnd(lines, tailLines), "\n")
 		}
 		tailTruncated := chunk.StartCursor > 0 || lineTruncated
 		body := jsre.TrimEnd(tail)
@@ -305,11 +302,32 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 	}, nil
 }
 
-func min64(a, b int64) int64 {
-	if a < b {
-		return a
+// cursorForRead converts the JS cursor to ReadFileChunk's int64. A huge JS
+// number only ever matters as "past the end of the log", so saturating here is
+// safe; the reset note prints the original JS value instead.
+func cursorForRead(cursor float64) int64 {
+	if cursor >= math.MaxInt64 {
+		return math.MaxInt64
 	}
-	return b
+	return int64(cursor)
+}
+
+// jsSliceFromEnd mirrors Array.prototype.slice(-count): ToIntegerOrInfinity
+// truncates, a relative start below zero clamps to the array start and a value
+// above the length clamps to the end.
+func jsSliceFromEnd(lines []string, count float64) []string {
+	relativeStart := math.Trunc(-count)
+	length := float64(len(lines))
+	start := relativeStart
+	if relativeStart < 0 {
+		start = math.Max(length+relativeStart, 0)
+	} else {
+		start = math.Min(relativeStart, length)
+	}
+	if math.IsNaN(start) || start < 0 {
+		start = 0
+	}
+	return lines[int(start):]
 }
 
 func textResult(text string) types.ToolResult {

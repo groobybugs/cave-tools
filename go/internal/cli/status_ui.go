@@ -47,9 +47,9 @@ type RtkGainSummary struct {
 // Budget is the rendered part of one tool's line budget.
 // port of src/status-ui.ts:StatusRenderInput budgets value
 type Budget struct {
-	MaxLines  int64 `json:"maxLines"`
-	HeadLines int64 `json:"headLines"`
-	TailLines int64 `json:"tailLines"`
+	MaxLines  float64 `json:"maxLines"`
+	HeadLines float64 `json:"headLines"`
+	TailLines float64 `json:"tailLines"`
 }
 
 // BudgetEntry keeps the insertion order TS's Object.entries(budgets) renders;
@@ -649,16 +649,16 @@ func appendBudgets(lines *[]string, input StatusRenderInput, color bool, full bo
 		for _, entry := range entries {
 			b := entry.Value
 			*lines = append(*lines, "  "+pad(entry.Name, 12)+" "+
-				paint(color, styleDim, "max")+"="+strconv.FormatInt(b.MaxLines, 10)+"  "+
-				paint(color, styleDim, "head")+"="+strconv.FormatInt(b.HeadLines, 10)+"  "+
-				paint(color, styleDim, "tail")+"="+strconv.FormatInt(b.TailLines, 10))
+				paint(color, styleDim, "max")+"="+jsNumberToString(b.MaxLines)+"  "+
+				paint(color, styleDim, "head")+"="+jsNumberToString(b.HeadLines)+"  "+
+				paint(color, styleDim, "tail")+"="+jsNumberToString(b.TailLines))
 		}
 	} else {
 		parts := make([]string, 0, len(entries))
 		for _, entry := range entries {
 			b := entry.Value
 			parts = append(parts, entry.Name+" "+paint(color, styleDim,
-				strconv.FormatInt(b.MaxLines, 10)+"/"+strconv.FormatInt(b.HeadLines, 10)+"/"+strconv.FormatInt(b.TailLines, 10)))
+				jsNumberToString(b.MaxLines)+"/"+jsNumberToString(b.HeadLines)+"/"+jsNumberToString(b.TailLines)))
 		}
 		separator := paint(color, styleDim, "  ·  ")
 		for i := 0; i < len(parts); i += 3 {
@@ -683,6 +683,60 @@ func appendVerbose(lines *[]string, input StatusRenderInput, color bool) {
 }
 
 // ── JS number / string helpers ─────────────────────────────────────
+
+// jsNumberToString mirrors ECMAScript Number::toString(10), used when a
+// budget number is interpolated into the status table.
+func jsNumberToString(value float64) string {
+	if math.IsNaN(value) {
+		return "NaN"
+	}
+	if math.IsInf(value, 1) {
+		return "Infinity"
+	}
+	if math.IsInf(value, -1) {
+		return "-Infinity"
+	}
+	if value == 0 {
+		return "0"
+	}
+	negative := value < 0
+	if negative {
+		value = -value
+	}
+	repr := strconv.FormatFloat(value, 'e', -1, 64)
+	mantissa, exponentPart, _ := strings.Cut(repr, "e")
+	exponent, _ := strconv.Atoi(exponentPart)
+	digits := strings.Replace(mantissa, ".", "", 1)
+	n := len(digits)
+	k := exponent + 1
+	var out string
+	switch {
+	case k > 0 && k <= 21:
+		if n <= k {
+			out = digits + strings.Repeat("0", k-n)
+		} else {
+			out = digits[:k] + "." + digits[k:]
+		}
+	case k <= 0 && k > -6:
+		out = "0." + strings.Repeat("0", -k) + digits
+	default:
+		if n == 1 {
+			out = digits
+		} else {
+			out = digits[:1] + "." + digits[1:]
+		}
+		exponentOut := k - 1
+		if exponentOut >= 0 {
+			out += "e+" + strconv.Itoa(exponentOut)
+		} else {
+			out += "e-" + strconv.Itoa(-exponentOut)
+		}
+	}
+	if negative {
+		return "-" + out
+	}
+	return out
+}
 
 // jsToFixed mirrors Number.prototype.toFixed, including its round-half-away
 // rule: Go's strconv rounds half to even, which would turn 14.5k into "14k".

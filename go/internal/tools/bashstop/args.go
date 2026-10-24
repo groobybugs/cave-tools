@@ -59,6 +59,15 @@ func jsString(value any) string {
 	}
 }
 
+// jsArgString mirrors String(args[key]) where a missing key is ECMAScript
+// undefined. A present JSON null still becomes "null".
+func jsArgString(args map[string]any, key string) string {
+	if value, ok := args[key]; ok {
+		return jsString(value)
+	}
+	return "undefined"
+}
+
 // jsNumberString mirrors ECMAScript Number::toString(10) closely enough for
 // the values tool arguments carry.
 func jsNumberString(value float64) string {

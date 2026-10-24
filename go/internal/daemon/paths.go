@@ -46,12 +46,16 @@ func collectJS(dir string, out *[]string) error {
 }
 
 // tsDistDir locates the compiled TypeScript tree that src/daemon/paths.ts gets
-// from import.meta.url. The Go binary has no module URL, so it walks up from
-// its own directory and then from the working directory to the repository root
-// (a directory with both package.json and dist/).
+// from import.meta.url. The Go binary has no module URL, so it honours
+// CAVE_TOOLS_GO_DIST_DIR (set by the spawning Go client) and otherwise walks up
+// from its own directory and then from the working directory to the repository
+// root (a directory with both package.json and dist/).
 //
 // This is what lets the Go client derive the same daemon key as a TS daemon.
 func tsDistDir() (string, error) {
+	if hinted := os.Getenv(distDirEnv); hinted != "" && isDirectory(hinted) {
+		return hinted, nil
+	}
 	var starts []string
 	if exe, err := os.Executable(); err == nil {
 		starts = append(starts, filepath.Dir(exe))

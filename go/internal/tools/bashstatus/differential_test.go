@@ -69,6 +69,16 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 			args: `{"jobId":"j-diff-cursor","cursor":0,"tail_lines":100,"__sessionId":"diff-cursor"}`,
 		},
 		{
+			name: "missing-job-id-lists",
+			jobs: jobs(exitedJob("j-diff-null-id", "diff-null-id")),
+			args: `{"__sessionId":"diff-null-id"}`,
+		},
+		{
+			name: "null-job-id",
+			jobs: "",
+			args: `{"jobId":null,"__sessionId":"diff-null-id"}`,
+		},
+		{
 			name: "unknown-job",
 			jobs: "",
 			args: `{"jobId":"j-diff-nope","__sessionId":"diff-nope"}`,
@@ -105,6 +115,26 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 			name: "list-empty",
 			jobs: "",
 			args: `{"__sessionId":"diff-empty"}`,
+		},
+		{
+			name: "huge-tail-lines",
+			jobs: jobs(exitedJob("j-diff-huge-tail", "diff-huge-tail")),
+			args: `{"jobId":"j-diff-huge-tail","tail_lines":1e300,"__sessionId":"diff-huge-tail"}`,
+		},
+		{
+			name: "huge-cursor-exponent",
+			jobs: jobs(exitedJob("j-diff-huge-cursor", "diff-huge-cursor")),
+			args: `{"jobId":"j-diff-huge-cursor","cursor":1e300,"tail_lines":100,"__sessionId":"diff-huge-cursor"}`,
+		},
+		{
+			name: "huge-cursor-fixed",
+			jobs: jobs(exitedJob("j-diff-huge-cursor-fixed", "diff-huge-cursor-fixed")),
+			args: `{"jobId":"j-diff-huge-cursor-fixed","cursor":1e19,"tail_lines":100,"__sessionId":"diff-huge-cursor-fixed"}`,
+		},
+		{
+			name: "fractional-tail-lines",
+			jobs: jobs(exitedJob("j-diff-fractional-tail", "diff-fractional-tail")),
+			args: `{"jobId":"j-diff-fractional-tail","tail_lines":2.5,"__sessionId":"diff-fractional-tail"}`,
 		},
 		{
 			name: "tail-truncated",

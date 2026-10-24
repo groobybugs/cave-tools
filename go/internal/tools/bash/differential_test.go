@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"testing"
 	"time"
 
@@ -191,4 +192,142 @@ func decodeJSON(t *testing.T, raw []byte) any {
 		t.Fatalf("invalid JSON %q: %v", raw, err)
 	}
 	return value
+}
+
+// TestDifferentialMissingCommand pins String(args.command): a missing key is
+// `undefined`, not `null`. Both sides get a PATH whose first entry has scripts
+// named after the two spellings, so the executed command is visible.
+func TestDifferentialMissingCommand(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("the fixture commands are POSIX shell scripts")
+	}
+	nodePath, distModule := differentialDeps(t, "bash")
+	fixture := t.TempDir()
+	binDir := t.TempDir()
+	for name, output := range map[string]string{"undefined": "ran-undefined", "null": "ran-null"} {
+		script := "#!/bin/sh\necho " + output + "\n"
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := map[string]string{
+		"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	cases := []struct{ name, args string }{
+		{name: "missing-command", args: `{}`},
+		{name: "null-command", args: `{"command":null}`},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			tsData := t.TempDir()
+			overrides := map[string]string{
+				"CAVE_TOOLS_DATA_DIR": tsData,
+				"CLAUDE_CONFIG_DIR":   filepath.Join(tsData, "claude"),
+			}
+			for key, value := range env {
+				overrides[key] = value
+			}
+			tsJSON := runTypeScriptHandlerEnv(t, nodePath, distModule, "bashTool", testCase.args, fixture, overrides)
+			goJSON := runGoHandlerEnv(t, fixture, testCase.args, env)
+			if !reflect.DeepEqual(tsJSON, goJSON) {
+				t.Fatalf("TS and Go disagree\nTS: %#v\nGo: %#v", tsJSON, goJSON)
+			}
+		})
+	}
+}
+
+// TestDifferentialFractionalTimeout pins Node's timer clamp: setTimeout(0.5)
+// fires after 1ms, so a fractional timeout below 1ms still kills the process.
+// Casting it to int64 would disable the timer entirely.
+func TestDifferentialFractionalTimeout(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("`sleep` comes from the POSIX shell")
+	}
+	nodePath, distModule := differentialDeps(t, "bash")
+	fixture := t.TempDir()
+	tsData := t.TempDir()
+	args := `{"command":"sleep 0.2","description":"fractional timeout","timeout":0.5}`
+	tsJSON := runTypeScriptHandler(t, nodePath, distModule, "bashTool", args, fixture, tsData)
+	goJSON := runGoHandler(t, fixture, args)
+	if !reflect.DeepEqual(tsJSON, goJSON) {
+		t.Fatalf("TS and Go disagree\nTS: %#v\nGo: %#v", tsJSON, goJSON)
+	}
+}
+
+// TestDifferentialPathErrors pins the Node errno text for the two portable
+// non-ENOENT stat failures a workdir can hit: ENOTDIR and ELOOP.
+func TestDifferentialPathErrors(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("errno text and symlink creation differ on Windows")
+	}
+	nodePath, distModule := differentialDeps(t, "bash")
+	fixture := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fixture, "note.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("loop", filepath.Join(fixture, "loop")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	cases := []struct{ name, workdir string }{
+		{name: "enotdir", workdir: "note.txt/child"},
+		{name: "eloop", workdir: "loop"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			args := `{"command":"echo hi","description":"d","workdir":"` + testCase.workdir + `"}`
+			tsData := t.TempDir()
+			tsJSON := runTypeScriptHandler(t, nodePath, distModule, "bashTool", args, fixture, tsData)
+			goJSON := runGoHandler(t, fixture, args)
+			if !reflect.DeepEqual(tsJSON, goJSON) {
+				t.Fatalf("TS and Go disagree\nTS: %#v\nGo: %#v", tsJSON, goJSON)
+			}
+		})
+	}
+}
+
+// runTypeScriptHandlerEnv is runTypeScriptHandler with extra environment
+// values merged over the hermetic CAVE_TOOLS defaults.
+func runTypeScriptHandlerEnv(t *testing.T, nodePath, module, export, argsJSON, cwd string, extra map[string]string) any {
+	t.Helper()
+	env := map[string]string{
+		"CAVE_DIFF_MODULE": module,
+		"CAVE_DIFF_EXPORT": export,
+		"CAVE_DIFF_ARGS":   argsJSON,
+	}
+	for key, value := range extra {
+		env[key] = value
+	}
+	return runNodeJSON(t, nodePath, handlerScript, env, cwd)
+}
+
+// runGoHandlerEnv is runGoHandler with extra environment values.
+func runGoHandlerEnv(t *testing.T, cwd, argsJSON string, extra map[string]string) any {
+	t.Helper()
+	env := rt.EnvFromEnviron(os.Environ())
+	for key, value := range extra {
+		env[key] = value
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		t.Fatalf("args: %v", err)
+	}
+	var result any
+	rt.RunWithContext(context.Background(), &rt.CallContext{
+		SessionID: "differential",
+		Cwd:       cwd,
+		Env:       env,
+		ClientID:  "local",
+	}, func(ctx context.Context) struct{} {
+		output, err := Tool.Handler(ctx, args)
+		if err != nil {
+			t.Fatalf("go handler: %v", err)
+		}
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			t.Fatalf("marshal go result: %v", err)
+		}
+		result = decodeJSON(t, encoded)
+		return struct{}{}
+	})
+	return result
 }
