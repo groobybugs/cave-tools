@@ -3,7 +3,11 @@
 package websearch
 
 import (
+	"bufio"
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -13,6 +17,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -62,12 +67,96 @@ type webSearchInput struct {
 	redactSecrets        bool
 }
 
+const (
+	// maxRedirects is Node fetch's redirect limit (undici follows 20 hops and
+	// fails the request that would need a 21st).
+	maxRedirects = 20
+	// acceptEncoding is what Node fetch advertises. "br" is not advertised:
+	// the standard library has no Brotli decoder and no new dependency is
+	// allowed.
+	acceptEncoding = "gzip, deflate"
+)
+
 var (
 	// httpClient issues JSON-RPC requests. Tests may replace it.
 	httpClient          = &http.Client{}
 	errFetchFailed      = errors.New("fetch failed")
 	errOperationAborted = errors.New("This operation was aborted")
 )
+
+// doRequest applies the fetch redirect policy to the package client. Tests
+// replace httpClient, so the policy must be installed per request.
+func doRequest(request *http.Request) (*http.Response, error) {
+	client := *httpClient
+	client.CheckRedirect = checkRedirect
+	return client.Do(request)
+}
+
+// checkRedirect mirrors Node fetch: at most twenty followed redirects, and
+// Authorization is dropped when a hop changes origin (scheme, host or port).
+func checkRedirect(request *http.Request, via []*http.Request) error {
+	if len(via) > maxRedirects {
+		return errors.New("redirect count exceeded")
+	}
+	if len(via) > 0 && !sameOrigin(via[len(via)-1].URL, request.URL) {
+		request.Header.Del("Authorization")
+	}
+	return nil
+}
+
+// sameOrigin is the fetch "same origin" test (ports are part of the origin).
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+}
+
+// contentEncoding normalizes the Content-Encoding header; an empty result means
+// no decoding is needed.
+func contentEncoding(header http.Header) string {
+	value := strings.ToLower(strings.TrimSpace(header.Get("Content-Encoding")))
+	if value == "" || value == "identity" {
+		return ""
+	}
+	return value
+}
+
+// decodedBody wraps a response body with the matching standard-library
+// decompressor. Unsupported encodings (notably "br") pass through unchanged:
+// Brotli has no standard-library decoder and no new dependency is allowed.
+func decodedBody(body io.Reader, encoding string) (io.Reader, func(), error) {
+	switch encoding {
+	case "gzip", "x-gzip":
+		reader, err := gzip.NewReader(body)
+		if err != nil {
+			return nil, nil, err
+		}
+		return reader, func() { _ = reader.Close() }, nil
+	case "deflate":
+		buffered := bufio.NewReader(body)
+		header, _ := buffered.Peek(2)
+		if isZlibHeader(header) {
+			reader, err := zlib.NewReader(buffered)
+			if err != nil {
+				return nil, nil, err
+			}
+			return reader, func() { _ = reader.Close() }, nil
+		}
+		// HTTP "deflate" is zlib-wrapped by the spec, but raw DEFLATE is
+		// common; Node's fetch accepts both.
+		reader := flate.NewReader(buffered)
+		return reader, func() { _ = reader.Close() }, nil
+	default:
+		return body, func() {}, nil
+	}
+}
+
+// isZlibHeader recognizes the two-byte zlib wrapper (RFC 1950).
+func isZlibHeader(header []byte) bool {
+	if len(header) < 2 {
+		return false
+	}
+	cmf, flg := header[0], header[1]
+	return cmf&0x0F == 8 && (uint16(cmf)<<8|uint16(flg))%31 == 0
+}
 
 // Tool is the cave__websearch tool definition. Annotations, description and
 // inputSchema hold the exact JSON src/tools/websearch.ts declares.
@@ -222,19 +311,34 @@ func ParseWebsearchResponse(body string) (string, bool) {
 // collectBoundedResponse reads the response body under the 256KB cap.
 // port of src/tools/websearch.ts:collectBoundedResponse
 func collectBoundedResponse(response *http.Response) (string, error) {
-	if declared := response.Header.Get("content-length"); declared != "" {
-		if parsed, ok := parseDecimalPrefix(declared); ok && isSafeInteger(parsed) && parsed > MaxResponseBytes {
-			return "", fmt.Errorf("websearch response exceeded %d bytes", MaxResponseBytes)
+	// Node's fetch removes Content-Length once it decodes a response, so the
+	// declared check only applies to identity bodies.
+	encoding := contentEncoding(response.Header)
+	if encoding == "" {
+		if declared := response.Header.Get("content-length"); declared != "" {
+			if parsed, ok := parseDecimalPrefix(declared); ok && isSafeInteger(parsed) && parsed > MaxResponseBytes {
+				return "", fmt.Errorf("websearch response exceeded %d bytes", MaxResponseBytes)
+			}
 		}
 	}
-	data, err := io.ReadAll(response.Body)
+	body := io.Reader(response.Body)
+	if encoding != "" {
+		decoded, closeDecoder, err := decodedBody(response.Body, encoding)
+		if err != nil {
+			return "", err
+		}
+		defer closeDecoder()
+		body = decoded
+	}
+	// Stop at cap+1 so an oversized body is never buffered in full.
+	data, err := io.ReadAll(io.LimitReader(body, MaxResponseBytes+1))
 	if err != nil {
 		return "", err
 	}
 	if len(data) > MaxResponseBytes {
 		return "", fmt.Errorf("websearch response exceeded %d bytes", MaxResponseBytes)
 	}
-	return decodeTextDecoder(data), nil
+	return decodeNodeUTF8(data), nil
 }
 
 // callMcp performs one JSON-RPC tools/call request against a fixed endpoint.
@@ -253,11 +357,12 @@ func callMcp(ctx context.Context, url string, tool string, args any, headers map
 	}
 	request.Header.Set("Accept", "application/json, text/event-stream")
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept-Encoding", acceptEncoding)
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
 
-	response, err := httpClient.Do(request)
+	response, err := doRequest(request)
 	if err != nil {
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
 			return "", false, errOperationAborted
@@ -478,12 +583,10 @@ func envValue(ctx context.Context, name string) string {
 	return runtime.GetEnv(ctx)[name]
 }
 
-// decodeTextDecoder decodes UTF-8 like Node's `new TextDecoder()`: a leading
-// BOM is dropped and every ill-formed maximal subpart becomes U+FFFD.
-func decodeTextDecoder(data []byte) string {
-	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
-		data = data[3:]
-	}
+// decodeNodeUTF8 decodes UTF-8 like Node's `Buffer.toString("utf-8")`: every
+// ill-formed maximal subpart becomes U+FFFD and, unlike TextDecoder, a leading
+// BOM is kept. websearch.ts decodes with Buffer.toString, not TextDecoder.
+func decodeNodeUTF8(data []byte) string {
 	var out strings.Builder
 	out.Grow(len(data))
 	for i := 0; i < len(data); {
@@ -633,10 +736,12 @@ func jsTruthy(value any) bool {
 }
 
 // jsNumber is JavaScript's Number(value): NaN when the value is not numeric.
+// A nil value is JSON null (Number(null) === 0); positiveInt treats 0 and NaN
+// the same, matching `Number(value) || fallback`.
 func jsNumber(value any) float64 {
 	switch v := value.(type) {
 	case nil:
-		return math.NaN()
+		return 0
 	case bool:
 		if v {
 			return 1
@@ -658,6 +763,10 @@ func jsNumber(value any) float64 {
 		return number
 	case string:
 		return numberFromString(v)
+	case []any:
+		// Number(object) runs ToPrimitive: Array's toString is join(","), so
+		// [] and [null] become "" (0) and [1,2] becomes "1,2" (NaN).
+		return numberFromString(jsString(v))
 	default:
 		return math.NaN()
 	}
