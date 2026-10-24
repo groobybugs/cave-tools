@@ -106,10 +106,10 @@ entry layer, `cli` for the CLI, `daemon` for the socket client).
 | `src/dispatch.ts` | `go/internal/server/dispatch.go` | W3i |
 | `src/tool-list.ts` | `go/internal/server/tool_list.go` | W3i |
 | `src/profile.ts` | `go/internal/server/profile.go` | W3i |
-| `src/daemon/server.ts` | `go/internal/daemon/server.go` | W3j |
+| `src/daemon/server.ts` | `go/internal/daemon/server.go` | W4j |
 | `src/daemon/control.ts` | `go/internal/daemon/control.go` | W3j |
 | `src/daemon/paths.ts` | `go/internal/daemon/paths.go` | W3j |
-| `src/daemon-client.ts` | `go/internal/daemon/daemon_client.go` | W3j |
+| `src/daemon-client.ts` | `go/internal/daemon/client.go` | W4j |
 | `src/cli.ts` | `go/internal/cli/cli.go` | W3k |
 | `src/cli-tools.ts` | `go/internal/cli/cli_tools.go` | W3k |
 | `src/status-ui.ts` | `go/internal/cli/status_ui.go` | W3k |
@@ -432,6 +432,8 @@ Accepted runtime deviations (W1b, Muse review):
 - Job `.result.json` with a fractional `exitCode` (only reachable by hand-editing the sidecar) is truncated to an integer in Go; TS keeps the fraction.
 
 - `daemon/control` (Go `bins` run / CLI exec helpers): output above the TS `maxBuffer` is parsed in Go instead of rejected with a maxBuffer error (Muse W2k, low).
+- `daemon` (W4j): the daemon key is TS's dist-derived build id, so the Go client must locate the repository `dist/`. It walks up from the executable and cwd, and a spawning Go client passes `CAVE_TOOLS_GO_DIST_DIR` to the re-executed daemon (which starts in `$HOME` like TS). A standalone Go binary run outside the repository with neither path available cannot derive the key and stays in-process.
+- `daemon-client` (W4j): `types.Content` models text/image/resource only, so an unknown MCP content-block type in a daemon reply is reported as connection-lost (never retried) instead of being passed through as arbitrary JSON (no cave-tools tool emits one).
 
 Accepted compression deviations (W2d, Muse review):
 
