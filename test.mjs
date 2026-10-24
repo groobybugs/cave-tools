@@ -3988,9 +3988,15 @@ process.exit(1);
         const d = await v1('read', 'make', big);
         let after = null;
         let before = null;
-        await p.setup({ tool: {
-          hook: async (name, cb) => { if (name === 'execute.after') after = cb; if (name === 'execute.before') before = cb; return { dispose() {} }; },
-        } });
+        let contextHook = null;
+        await p.setup({
+          session: {
+            hook: async (name, cb) => { if (name === 'context') contextHook = cb; return { dispose() {} }; },
+          },
+          tool: {
+            hook: async (name, cb) => { if (name === 'execute.after') after = cb; if (name === 'execute.before') before = cb; return { dispose() {} }; },
+          },
+        });
         const e = { status: 'completed', tool: 'shell', sessionID: 'ses_9', input: { command: 'make' }, result: { output: { exit: 0 }, content: big, metadata: { x: 1 } } };
         after(e);
         const f = { status: 'completed', tool: 'shell', input: { command: 'make', background: true }, result: { content: big } };
@@ -4003,6 +4009,21 @@ process.exit(1);
           result: { output: { exit: 0, truncated: true, output: big + ptr, status: 'completed' },
             content: [{ type: 'text', text: big + ptr }], metadata: { status: 'completed', truncated: true, exit: 0 } } };
         after(g);
+        const failure = new Error('spawn failed');
+        after({ status: 'error', tool: 'shell', input: { command: 'make' }, error: failure });
+        const validPath = process.env.PATH;
+        process.env.PATH = '/nonexistent';
+        const h = { status: 'completed', tool: 'shell', input: { command: 'make' }, result: { content: big } };
+        after(h);
+        const healthEvent = { system: [], tools: {} };
+        await contextHook(healthEvent);
+        const healthPrompt = healthEvent.system.map((p) => typeof p === 'string' ? p : p.text || '').join('\\n');
+        process.env.PATH = validPath;
+        const recovered = { status: 'completed', tool: 'shell', input: { command: 'make' }, result: { content: big } };
+        after(recovered);
+        const recoveryEvent = { system: [], tools: {} };
+        await contextHook(recoveryEvent);
+        const recoveryPrompt = recoveryEvent.system.map((p) => typeof p === 'string' ? p : p.text || '').join('\\n');
         const w = { tool: 'shell', input: { command: 'ls' } };
         before(w);
         console.log(JSON.stringify({
@@ -4013,6 +4034,10 @@ process.exit(1);
           gMeta: g.result.metadata.truncated, gOut: g.result.output.exit,
           gPtr: g.result.content[0].text.endsWith(ptr.trim()), gOutText: g.result.output.output.length,
           gOutPtr: g.result.output.output.endsWith(ptr.trim()), gSame: g.result.output.output === g.result.content[0].text,
+          errorSame: failure.message === 'spawn failed', hLen: h.result.content.length,
+          health: /Native filter health: \\d+\\/\\d+ compressed, \\d+ no-op, 1 fallback/.test(healthPrompt),
+          recoveredLen: recovered.result.content.length,
+          recoveryClears: !recoveryPrompt.includes('Native filter health'),
         }));`], { encoding: "utf8", env: { ...env, XDG_CONFIG_HOME: xdg, CAVE_TOOLS_MODE: "enforce" } });
       assert.equal(oc.status, 0, oc.stderr);
       const o = JSON.parse(oc.stdout.trim().split("\n").pop());
@@ -4036,6 +4061,11 @@ process.exit(1);
       assert.ok(o.gOutText < big.length / 4, "V2 result.output.output compressed too (model reads it)");
       assert.equal(o.gOutPtr, true, "pointer kept in output.output");
       assert.equal(o.gSame, true, "content and output.output agree");
+      assert.equal(o.errorSame, true, "V2 execution failures expose no mutable shell result");
+      assert.equal(o.hLen, big.length, "filter fallback preserves original output");
+      assert.equal(o.health, true, "fallback surfaces bounded process-local health metrics");
+      assert.ok(o.recoveredLen < big.length / 4, "filter recovers on later success");
+      assert.equal(o.recoveryClears, true, "successful retry clears fallback guidance");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -4047,14 +4077,18 @@ process.exit(1);
     const sources = [
       "claude/skills/cave-tools/SKILL.md", "rules/cave-tools-kiro.md", "rules/cave-tools-hermes.md",
       "scripts/install-agent-instructions.mjs", "src/cli.ts", "src/plugins/opencode/plugin.js", "src/tools/bash-start.ts",
+      "AGENTS.md", "README.md", "rules/cave-discipline.md", "src/plugins/opencode/commands/cave-tools.md", "src/tools/bash.ts",
+      "claude/hooks/cave-tools-recover.js",
     ];
     for (const f of sources) {
       const text = readFileSync(join(process.cwd(), f), "utf8");
       assert.doesNotMatch(text, /exceed ~2-3min|Jobs over ~2 min|Commands >2-3min|over ~2 min/, `${f}: stale blanket long-job rule`);
+      assert.doesNotMatch(text, /native (?:Bash|shell)(?:\/shell)? is fine|cave__bash` also works|Use `cave__bash` instead of the built-in shell|read\/grep\/glob\/bash/, `${f}: stale shell routing rule`);
     }
     const installer = readFileSync(join(process.cwd(), "scripts", "install-agent-instructions.mjs"), "utf8");
     assert.match(installer, /this host does not compress native shell output/, "no-hook hosts told to use cave__bash");
-    assert.match(installer, /native shell output is auto-compressed after it runs/, "opencode block describes filter");
+    assert.match(installer, /native shell is the default/, "opencode block makes native shell default");
+    assert.match(installer, /guaranteed failure compression/, "opencode block keeps failure fallback");
     assert.match(installer, /CAVE_TOOLS_WRAP_BASH=1/);
     console.log("agent instruction tests passed\n");
   }

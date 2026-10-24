@@ -195,9 +195,9 @@ function extractCompactRuleset(skillContent, mode) {
 // found. test.mjs asserts it matches the SKILL.md block.
 function fallbackRuleset(mode) {
   return filterModeRows(
-    'Prefer cave tools over built-ins (same results, fewer tokens):\n' +
+    'Prefer cave file/web/edit tools over built-ins (same results, fewer tokens):\n' +
     '- Read→`cave__read`, Grep→`cave__grep`, Glob→`cave__find`, ls→`cave__ls`, WebSearch/WebFetch→`cave__websearch`/`cave__webfetch`.\n' +
-    '- Native Bash auto-compressed (failures: `cave__bash`); never prefix `cave-tools`/`rtk`.\n' +
+    '- Native Bash default (CLI-filtered); `cave__bash` for RTK/failures; never prefix `cave-tools`/`rtk`.\n' +
     '- Background for servers/watchers; long jobs: `cave__bash_start`/`_status` (`wait` ≤60s). No sleep-poll.\n' +
     '- `[cave: full output … at <path>]`: `cave__read`/`cave__grep` it.\n' +
     '- Edit: `cave__edit` old_string/new_string, or line range after `cave__read` `line_numbers=true` (pass `expected_hash`/`expected_range_checksum`). `cave__write` whole files, `cave__apply_patch` multi-file.\n' +
