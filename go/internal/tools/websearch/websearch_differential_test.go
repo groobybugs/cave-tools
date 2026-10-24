@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -587,5 +588,152 @@ func TestJSCoercionMatrix(t *testing.T) {
 				t.Fatalf("jsString(%v) = %q, want %q", test.value, got, test.want)
 			}
 		})
+	}
+}
+
+// streamingBody serves pre-split chunks and records how much the tool read.
+type streamingBody struct {
+	chunks    [][]byte
+	next      int
+	served    int
+	readCalls int
+	closed    bool
+}
+
+func (body *streamingBody) Read(buffer []byte) (int, error) {
+	if body.next >= len(body.chunks) {
+		return 0, io.EOF
+	}
+	chunk := body.chunks[body.next]
+	count := copy(buffer, chunk)
+	body.served += count
+	body.readCalls++
+	if count == len(chunk) {
+		body.next++
+	} else {
+		body.chunks[body.next] = chunk[count:]
+	}
+	return count, nil
+}
+
+func (body *streamingBody) Close() error {
+	body.closed = true
+	return nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+// installStreamingResponse replaces the package client with a fake transport
+// that returns one streaming body, like the TS Response fixtures.
+func installStreamingResponse(t *testing.T, header http.Header, body io.ReadCloser) {
+	t.Helper()
+	previous := httpClient
+	httpClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			Status:     "200 OK",
+			StatusCode: http.StatusOK,
+			Header:     header,
+			Body:       body,
+			Request:    request,
+		}, nil
+	})}
+	t.Cleanup(func() { httpClient = previous })
+}
+
+// Ports scripts/test-port-bugs.mjs 22: chunked body stops at cap and closes.
+func TestStreamingResponseStopsAtCapAndCloses(t *testing.T) {
+	chunks := make([][]byte, 320)
+	for index := range chunks {
+		chunks[index] = bytes.Repeat([]byte("a"), 1024)
+	}
+	body := &streamingBody{chunks: chunks}
+	installStreamingResponse(t, http.Header{"Content-Type": []string{"application/json"}}, body)
+
+	result := run(t, map[string]string{}, map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)})
+	if !result.IsError {
+		t.Fatalf("expected isError, got %q", resultText(t, result))
+	}
+	want := fmt.Sprintf("Unable to search the web for abc: websearch response exceeded %d bytes", MaxResponseBytes)
+	if got := resultText(t, result); got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+	if !body.closed {
+		t.Fatal("stream was not closed")
+	}
+	if body.served > 258*1024 {
+		t.Fatalf("consumed %d bytes (%d reads), want at most %d", body.served, body.readCalls, 258*1024)
+	}
+}
+
+// Ports scripts/test-port-bugs.mjs 23: declared oversize content-length is
+// rejected without touching the stream.
+func TestStreamingDeclaredOversizeDoesNotRead(t *testing.T) {
+	chunks := make([][]byte, 320)
+	for index := range chunks {
+		chunks[index] = bytes.Repeat([]byte("a"), 1024)
+	}
+	body := &streamingBody{chunks: chunks}
+	header := http.Header{
+		"Content-Type":   []string{"application/json"},
+		"Content-Length": []string{strconv.Itoa(MaxResponseBytes + 1)},
+	}
+	installStreamingResponse(t, header, body)
+
+	result := run(t, map[string]string{}, map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)})
+	if !result.IsError {
+		t.Fatalf("expected isError, got %q", resultText(t, result))
+	}
+	want := fmt.Sprintf("Unable to search the web for abc: websearch response exceeded %d bytes", MaxResponseBytes)
+	if got := resultText(t, result); got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+	if body.served != 0 || body.readCalls != 0 {
+		t.Fatalf("read %d bytes in %d calls, want zero", body.served, body.readCalls)
+	}
+}
+
+// Ports scripts/test-port-bugs.mjs 24: a null response body yields NO_RESULTS.
+func TestNullResponseBodyYieldsNoResults(t *testing.T) {
+	text, err := collectBoundedResponse(&http.Response{Header: http.Header{}})
+	if err != nil {
+		t.Fatalf("collectBoundedResponse: %v", err)
+	}
+	if text != "" {
+		t.Fatalf("text = %q, want empty", text)
+	}
+
+	installStreamingResponse(t, http.Header{}, nil)
+	result := run(t, map[string]string{}, map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)})
+	if result.IsError {
+		t.Fatalf("isError: %s", resultText(t, result))
+	}
+	if got := resultText(t, result); got != NoResults {
+		t.Fatalf("text = %q, want %q", got, NoResults)
+	}
+}
+
+// Ports scripts/test-port-bugs.mjs 25: UTF-8 split across stream chunks is
+// decoded once from the concatenated bytes.
+func TestStreamingSplitUTF8(t *testing.T) {
+	payload := []byte(directPayload("héllo ✓"))
+	checkmark := []byte("✓")
+	cut := bytes.Index(payload, checkmark)
+	if cut <= 0 {
+		t.Fatal("fixture did not contain the multibyte character")
+	}
+	cut++
+	body := &streamingBody{chunks: [][]byte{payload[:cut], payload[cut:]}}
+	installStreamingResponse(t, http.Header{"Content-Type": []string{"application/json"}}, body)
+
+	result := run(t, map[string]string{}, map[string]any{"query": "abc", "provider": "exa", "timeout": float64(2)})
+	if result.IsError {
+		t.Fatalf("isError: %s", resultText(t, result))
+	}
+	if got := resultText(t, result); got != "héllo ✓" {
+		t.Fatalf("text = %q, want %q", got, "héllo ✓")
 	}
 }

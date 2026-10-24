@@ -321,6 +321,11 @@ func collectBoundedResponse(response *http.Response) (string, error) {
 			}
 		}
 	}
+	// Node's Response can have a null body; treat it as empty so the caller
+	// returns NO_RESULTS instead of panicking.
+	if response.Body == nil {
+		return decodeNodeUTF8(nil), nil
+	}
 	body := io.Reader(response.Body)
 	if encoding != "" {
 		decoded, closeDecoder, err := decodedBody(response.Body, encoding)
