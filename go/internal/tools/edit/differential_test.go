@@ -255,11 +255,11 @@ func setupFixtures(t *testing.T, dir string, fixtures []diffFixture) {
 	}
 }
 
-func runGoCase(t *testing.T, dir string, item diffCase) types.ToolResult {
+func runGoCase(t *testing.T, dir string, item diffCase, mode string) types.ToolResult {
 	t.Helper()
 	ctx := runtime.RunWithContext(context.Background(), &runtime.CallContext{
 		Cwd:      dir,
-		Env:      map[string]string{"CAVE_TOOLS_MODE": "enforce"},
+		Env:      map[string]string{"CAVE_TOOLS_MODE": mode},
 		ClientID: "local",
 	}, func(ctx context.Context) context.Context { return ctx })
 	args := substitute(item.Args, dir).(map[string]any)
@@ -294,6 +294,17 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 		t.Skip("node not found: run pnpm build to enable the differential harness")
 	}
 
+	// enforce is the default intensity; strict adds the proof requirement, so
+	// both modes exercise different handler branches over the same cases.
+	for _, mode := range []string{"enforce", "strict"} {
+		t.Run(mode, func(t *testing.T) {
+			runDifferentialPhase(t, dist, nodePath, mode)
+		})
+	}
+}
+
+func runDifferentialPhase(t *testing.T, dist, nodePath, mode string) {
+	t.Helper()
 	cases := differentialCases()
 	tsDir := t.TempDir()
 	goDir := t.TempDir()
@@ -340,7 +351,7 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"CAVE_TOOLS_DATA_DIR="+dataDir,
 		"CLAUDE_CONFIG_DIR="+filepath.Join(dataDir, "claude"),
-		"CAVE_TOOLS_MODE=enforce",
+		"CAVE_TOOLS_MODE="+mode,
 		"CAVE_DIFF_DIR="+tsDir,
 	)
 	var stdout, stderr bytes.Buffer
@@ -377,7 +388,7 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 	for i, item := range cases {
 		dir := goDir
 		setupFixtures(t, dir, item.Fixture)
-		goResult := runGoCase(t, dir, item)
+		goResult := runGoCase(t, dir, item, mode)
 
 		var tsResult any
 		if err := json.Unmarshal(ts.Results[i], &tsResult); err != nil {
@@ -416,7 +427,7 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("differential: %d cases, 3 schemas, 0 result mismatches, %d files identical", len(cases), len(tsTree))
+	t.Logf("differential (%s): %d cases, 3 schemas, 0 result mismatches, %d files identical", mode, len(cases), len(tsTree))
 }
 
 func TestDifferentialCaseCount(t *testing.T) {
