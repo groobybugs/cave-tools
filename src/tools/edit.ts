@@ -182,6 +182,10 @@ function checkFieldTypes(raw: Record<string, unknown>, label: string): ToolResul
   return null;
 }
 
+function hasProofValue(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
 function requireProofInStrict(
   hasFileHash: boolean,
   hasRangeChecksum: boolean,
@@ -424,9 +428,8 @@ export const editTool: Tool & {
 
     if (hasMove || hasRange) {
       const proofErr = requireProofInStrict(
-        args.expected_hash !== undefined && String(args.expected_hash).trim() !== "",
-        args.expected_range_checksum !== undefined &&
-          String(args.expected_range_checksum).trim() !== "",
+        hasProofValue(args.expected_hash),
+        hasProofValue(args.expected_range_checksum),
       );
       if (proofErr) return proofErr;
     }
@@ -571,10 +574,8 @@ async function applyEditsToContent(
         return err(`edits[${globalIndex}]: start_line, end_line, insert_before must be integers`);
       }
       const proofErr = requireProofInStrict(
-        fileHashProvided ||
-          (raw.expected_hash !== undefined && String(raw.expected_hash).trim() !== ""),
-        raw.expected_range_checksum !== undefined &&
-          String(raw.expected_range_checksum).trim() !== "",
+        fileHashProvided || hasProofValue(raw.expected_hash),
+        hasProofValue(raw.expected_range_checksum),
       );
       if (proofErr) return err(`edits[${globalIndex}]: ${proofErr.content[0].type === "text" ? proofErr.content[0].text.replace(/^Error: /, "") : "strict proof required"}`);
       moves.push({
@@ -600,10 +601,8 @@ async function applyEditsToContent(
         return err(`edits[${globalIndex}]: content is required (or delete:true)`);
       }
       const proofErr = requireProofInStrict(
-        fileHashProvided ||
-          (raw.expected_hash !== undefined && String(raw.expected_hash).trim() !== ""),
-        raw.expected_range_checksum !== undefined &&
-          String(raw.expected_range_checksum).trim() !== "",
+        fileHashProvided || hasProofValue(raw.expected_hash),
+        hasProofValue(raw.expected_range_checksum),
       );
       if (proofErr) {
         const msg = proofErr.content[0];
@@ -856,6 +855,7 @@ async function handleBatchEdits(args: Record<string, unknown>): Promise<ToolResu
     args.expected_hash !== undefined &&
     args.expected_hash !== null &&
     String(args.expected_hash).trim() !== "";
+  const topLevelHashProof = hasProofValue(args.expected_hash);
   if (byFile.size > 1 && topLevelHash) {
     return err(
       "top-level expected_hash applies only to single-file batches; " +
@@ -933,7 +933,7 @@ async function handleBatchEdits(args: Record<string, unknown>): Promise<ToolResu
       file.content,
       file.items.map((x) => x.edit),
       file.items.map((x) => x.index),
-      byFile.size === 1 && topLevelHash,
+      byFile.size === 1 && topLevelHashProof,
     );
     if (!("ok" in result) || result.ok !== true) {
       return result as ToolResult;
