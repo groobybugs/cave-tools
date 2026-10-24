@@ -149,6 +149,30 @@ func TestCLIDaemonRoundTrip(t *testing.T) {
 		t.Fatalf("second session read = %q", second.stdout)
 	}
 
+	// Exercise media and error/exit metadata through the real CLI formatter,
+	// not only through MCP or a fixture daemon callback.
+	png := []byte{0x89, 'P', 'N', 'G', 13, 10, 26, 10, 0, 0, 0, 13, 'I', 'H', 'D', 'R'}
+	imagePath := filepath.Join(dataDir, "image.png")
+	if err := os.WriteFile(imagePath, png, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	image := run(map[string]string{"CAVE_TOOLS_DAEMON": "1"}, "read", imagePath)
+	directImage := run(map[string]string{"CAVE_TOOLS_DAEMON": "0"}, "read", imagePath)
+	if image != directImage || image.code != 0 || !strings.Contains(image.stdout, "[image image/png 16 B]") {
+		t.Fatalf("daemon image = %#v, direct = %#v", image, directImage)
+	}
+	failure := run(map[string]string{"CAVE_TOOLS_DAEMON": "1"}, "bash", "printf cli-out; printf cli-err >&2; exit 3")
+	directFailure := run(map[string]string{"CAVE_TOOLS_DAEMON": "0"}, "bash", "printf cli-out; printf cli-err >&2; exit 3")
+	if failure != directFailure || failure.code != 3 {
+		t.Fatalf("daemon bash exit metadata = %#v, direct = %#v", failure, directFailure)
+	}
+	missingPath := filepath.Join(dataDir, "missing.txt")
+	missing := run(map[string]string{"CAVE_TOOLS_DAEMON": "1"}, "read", missingPath)
+	directMissing := run(map[string]string{"CAVE_TOOLS_DAEMON": "0"}, "read", missingPath)
+	if missing != directMissing || missing.code != 1 || !strings.Contains(missing.stderr, "missing.txt") {
+		t.Fatalf("daemon soft error = %#v, direct = %#v", missing, directMissing)
+	}
+
 	stopped := run(nil, "daemon", "stop")
 	if stopped.code != 0 || stopped.stdout != "stopped\n" {
 		t.Fatalf("daemon stop = code %d stdout %q", stopped.code, stopped.stdout)
