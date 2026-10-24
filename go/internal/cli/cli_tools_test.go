@@ -3,8 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -463,35 +466,155 @@ func TestRunFilterCommand(t *testing.T) {
 	}
 }
 
-// TestFilterJSONInvalidJSONUsesV8Message pins the TS behaviour: on malformed
-// stdin, filter --json prints the V8 JSON.parse SyntaxError text, not
-// encoding/json's wording. Expectations recorded from node v24.19.0.
-func TestFilterJSONInvalidJSONUsesV8Message(t *testing.T) {
-	cases := []struct {
-		input string
-		want  string
-	}{
-		{"not json", `Unexpected token 'o', "not json" is not valid JSON`},
-		{"", "Unexpected end of JSON input"},
-		{"\uFEFF{}", "Unexpected token '\uFEFF', \"\uFEFF{}\" is not valid JSON"},
-		{"[1 2]", "Expected ',' or ']' after array element in JSON at position 3 (line 1 column 4)"},
-		{"{\"a\":1,}", "Expected double-quoted property name in JSON at position 7 (line 1 column 8)"},
-		{"01", "Unexpected number in JSON at position 1 (line 1 column 2)"},
-		{"{\n  \"a\": 1,\n  \"b\": 2,\n}", "Expected double-quoted property name in JSON at position 22 (line 4 column 1)"},
-		{"NaN", `"NaN" is not valid JSON`},
+// filterNodeCase is one recorded `node dist/cli.js filter --json` run.
+type filterNodeCase struct {
+	Name        string `json:"name"`
+	InputBase64 string `json:"inputBase64"`
+	StdinBytes  string `json:"stdinBytes"`
+	ExitCode    int    `json:"exitCode"`
+	Stdout      string `json:"stdout"`
+	Stderr      string `json:"stderr"`
+}
+
+func loadFilterNodeFixture(t *testing.T) []filterNodeCase {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "filter_cases.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
 	}
-	for _, tc := range cases {
-		var out, errOut bytes.Buffer
-		code := Run(context.Background(), []string{"filter", "--json"}, strings.NewReader(tc.input), &out, &errOut, "test")
-		if code != 1 {
-			t.Fatalf("input %q: exit = %d, want 1", tc.input, code)
+	var fixture struct {
+		NodeVersion string           `json:"nodeVersion"`
+		Template    string           `json:"template"`
+		Cases       []filterNodeCase `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if len(fixture.Cases) == 0 {
+		t.Fatal("fixture has no cases")
+	}
+	t.Logf("fixture generated with node %s (%d cases): %s", fixture.NodeVersion, len(fixture.Cases), fixture.Template)
+	return fixture.Cases
+}
+
+// TestFilterCasesMatchNode pins filter stdin handling to the TypeScript CLI:
+// invalid UTF-8 bytes decoded like Node's StringDecoder, V8 JSON.parse number
+// semantics (1e400 becomes Infinity instead of a decode error) and identical
+// SyntaxError text. Every expectation comes from testdata/gen_filter_cases.mjs.
+func TestFilterCasesMatchNode(t *testing.T) {
+	minimalEnv(t)
+	// Each filter run records stats; keep them out of the package-wide data dir
+	// so status-summary tests still see only their own seeded sessions.
+	t.Setenv("CAVE_TOOLS_DATA_DIR", t.TempDir())
+	for _, tc := range loadFilterNodeFixture(t) {
+		tc := tc
+		t.Run(tc.Name, func(t *testing.T) {
+			input, err := base64.StdEncoding.DecodeString(tc.InputBase64)
+			if err != nil {
+				t.Fatalf("decode stdin bytes: %v", err)
+			}
+			if len(tc.StdinBytes) > 0 && string(input) != mustHex(t, tc.StdinBytes) {
+				t.Fatalf("fixture stdin mismatch: % x != %s", input, tc.StdinBytes)
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := Run(context.Background(), []string{"filter", "--json"}, bytes.NewReader(input), &stdout, &stderr, "test")
+			if code != tc.ExitCode {
+				t.Fatalf("exit = %d, want %d (stderr %q)", code, tc.ExitCode, stderr.String())
+			}
+			if stdout.String() != tc.Stdout {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), tc.Stdout)
+			}
+			if stderr.String() != tc.Stderr {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.Stderr)
+			}
+		})
+	}
+}
+
+func mustHex(t *testing.T, value string) string {
+	t.Helper()
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		t.Fatalf("decode hex %q: %v", value, err)
+	}
+	return string(decoded)
+}
+
+// chunkReader delivers fixed byte chunks one Read at a time.
+type chunkReader struct{ chunks [][]byte }
+
+func (r *chunkReader) Read(p []byte) (int, error) {
+	for len(r.chunks) > 0 && len(r.chunks[0]) == 0 {
+		r.chunks = r.chunks[1:]
+	}
+	if len(r.chunks) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.chunks[0])
+	r.chunks[0] = r.chunks[0][n:]
+	return n, nil
+}
+
+// TestReadAllStdinMatchesNodeStringDecoder proves chunk splits mid-sequence do
+// not change stdin text: Node's setEncoding("utf8") uses StringDecoder, which
+// buffers incomplete sequences across chunks, so every split yields the same
+// text as the whole buffer. Expectations are recorded by the fixture script.
+func TestReadAllStdinMatchesNodeStringDecoder(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "decoder_cases.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var fixture struct {
+		NodeVersion string `json:"nodeVersion"`
+		Cases       []struct {
+			StdinHex   string `json:"stdinHex"`
+			Whole      string `json:"whole"`
+			ByteChunks string `json:"byteChunks"`
+			Splits     []struct {
+				Cut     int    `json:"cut"`
+				Decoded string `json:"decoded"`
+			} `json:"splits"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if len(fixture.Cases) == 0 {
+		t.Fatal("fixture has no cases")
+	}
+	t.Logf("fixture generated with node %s", fixture.NodeVersion)
+
+	for _, tc := range fixture.Cases {
+		input := []byte(mustHex(t, tc.StdinHex))
+		whole, err := readAllStdin(bytes.NewReader(input))
+		if err != nil {
+			t.Fatalf("stdin % x: %v", input, err)
 		}
-		if out.Len() != 0 {
-			t.Fatalf("input %q: stdout = %q, want empty", tc.input, out.String())
+		if whole != tc.Whole {
+			t.Fatalf("stdin % x whole = %q, want %q", input, whole, tc.Whole)
 		}
-		want := "cave-tools filter: " + tc.want + "\n"
-		if errOut.String() != want {
-			t.Fatalf("input %q:\n got: %q\nwant: %q", tc.input, errOut.String(), want)
+
+		oneByteChunks := make([][]byte, len(input))
+		for i := range input {
+			oneByteChunks[i] = input[i : i+1]
+		}
+		got, err := readAllStdin(&chunkReader{chunks: oneByteChunks})
+		if err != nil {
+			t.Fatalf("stdin % x: %v", input, err)
+		}
+		if got != tc.ByteChunks {
+			t.Fatalf("stdin % x one-byte chunks = %q, want %q", input, got, tc.ByteChunks)
+		}
+
+		for _, split := range tc.Splits {
+			got, err := readAllStdin(&chunkReader{chunks: [][]byte{input[:split.Cut], input[split.Cut:]}})
+			if err != nil {
+				t.Fatalf("stdin % x cut %d: %v", input, split.Cut, err)
+			}
+			if got != split.Decoded {
+				t.Fatalf("stdin % x cut %d = %q, want %q", input, split.Cut, got, split.Decoded)
+			}
 		}
 	}
 }

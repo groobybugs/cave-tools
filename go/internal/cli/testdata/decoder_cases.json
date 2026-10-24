@@ -1,0 +1,434 @@
+{
+ "nodeVersion": "v24.19.0",
+ "template": "StringDecoder('utf8') chunk splits",
+ "cases": [
+  {
+   "stdinHex": "",
+   "whole": "",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": ""
+    }
+   ],
+   "byteChunks": ""
+  },
+  {
+   "stdinHex": "fffe7b7d",
+   "whole": "��{}",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "��{}"
+    },
+    {
+     "cut": 1,
+     "decoded": "��{}"
+    },
+    {
+     "cut": 2,
+     "decoded": "��{}"
+    },
+    {
+     "cut": 3,
+     "decoded": "��{}"
+    },
+    {
+     "cut": 4,
+     "decoded": "��{}"
+    }
+   ],
+   "byteChunks": "��{}"
+  },
+  {
+   "stdinHex": "eda080",
+   "whole": "���",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "���"
+    },
+    {
+     "cut": 1,
+     "decoded": "���"
+    },
+    {
+     "cut": 2,
+     "decoded": "���"
+    },
+    {
+     "cut": 3,
+     "decoded": "���"
+    }
+   ],
+   "byteChunks": "���"
+  },
+  {
+   "stdinHex": "c0af",
+   "whole": "��",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "��"
+    },
+    {
+     "cut": 1,
+     "decoded": "��"
+    },
+    {
+     "cut": 2,
+     "decoded": "��"
+    }
+   ],
+   "byteChunks": "��"
+  },
+  {
+   "stdinHex": "61ff62",
+   "whole": "a�b",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "a�b"
+    },
+    {
+     "cut": 1,
+     "decoded": "a�b"
+    },
+    {
+     "cut": 2,
+     "decoded": "a�b"
+    },
+    {
+     "cut": 3,
+     "decoded": "a�b"
+    }
+   ],
+   "byteChunks": "a�b"
+  },
+  {
+   "stdinHex": "e282",
+   "whole": "�",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "�"
+    },
+    {
+     "cut": 1,
+     "decoded": "�"
+    },
+    {
+     "cut": 2,
+     "decoded": "�"
+    }
+   ],
+   "byteChunks": "�"
+  },
+  {
+   "stdinHex": "e282ac",
+   "whole": "€",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "€"
+    },
+    {
+     "cut": 1,
+     "decoded": "€"
+    },
+    {
+     "cut": 2,
+     "decoded": "€"
+    },
+    {
+     "cut": 3,
+     "decoded": "€"
+    }
+   ],
+   "byteChunks": "€"
+  },
+  {
+   "stdinHex": "f09f9880",
+   "whole": "😀",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "😀"
+    },
+    {
+     "cut": 1,
+     "decoded": "😀"
+    },
+    {
+     "cut": 2,
+     "decoded": "😀"
+    },
+    {
+     "cut": 3,
+     "decoded": "😀"
+    },
+    {
+     "cut": 4,
+     "decoded": "😀"
+    }
+   ],
+   "byteChunks": "😀"
+  },
+  {
+   "stdinHex": "f09f98",
+   "whole": "�",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "�"
+    },
+    {
+     "cut": 1,
+     "decoded": "�"
+    },
+    {
+     "cut": 2,
+     "decoded": "�"
+    },
+    {
+     "cut": 3,
+     "decoded": "�"
+    }
+   ],
+   "byteChunks": "�"
+  },
+  {
+   "stdinHex": "f4908080",
+   "whole": "����",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "����"
+    },
+    {
+     "cut": 1,
+     "decoded": "����"
+    },
+    {
+     "cut": 2,
+     "decoded": "����"
+    },
+    {
+     "cut": 3,
+     "decoded": "����"
+    },
+    {
+     "cut": 4,
+     "decoded": "����"
+    }
+   ],
+   "byteChunks": "����"
+  },
+  {
+   "stdinHex": "f5808080",
+   "whole": "����",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "����"
+    },
+    {
+     "cut": 1,
+     "decoded": "����"
+    },
+    {
+     "cut": 2,
+     "decoded": "����"
+    },
+    {
+     "cut": 3,
+     "decoded": "����"
+    },
+    {
+     "cut": 4,
+     "decoded": "����"
+    }
+   ],
+   "byteChunks": "����"
+  },
+  {
+   "stdinHex": "e080af",
+   "whole": "���",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "���"
+    },
+    {
+     "cut": 1,
+     "decoded": "���"
+    },
+    {
+     "cut": 2,
+     "decoded": "���"
+    },
+    {
+     "cut": 3,
+     "decoded": "���"
+    }
+   ],
+   "byteChunks": "���"
+  },
+  {
+   "stdinHex": "e028a1",
+   "whole": "�(�",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "�(�"
+    },
+    {
+     "cut": 1,
+     "decoded": "�(�"
+    },
+    {
+     "cut": 2,
+     "decoded": "�(�"
+    },
+    {
+     "cut": 3,
+     "decoded": "�(�"
+    }
+   ],
+   "byteChunks": "�(�"
+  },
+  {
+   "stdinHex": "8080",
+   "whole": "��",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "��"
+    },
+    {
+     "cut": 1,
+     "decoded": "��"
+    },
+    {
+     "cut": 2,
+     "decoded": "��"
+    }
+   ],
+   "byteChunks": "��"
+  },
+  {
+   "stdinHex": "ff",
+   "whole": "�",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "�"
+    },
+    {
+     "cut": 1,
+     "decoded": "�"
+    }
+   ],
+   "byteChunks": "�"
+  },
+  {
+   "stdinHex": "68c3a96c6c6f20e282ac20f09f9880ed7461696cf09f",
+   "whole": "héllo € 😀�tail�",
+   "splits": [
+    {
+     "cut": 0,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 1,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 2,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 3,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 4,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 5,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 6,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 7,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 8,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 9,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 10,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 11,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 12,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 13,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 14,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 15,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 16,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 17,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 18,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 19,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 20,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 21,
+     "decoded": "héllo € 😀�tail�"
+    },
+    {
+     "cut": 22,
+     "decoded": "héllo € 😀�tail�"
+    }
+   ],
+   "byteChunks": "héllo € 😀�tail�"
+  }
+ ]
+}
