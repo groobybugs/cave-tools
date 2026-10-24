@@ -15,6 +15,7 @@ import (
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
 	"github.com/groobybugs/cave-tools/go/internal/daemon"
+	"github.com/groobybugs/cave-tools/go/internal/jsjson"
 	callruntime "github.com/groobybugs/cave-tools/go/internal/runtime"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
@@ -190,8 +191,12 @@ func decodeCallArguments(raw json.RawMessage) (map[string]any, argsState, error)
 	case 't', 'f':
 		return nil, argsPresent, zodArgumentsError("boolean")
 	case '{':
-		var args map[string]any
-		if err := json.Unmarshal(trimmed, &args); err != nil || args == nil {
+		parsed, err := jsjson.Parse(string(trimmed))
+		if err != nil {
+			return map[string]any{}, argsPresent, nil
+		}
+		args, ok := parsed.(map[string]any)
+		if !ok || args == nil {
 			return map[string]any{}, argsPresent, nil
 		}
 		return args, argsPresent, nil
