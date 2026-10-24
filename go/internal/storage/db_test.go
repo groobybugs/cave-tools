@@ -910,6 +910,16 @@ func TestLegacyMigrationSkipsFilesTSRejects(t *testing.T) {
 	nullRtk := full(20)
 	nullRtk["rtk"] = nil
 	writeJSON(t, filepath.Join(dir, "sessions", "rtk-null.json"), nullRtk)
+	// A missing or null leaf binds NULL into a NOT NULL column in TS.
+	emptyCache := full(21)
+	emptyCache["cache"] = map[string]any{}
+	writeJSON(t, filepath.Join(dir, "sessions", "cache-empty.json"), emptyCache)
+	nullLeaf := full(22)
+	nullLeaf["savings"].(map[string]any)["savedChars"] = nil
+	writeJSON(t, filepath.Join(dir, "sessions", "leaf-null.json"), nullLeaf)
+	noPid := full(23)
+	delete(noPid, "updatedAt")
+	writeJSON(t, filepath.Join(dir, "sessions", "no-updated.json"), noPid)
 
 	rows, err := ListSessionStats(true)
 	if err != nil {
@@ -921,5 +931,25 @@ func TestLegacyMigrationSkipsFilesTSRejects(t *testing.T) {
 			pids = append(pids, int64(r.Pid))
 		}
 		t.Fatalf("migrated pids = %v, want only [1]", pids)
+	}
+}
+
+// TS readdirSync throws ENOTDIR when sessions exists as a regular file, which
+// fails openDb; Go must surface the error too instead of skipping it.
+func TestLegacyMigrationSessionsPathNotDir(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "data")
+	t.Setenv("CAVE_TOOLS_DATA_DIR", dir)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	resetDB(t)
+	t.Cleanup(func() { resetDB(t) })
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sessions"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openDB(); err == nil {
+		t.Fatal("openDB succeeded with sessions as a regular file; TS fails with ENOTDIR")
 	}
 }

@@ -329,6 +329,12 @@ Default stays TypeScript.
 4. `ListSessionStats(bool)` and `MarkSessionEnded(pid, ...)` make TS's default
    parameters explicit/variadic; behaviour is unchanged.
 
+Accepted legacy-migration deviations (one-time import of pre-SQLite files; not worth statement-by-statement emulation):
+
+- A legacy session with `budgets: null` is stored as `{}` (TS stores `null`).
+- A legacy session missing `savings.byTool` or `bounces.byExtension` keeps its row with no tool/bounce rows in Go; TS keeps the row and throws before the tool/bounce rows.
+- String-typed numbers in legacy `lifetime.json` (e.g. `"calls": "5"`) read as 0 in Go; TS lets SQLite coerce them to 5.
+
 ### TS bugs found while porting
 
 - `src/storage/db.ts:595` (and the `try/catch` at `src/storage/db.ts:405-414`):
