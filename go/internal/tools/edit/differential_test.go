@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -235,6 +236,51 @@ func differentialCases() []diffCase {
 		{Name: "edit batch move valid checksum", Tool: "edit", Args: map[string]any{"file_path": "$DIR/n14.txt", "edits": []any{
 			map[string]any{"start_line": 1, "end_line": 1, "insert_before": 3, "expected_range_checksum": tools.RangeChecksum([]string{"alpha", "beta", ""}, 1, 1)},
 		}}, Fixture: []diffFixture{{Path: "n14.txt", Content: "alpha\nbeta\n"}}},
+
+		// Off-schema expected_hash/checksum values exercise JS String() in the
+		// verification errors: arrays join with commas (null slots empty),
+		// objects print [object Object], numbers use JS shortest format.
+		{Name: "edit hash empty object", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o1.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": map[string]any{}},
+			Fixture: []diffFixture{{Path: "o1.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit hash empty array", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o2.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": []any{}},
+			Fixture: []diffFixture{{Path: "o2.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit hash numeric array", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o3.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": []any{float64(12345678)}},
+			Fixture: []diffFixture{{Path: "o3.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit hash large float", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o4.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": float64(12345678)},
+			Fixture: []diffFixture{{Path: "o4.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit hash negative zero", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o5.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": math.Copysign(0, -1)},
+			Fixture: []diffFixture{{Path: "o5.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit hash tiny exponent", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o6.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": 1e-6},
+			Fixture: []diffFixture{{Path: "o6.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit hash upper exponent", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o7.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": 1e21},
+			Fixture: []diffFixture{{Path: "o7.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit checksum empty object", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o8.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": map[string]any{}},
+			Fixture: []diffFixture{{Path: "o8.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit checksum empty array", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o9.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": []any{}},
+			Fixture: []diffFixture{{Path: "o9.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit checksum null slot array", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o10.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": []any{nil}},
+			Fixture: []diffFixture{{Path: "o10.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit checksum numeric array", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o11.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": []any{float64(1), float64(2)}},
+			Fixture: []diffFixture{{Path: "o11.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit checksum large float", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o12.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": float64(12345678)},
+			Fixture: []diffFixture{{Path: "o12.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit checksum negative zero", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o13.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": math.Copysign(0, -1)},
+			Fixture: []diffFixture{{Path: "o13.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit checksum tiny exponent", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o14.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": 1e-6},
+			Fixture: []diffFixture{{Path: "o14.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit checksum sub-micro exponent", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o15.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": 1e-7},
+			Fixture: []diffFixture{{Path: "o15.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit checksum fixed large", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o16.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": 1e20},
+			Fixture: []diffFixture{{Path: "o16.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit checksum upper exponent", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o17.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": 1e21},
+			Fixture: []diffFixture{{Path: "o17.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit batch multi-file empty array hash", Tool: "edit", Args: map[string]any{
+			"expected_hash": []any{},
+			"edits": []any{
+				map[string]any{"file_path": "$DIR/o18a.txt", "start_line": 1, "end_line": 1, "content": "A"},
+				map[string]any{"file_path": "$DIR/o18b.txt", "start_line": 1, "end_line": 1, "content": "B"},
+			},
+		}, Fixture: []diffFixture{{Path: "o18a.txt", Content: "alpha\n"}, {Path: "o18b.txt", Content: "beta\n"}}},
 
 		{Name: "write numeric path", Tool: "write", Args: map[string]any{"file_path": 5, "content": "x"}},
 
