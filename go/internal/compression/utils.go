@@ -500,9 +500,7 @@ func buildStatsLocked(ctx context.Context, b *StatsBucket) storage.PersistedStat
 			Passthrough:    b.rtkPassthrough,
 		},
 		Budgets: getAllBudgetsLocked(),
-		// TS quirk kept for parity: buildStats(b) calls getBounceStats(), which
-		// reads the *current* ambient bucket, not b.
-		Bounces: getBounceStatsLocked(ctx),
+		Bounces: getBounceStatsLocked(b),
 	}
 }
 
@@ -638,28 +636,33 @@ func IsFileUnchanged(ctx context.Context, filePath string, sessionID string, del
 		utilsMu.Unlock()
 		return false
 	}
+	entryHash := entry.hash
+	entryMtime := entry.mtime
+	utilsMu.Unlock()
 
+	// stat + re-hash run outside utilsMu: hashing a large file must not block
+	// every other tool call. TS awaits these without a global lock.
 	info, err := os.Stat(filePath)
 	if err != nil {
-		utilsMu.Unlock()
 		return false
 	}
 	mtime := mtimeMsMillis(info)
-	if mtime != entry.mtime {
+	if mtime != entryMtime {
 		currentHash := GetFileHash(filePath)
-		if currentHash == nil || *currentHash != entry.hash {
-			utilsMu.Unlock()
+		if currentHash == nil || *currentHash != entryHash {
 			return false
 		}
-		entry.mtime = mtime
 	}
 
+	utilsMu.Lock()
+	if mtime != entryMtime {
+		entry.mtime = mtime
+	}
 	wouldEmit, ok := entry.deliveries.get(deliveryKey)
+	utilsMu.Unlock()
 	if !ok {
-		utilsMu.Unlock()
 		return false
 	}
-	utilsMu.Unlock()
 
 	// Same coalesced registry barrier as TS: never stub before the strict-mode
 	// read registry has the path.
@@ -904,6 +907,8 @@ func ResetStats(ctx context.Context) {
 	bucket.cacheHits = 0
 	bucket.cacheMisses = 0
 	bucket.dedupSavedChars = 0
+	bucket.rangeEchoSavedChars = 0
+	bucket.rangeEditCount = 0
 	bucket.rtkRewrites = 0
 	bucket.rtkAlreadyWrapped = 0
 	bucket.rtkPassthrough = 0
@@ -916,8 +921,6 @@ func ResetStats(ctx context.Context) {
 	bucket.perExtension = map[string]storage.BounceStats{}
 	recentlyEdited = map[string]int64{}
 	bucket.savingsByTool = map[string]storage.ToolSavings{}
-	// TS quirk kept for parity: rangeEchoSavedChars and rangeEditCount survive
-	// resetStats; only reset_cache/reset_stats callers see them linger.
 	persistStatsLocked(ctx)
 	utilsMu.Unlock()
 }
@@ -1042,11 +1045,10 @@ func ShouldForceFull(ctx context.Context, filePath string) bool {
 func GetBounceStats(ctx context.Context) storage.BounceSummary {
 	utilsMu.Lock()
 	defer utilsMu.Unlock()
-	return getBounceStatsLocked(ctx)
+	return getBounceStatsLocked(statsBucketLocked(ctx))
 }
 
-func getBounceStatsLocked(ctx context.Context) storage.BounceSummary {
-	bucket := statsBucketLocked(ctx)
+func getBounceStatsLocked(bucket *StatsBucket) storage.BounceSummary {
 	byExtension := make(map[string]storage.BounceStats, len(bucket.perExtension))
 	for ext, stats := range bucket.perExtension {
 		byExtension[ext] = stats
