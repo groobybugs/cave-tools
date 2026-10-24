@@ -62,6 +62,34 @@ let reloadToolRegistry = null;
 let sawContextTools = false;
 let generationReady = new Set();
 
+// Process-local native-filter health. No commands, paths, output, or error
+// messages are retained. The latest fallback adds a short recovery hint to
+// context; a later successful attempt clears it.
+const nativeFilterHealth = {
+  attempts: 0,
+  compressed: 0,
+  unchanged: 0,
+  fallbacks: 0,
+  lastOutcome: 'idle',
+};
+
+function recordNativeFilterOutcome(outcome) {
+  nativeFilterHealth.attempts += 1;
+  nativeFilterHealth.lastOutcome = outcome;
+  if (outcome === 'compressed') nativeFilterHealth.compressed += 1;
+  else if (outcome === 'unchanged') nativeFilterHealth.unchanged += 1;
+  else nativeFilterHealth.fallbacks += 1;
+}
+
+function nativeFilterHealthPrompt() {
+  if (nativeFilterHealth.lastOutcome !== 'fallback') return '';
+  const h = nativeFilterHealth;
+  return ' Native filter health: ' + h.compressed + '/' + h.attempts +
+    ' compressed, ' + h.unchanged + ' no-op, ' + h.fallbacks +
+    ' fallback' + (h.fallbacks === 1 ? '' : 's') +
+    '; latest attempt kept original output. Use cave__bash for large/failing commands.';
+}
+
 function readRegistryPath() {
   const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   return path.join(claudeDir, 'cave-tools', 'read-registry.txt');
@@ -70,13 +98,14 @@ function readRegistryPath() {
 function reinforcementLine(mode) {
   const base = 'CAVE-TOOLS MODE ACTIVE (' + mode + '). ' +
     'Prefer cave__read / cave__grep / cave__find / cave__ls over built-ins. ' +
-    'Native shell output is auto-compressed after it runs (cave__bash also fine); never prefix cave-tools or rtk yourself. ' +
+    'Native shell is the default; output is auto-compressed through the CLI filter. Use cave__bash for RTK pre-rewrite or guaranteed failure compression; never prefix cave-tools or rtk yourself. ' +
     'Background shell for servers/watchers (uncompressed); cave__bash_start + cave__bash_status wait=60 when a long job\'s final output matters; never sleep-poll. ' +
     '[cave: full output … at <path>]: cave__read/cave__grep that path, do not re-run. Unfiltered: cave-tools raw <cmd>. ' +
     'Call cave__invalidate after external edits. ' +
     'String edit: cave__edit with explicit file_path, old_string, new_string (never infer target). ' +
     'Medium+ edits: cave__read line_numbers=true → cave__edit start_line/end_line/content ' +
-    '(+ expected_hash or expected_range_checksum); delete:true / insert_before for move.';
+    '(+ expected_hash or expected_range_checksum); delete:true / insert_before for move.' +
+    nativeFilterHealthPrompt();
   if (mode === 'strict') {
     return base + ' STRICT: built-in edit/write need prior cave__read; range/move need hash or range_checksum. Text reads use cave__read.';
   }
@@ -463,7 +492,15 @@ function filterBashText(text, command, sessionId) {
   const mode = readFlag(flagPath) || getDefaultMode();
   if (bashFilterSkipReason(command, body, { mode, env: process.env })) return null;
   const out = runCaveFilter({ command: String(command || ''), stdout: body, stderr: '' }, sessionId, process.env);
-  if (!out || out.stdout.length >= body.length) return null;
+  if (!out) {
+    recordNativeFilterOutcome('fallback');
+    return null;
+  }
+  if (out.stdout.length >= body.length) {
+    recordNativeFilterOutcome('unchanged');
+    return null;
+  }
+  recordNativeFilterOutcome('compressed');
   return out.stdout.replace(/\s*$/, '') + (meta ? '\n\n' + meta : '');
 }
 
@@ -474,6 +511,8 @@ function filterBashText(text, command, sessionId) {
 // already truncated (full output saved to a file), the preview is filtered
 // and its "[showing lines …; full output saved to …]" pointer kept.
 // Background launches (input.background, or a still-running result) pass.
+// V2 failure events expose only event.error, not mutable shell output; they
+// intentionally return here. Completed nonzero shell results can be filtered.
 function filterV2BashResult(event) {
   if (!event || event.status !== 'completed' || normalizeBuiltin(event.tool || event.name) !== 'bash') return;
   const input = event.input || event.args || {};
@@ -532,7 +571,7 @@ function v1HookMap() {
       if (active && active !== 'off') {
         output.context.push(
           reinforcementLine(active) +
-          '\nCave-tools AGENTS.md rules still apply after compaction. Prefer cave__* tools.'
+          '\nCave-tools AGENTS.md rules still apply after compaction; native shell stays the default.'
         );
       }
     },
@@ -598,7 +637,7 @@ async function setup(ctx) {
         pushSystem(
           event,
           reinforcementLine(active) +
-            '\nCave-tools AGENTS.md rules still apply after compaction. Prefer cave__* tools.'
+            '\nCave-tools AGENTS.md rules still apply after compaction; native shell stays the default.'
         );
       }
     }));

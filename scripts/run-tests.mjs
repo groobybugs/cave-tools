@@ -38,6 +38,7 @@ const DEDICATED_SUITE = [
   { name: "edit-handler-v2", script: "scripts/test-edit-handler-v2.mjs" },
   { name: "file-mutation-locks", script: "scripts/test-file-mutation-locks.mjs" },
   { name: "port-bugs", script: "scripts/test-port-bugs.mjs" },
+  { name: "usage-analyzer", script: "scripts/test-usage-analyzer.mjs" },
 ];
 
 const FULL_SUITE = [{ name: "core", script: "test.mjs" }, ...DEDICATED_SUITE];
