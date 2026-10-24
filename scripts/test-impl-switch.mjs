@@ -1,0 +1,577 @@
+#!/usr/bin/env node
+// Dedicated tests for the opt-in Go implementation switch (W5b).
+//
+// Covers the direct `node dist/cli.js` entry point, the generated POSIX
+// launcher shim, argv/stdin/env/cwd/exit/signal forwarding, missing and
+// non-executable binaries, exact environment matching and a real Go smoke.
+
+import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const CLI = join(ROOT, "dist", "cli.js");
+const INSTALLER = join(ROOT, "scripts", "install-agent-instructions.mjs");
+const GO_BIN = join(ROOT, "go", "bin", process.platform === "win32" ? "cave-tools-go.exe" : "cave-tools-go");
+const POSIX = process.platform !== "win32";
+
+function fixtureRoot() {
+  const preferred = process.platform === "linux" ? "/tmp/opencode" : tmpdir();
+  mkdirSync(preferred, { recursive: true, mode: 0o700 });
+  return mkdtempSync(join(preferred, "cave-tools-switch-"));
+}
+
+const ROOT_FIXTURE = fixtureRoot();
+
+function cleanEnv() {
+  const env = { ...process.env };
+  for (const key of ["CAVE_TOOLS_IMPL", "CAVE_TOOLS_GO_BIN", "CAVE_TOOLS_DATA_DIR", "CLAUDE_CONFIG_DIR"]) {
+    delete env[key];
+  }
+  return env;
+}
+
+function cliEnv(extra = {}) {
+  return { ...cleanEnv(), ...extra };
+}
+
+function runCli(args, options = {}) {
+  const result = spawnSync(process.execPath, [CLI, ...args], {
+    cwd: options.cwd ?? ROOT,
+    env: cliEnv(options.env),
+    input: options.input,
+    encoding: options.encoding === undefined ? "utf8" : options.encoding,
+    stdio: options.stdio,
+    timeout: options.timeout ?? 15000,
+  });
+  if (result.error) throw result.error;
+  return result;
+}
+
+function writeExecutable(file, body) {
+  writeFileSync(file, body, { mode: 0o755 });
+  chmodSync(file, 0o755);
+  return file;
+}
+
+const FAKE_GO_BODY = `#!/bin/sh
+if [ -n "\${CAVE_TOOLS_SWITCH_MARKER:-}" ]; then
+  : > "$CAVE_TOOLS_SWITCH_MARKER"
+fi
+printf 'argc=%s\\n' "$#"
+i=0
+for arg in "$@"; do
+  printf 'arg%d=%s\\n' "$i" "$arg"
+  i=$((i + 1))
+done
+printf 'cwd=%s\\n' "$PWD"
+printf 'env=%s\\n' "\${CAVE_TOOLS_SWITCH_ENV:-}"
+printf 'stderr=%s\\n' "\${CAVE_TOOLS_SWITCH_STDERR:-}" >&2
+exit "\${CAVE_TOOLS_SWITCH_EXIT:-0}"
+`;
+
+function fakeGo(dir, name = "fake-go") {
+  mkdirSync(dir, { recursive: true });
+  return writeExecutable(join(dir, name), FAKE_GO_BODY);
+}
+
+function fakeCat(dir, name = "fake-cat") {
+  mkdirSync(dir, { recursive: true });
+  return writeExecutable(join(dir, name), "#!/bin/sh\ncat\n");
+}
+
+function fakeSleeper(dir, name = "fake-sleep") {
+  mkdirSync(dir, { recursive: true });
+  return writeExecutable(join(dir, name), "#!/bin/sh\nprintf 'ready\\n'\nexec sleep 30\n");
+}
+
+async function waitForLine(stream, timeoutMs = 10000) {
+  return new Promise((resolvePromise, reject) => {
+    let buffer = "";
+    const timer = setTimeout(() => {
+      stream.removeListener("data", onData);
+      reject(new Error(`timed out waiting for stdout (${timeoutMs}ms)`));
+    }, timeoutMs);
+    function onData(chunk) {
+      buffer += chunk.toString();
+      const index = buffer.indexOf("\n");
+      if (index === -1) return;
+      clearTimeout(timer);
+      stream.removeListener("data", onData);
+      resolvePromise(buffer.slice(0, index));
+    }
+    stream.on("data", onData);
+  });
+}
+
+function waitForClose(child, timeoutMs = 10000) {
+  return new Promise((resolvePromise, reject) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`timed out waiting for child close (${timeoutMs}ms)`));
+    }, timeoutMs);
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      resolvePromise({ code, signal });
+    });
+  });
+}
+
+async function testResolutionModule() {
+  const modulePath = pathToFileURL(join(ROOT, "dist", "impl-switch.js")).href;
+  const mod = await import(modulePath);
+
+  for (const value of ["go"]) {
+    assert.equal(mod.shouldUseGo({ CAVE_TOOLS_IMPL: value }), true, `selects ${value}`);
+  }
+  for (const value of [undefined, "", "Go", "GO", "go ", " go", "gO", "typescript", "1", "true"]) {
+    const env = value === undefined ? {} : { CAVE_TOOLS_IMPL: value };
+    assert.equal(mod.shouldUseGo(env), false, `does not select ${JSON.stringify(value)}`);
+  }
+
+  const win = mod.resolveGoBinary({ env: {}, platform: "win32", packageRoot: join(ROOT, "pkg") });
+  assert.equal(win.path, join(ROOT, "pkg", "go", "bin", "cave-tools-go.exe"));
+  assert.equal(win.source, "default");
+  const posix = mod.resolveGoBinary({ env: {}, platform: "linux", packageRoot: join(ROOT, "pkg") });
+  assert.equal(posix.path, join(ROOT, "pkg", "go", "bin", "cave-tools-go"));
+
+  const spaced = join(ROOT_FIXTURE, "override dir ü", "my go");
+  const override = mod.resolveGoBinary({
+    env: { CAVE_TOOLS_GO_BIN: spaced },
+    cwd: join(ROOT_FIXTURE, "somewhere else"),
+    platform: "linux",
+  });
+  assert.equal(override.path, resolve(spaced), "absolute override preserved verbatim");
+  assert.equal(override.source, "env");
+  const relative = mod.resolveGoBinary({
+    env: { CAVE_TOOLS_GO_BIN: join("relative ü", "go bin") },
+    cwd: join(ROOT_FIXTURE, "cwd with spaces"),
+    platform: "linux",
+  });
+  assert.equal(relative.path, resolve(join(ROOT_FIXTURE, "cwd with spaces"), "relative ü", "go bin"));
+  const emptyOverride = mod.resolveGoBinary({
+    env: { CAVE_TOOLS_GO_BIN: "" },
+    platform: "linux",
+    packageRoot: join(ROOT, "pkg"),
+  });
+  assert.equal(emptyOverride.source, "default", "empty override falls back to the local binary");
+
+  const missing = join(ROOT_FIXTURE, "missing", "go");
+  assert.equal(mod.goBinaryProblem(missing, "linux"), "missing");
+  if (POSIX) {
+    const plain = join(ROOT_FIXTURE, "plain-go");
+    writeFileSync(plain, "not executable", { mode: 0o644 });
+    assert.equal(mod.goBinaryProblem(plain, "linux"), "not-executable");
+  }
+  const executable = fakeGo(join(ROOT_FIXTURE, "unit"));
+  assert.equal(mod.goBinaryProblem(executable, process.platform), null);
+}
+
+function testDirectSwitch() {
+  if (!POSIX) {
+    console.log("SKIP fake Go forwarding: POSIX shell fixture");
+    return;
+  }
+  const dir = join(ROOT_FIXTURE, "direct");
+  const fake = fakeGo(join(dir, "bin with spaces ü"), "cave tools-go ü");
+  const marker = join(dir, "marker");
+  const cwd = join(ROOT_FIXTURE, "cwd with spaces ü");
+  mkdirSync(cwd, { recursive: true });
+
+  // Unset and every non-exact value keep the TypeScript CLI.
+  for (const value of [undefined, "", "Go", "GO", "go ", "typescript", "1"]) {
+    rmSync(marker, { force: true });
+    const env = {
+      CAVE_TOOLS_GO_BIN: fake,
+      CAVE_TOOLS_SWITCH_MARKER: marker,
+    };
+    if (value === undefined) delete env.CAVE_TOOLS_IMPL;
+    else env.CAVE_TOOLS_IMPL = value;
+    const result = runCli(["--version"], { env });
+    assert.equal(result.status, 2, `TS default for ${JSON.stringify(value)}`);
+    assert.match(result.stderr, /^Usage: cave-tools /, `TS usage for ${JSON.stringify(value)}`);
+    assert.equal(existsSync(marker), false, `Go binary not started for ${JSON.stringify(value)}`);
+  }
+
+  // Exact go forwards argv, cwd, env, stdout, stderr and the exit code.
+  const args = ["alpha beta", 'quote"x', "single'quote", "back\\slash", "ünïcode", "", "$HOME", "*"];
+  const result = runCli(args, {
+    cwd,
+    env: {
+      CAVE_TOOLS_IMPL: "go",
+      CAVE_TOOLS_GO_BIN: fake,
+      CAVE_TOOLS_SWITCH_MARKER: marker,
+      CAVE_TOOLS_SWITCH_ENV: "value with spaces ü",
+      CAVE_TOOLS_SWITCH_STDERR: "err with spaces ü",
+      CAVE_TOOLS_SWITCH_EXIT: "7",
+    },
+  });
+  assert.equal(result.status, 7, "Go exit code forwarded");
+  assert.equal(existsSync(marker), true, "Go binary ran");
+  assert.equal(
+    result.stdout,
+    [
+      "argc=8",
+      "arg0=alpha beta",
+      'arg1=quote"x',
+      "arg2=single'quote",
+      "arg3=back\\slash",
+      "arg4=ünïcode",
+      "arg5=",
+      "arg6=$HOME",
+      "arg7=*",
+      `cwd=${cwd}`,
+      "env=value with spaces ü",
+      "",
+    ].join("\n"),
+    "argv/cwd/env forwarded exactly",
+  );
+  assert.equal(result.stderr, "stderr=err with spaces ü\n", "stderr forwarded");
+
+  // Exit 0 and no-argument MCP-style start both reach Go without starting TS.
+  const zero = runCli([], {
+    env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: fake },
+  });
+  assert.equal(zero.status, 0);
+  assert.match(zero.stdout, /^argc=0\n/, "no arguments forwarded");
+
+  // The durable job worker selector is forwarded before any flag parsing.
+  const jobWorker = runCli(["__job-worker", "job", "log", "result", "/bin/sh", "echo"], {
+    env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: fake },
+  });
+  assert.equal(jobWorker.status, 0);
+  assert.match(jobWorker.stdout, /^argc=6\narg0=__job-worker\n/, "__job-worker argv forwarded untouched");
+
+  // Binary bytes on stdin reach Go unchanged.
+  const cat = fakeCat(join(dir, "cat"));
+  const bytes = Buffer.from([0, 1, 2, 10, 13, 26, 65, 255, 0]);
+  const stdinResult = runCli([], {
+    env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: cat },
+    input: bytes,
+    encoding: null,
+  });
+  assert.equal(stdinResult.status, 0);
+  assert.equal(Buffer.compare(stdinResult.stdout, bytes), 0, "stdin bytes forwarded unchanged");
+
+  // Missing, non-executable and directory targets fail without TS fallback.
+  const missing = join(ROOT_FIXTURE, "missing dir ü", "cave-tools-go");
+  const missingResult = runCli(["--version"], {
+    env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: missing },
+  });
+  assert.equal(missingResult.status, 127, "missing Go binary exit");
+  assert.match(missingResult.stderr, /CAVE_TOOLS_IMPL=go but the Go binary was not found/);
+  assert.match(missingResult.stderr, /cave-tools-go/);
+  assert.doesNotMatch(missingResult.stderr, /Usage: cave-tools|Benchmark mode/, "no TS fallback on missing Go");
+
+  const plain = join(dir, "plain-go");
+  writeFileSync(plain, "plain", { mode: 0o644 });
+  const plainResult = runCli(["--version"], {
+    env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: plain },
+  });
+  assert.equal(plainResult.status, 126, "non-executable Go binary exit");
+  assert.match(plainResult.stderr, /not executable/);
+  assert.doesNotMatch(plainResult.stderr, /Usage: cave-tools/, "no TS fallback on non-executable Go");
+
+  const directoryResult = runCli(["--version"], {
+    env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: dir },
+  });
+  assert.equal(directoryResult.status, 126, "directory target rejected");
+  assert.match(directoryResult.stderr, /not executable/);
+
+  // A relative override resolves against the caller's cwd, like spawn does.
+  const relativeCwd = join(ROOT_FIXTURE, "relative cwd ü");
+  fakeGo(join(relativeCwd, "rel bin"), "go ü");
+  const relative = runCli(["--version"], {
+    cwd: relativeCwd,
+    env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: join("rel bin", "go ü") },
+  });
+  assert.equal(relative.status, 0, relative.stderr);
+  assert.match(relative.stdout, /^argc=1\n/, "relative Go override accepted");
+}
+
+async function testDirectSignalRelay() {
+  if (!POSIX) {
+    console.log("SKIP direct signal relay: POSIX shell fixture");
+    return;
+  }
+  const fake = fakeSleeper(join(ROOT_FIXTURE, "signals"));
+
+  for (const signal of ["SIGTERM", "SIGINT"]) {
+    const child = spawn(process.execPath, [CLI], {
+      cwd: ROOT,
+      env: cliEnv({ CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: fake }),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    await waitForLine(child.stdout);
+    child.kill(signal);
+    const { code, signal: closeSignal } = await waitForClose(child);
+    assert.equal(code, null, `${signal}: parent exits by signal, not a code`);
+    assert.equal(closeSignal, signal, `${signal}: signal status preserved`);
+  }
+}
+
+async function testRealGoSmoke() {
+  if (!existsSync(GO_BIN)) {
+    console.log("SKIP real Go smoke: build go/bin/cave-tools-go first");
+    return;
+  }
+
+  const version = runCli(["--version"], { env: { CAVE_TOOLS_IMPL: "go" } });
+  assert.equal(version.status, 0, version.stderr);
+  assert.match(version.stdout, /^cave-tools-go \d+\.\d+\.\d+\r?\n$/, "local Go binary selected by default");
+
+  const help = runCli(["help", "read"], { env: { CAVE_TOOLS_IMPL: "go" } });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /^read: /, "non-MCP command routed to Go");
+
+  const unknown = runCli(["not-a-command"], { env: { CAVE_TOOLS_IMPL: "go" } });
+  assert.equal(unknown.status, 2, "Go usage errors keep their exit code");
+  assert.match(unknown.stderr, /^Usage: cave-tools /);
+
+  const init = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "switch-test", version: "1" },
+    },
+  });
+  const dataDir = join(ROOT_FIXTURE, "mcp-data");
+  const child = spawn(process.execPath, [CLI], {
+    cwd: ROOT,
+    env: cliEnv({
+      CAVE_TOOLS_IMPL: "go",
+      CAVE_TOOLS_DATA_DIR: dataDir,
+      CAVE_TOOLS_DAEMON: "0",
+    }),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  child.stdin.write(`${init}\n`);
+  const line = await waitForLine(child.stdout);
+  child.stdin.end();
+  const { code } = await waitForClose(child);
+  assert.equal(code, 0, stderr);
+  const response = JSON.parse(line.trim());
+  assert.equal(response.jsonrpc, "2.0");
+  assert.equal(response.id, 1);
+  assert.equal(response.result?.serverInfo?.name, "cave-tools");
+  assert.match(stderr, /Cave Tools MCP server running on stdio/);
+}
+
+function installFakeHome() {
+  if (installFakeHome.context) return installFakeHome.context;
+  const home = join(ROOT_FIXTURE, "home with spaces ü");
+  const nvm = join(ROOT_FIXTURE, "fake nvm");
+  const nodeDir = join(nvm, "versions", "node", `v${process.versions.node}`, "bin");
+  mkdirSync(nodeDir, { recursive: true });
+  if (!existsSync(join(nodeDir, "node"))) symlinkSync(process.execPath, join(nodeDir, "node"));
+  mkdirSync(join(nvm, "alias"), { recursive: true });
+  writeFileSync(join(nvm, "alias", "default"), `${process.versions.node}\n`);
+  mkdirSync(join(home, ".claude"), { recursive: true });
+
+  const result = spawnSync(process.execPath, [INSTALLER, "--agent", "claude"], {
+    cwd: ROOT,
+    env: {
+      ...cleanEnv(),
+      HOME: home,
+      NVM_DIR: nvm,
+      CLAUDE_CONFIG_DIR: join(home, ".claude"),
+    },
+    encoding: "utf8",
+    timeout: 30000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  installFakeHome.context = { home, nvm, shim: join(home, ".local", "bin", "cave-tools") };
+  return installFakeHome.context;
+}
+
+function shimEnv(context, extra = {}) {
+  return {
+    ...cleanEnv(),
+    HOME: context.home,
+    NVM_DIR: context.nvm,
+    CLAUDE_CONFIG_DIR: join(context.home, ".claude"),
+    CAVE_TOOLS_DATA_DIR: join(ROOT_FIXTURE, "shim-data"),
+    ...extra,
+  };
+}
+
+function runShim(context, args, options = {}) {
+  const result = spawnSync(context.shim, args, {
+    cwd: options.cwd ?? ROOT,
+    env: shimEnv(context, options.env),
+    input: options.input,
+    encoding: options.encoding === undefined ? "utf8" : options.encoding,
+    timeout: options.timeout ?? 15000,
+  });
+  if (result.error) throw result.error;
+  return result;
+}
+
+function testLauncherShim() {
+  if (!POSIX) {
+    console.log("SKIP POSIX launcher shim: not on POSIX");
+    return;
+  }
+  const installerSyntax = spawnSync(process.execPath, ["--check", INSTALLER], { encoding: "utf8" });
+  assert.equal(installerSyntax.status, 0, installerSyntax.stderr);
+  const context = installFakeHome();
+  assert.ok(existsSync(context.shim), "generated cave-tools shim exists");
+  assert.equal(statSync(context.shim).mode & 0o777, 0o755, "shim is executable");
+  const shim = readFileSync(context.shim, "utf8");
+  assert.match(shim, /\[ "\$\{CAVE_TOOLS_IMPL:-\}" = "go" \]/, "exact go comparison");
+  const syntax = spawnSync("sh", ["-n", context.shim], { encoding: "utf8" });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  const goExec = shim.indexOf('exec "$cave_go_bin" "$@"');
+  const nodeExec = shim.lastIndexOf('exec "');
+  assert.ok(goExec > 0, "shim execs the Go binary");
+  assert.ok(nodeExec > goExec, "Go selection precedes the Node launcher");
+  assert.match(shim, /exit 127/, "missing Go binary has a hard failure");
+
+  const settings = JSON.parse(readFileSync(join(context.home, ".claude", "settings.json"), "utf8"));
+  const sessionCommands = (settings.hooks?.SessionStart ?? [])
+    .flatMap((group) => group.hooks ?? [])
+    .map((hook) => String(hook.command ?? ""));
+  assert.ok(
+    sessionCommands.includes(`"${context.shim}" status --emit-statusline`),
+    "statusline hook quotes the launcher path (spaces safe)",
+  );
+
+  const dir = join(ROOT_FIXTURE, "shim");
+  const fake = fakeGo(join(dir, "bin with spaces ü"), "cave tools-go ü");
+  const marker = join(dir, "marker");
+  const cwd = join(ROOT_FIXTURE, "shim cwd with spaces ü");
+  mkdirSync(cwd, { recursive: true });
+
+  const ok = runShim(context, ["alpha beta", 'quote"x', "single'quote", "back\\slash", "ünïcode", "", "$HOME", "*"], {
+    cwd,
+    env: {
+      CAVE_TOOLS_IMPL: "go",
+      CAVE_TOOLS_GO_BIN: fake,
+      CAVE_TOOLS_SWITCH_MARKER: marker,
+      CAVE_TOOLS_SWITCH_ENV: "value with spaces ü",
+      CAVE_TOOLS_SWITCH_STDERR: "shim stderr ü",
+      CAVE_TOOLS_SWITCH_EXIT: "7",
+    },
+  });
+  assert.equal(ok.status, 7, "shim forwards Go exit code");
+  assert.equal(existsSync(marker), true);
+  assert.equal(
+    ok.stdout,
+    [
+      "argc=8",
+      "arg0=alpha beta",
+      'arg1=quote"x',
+      "arg2=single'quote",
+      "arg3=back\\slash",
+      "arg4=ünïcode",
+      "arg5=",
+      "arg6=$HOME",
+      "arg7=*",
+      `cwd=${cwd}`,
+      "env=value with spaces ü",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(ok.stderr, "stderr=shim stderr ü\n");
+
+  const noArgs = runShim(context, [], {
+    env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: fake },
+  });
+  assert.equal(noArgs.status, 0);
+  assert.match(noArgs.stdout, /^argc=0\n/);
+
+  const cat = fakeCat(join(dir, "cat"));
+  const bytes = Buffer.from([0, 1, 2, 10, 13, 255, 65, 0]);
+  const piped = runShim(context, [], {
+    env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: cat },
+    input: bytes,
+    encoding: null,
+  });
+  assert.equal(piped.status, 0);
+  assert.equal(Buffer.compare(piped.stdout, bytes), 0, "shim forwards stdin bytes");
+
+  const missing = runShim(context, ["--version"], {
+    env: {
+      CAVE_TOOLS_IMPL: "go",
+      CAVE_TOOLS_GO_BIN: join(ROOT_FIXTURE, "missing shim ü", "go"),
+    },
+  });
+  assert.equal(missing.status, 127);
+  assert.match(missing.stderr, /missing or not executable/);
+  assert.doesNotMatch(missing.stderr, /Usage: cave-tools/, "shim does not fall back to Node");
+
+  // Non-go values keep TypeScript. The fake Go marker must stay absent.
+  for (const value of [undefined, "Go", "typescript"]) {
+    rmSync(marker, { force: true });
+    const env = { CAVE_TOOLS_GO_BIN: fake, CAVE_TOOLS_SWITCH_MARKER: marker };
+    if (value === undefined) delete env.CAVE_TOOLS_IMPL;
+    else env.CAVE_TOOLS_IMPL = value;
+    const ts = runShim(context, ["--version"], { env });
+    assert.equal(ts.status, 2, `TS default for ${JSON.stringify(value)}`);
+    assert.match(ts.stderr, /^Usage: cave-tools /);
+    assert.equal(existsSync(marker), false, "Go not started for non-go values");
+  }
+
+  if (existsSync(GO_BIN)) {
+    const real = runShim(context, ["--version"], { env: { CAVE_TOOLS_IMPL: "go" } });
+    assert.equal(real.status, 0, real.stderr);
+    assert.match(real.stdout, /^cave-tools-go \d+\.\d+\.\d+\r?\n$/, "shim selects the local Go binary");
+  } else {
+    console.log("SKIP shim real Go smoke: build go/bin/cave-tools-go first");
+  }
+}
+
+async function testShimSignal() {
+  if (!POSIX) return;
+  const context = installFakeHome();
+  const fake = fakeSleeper(join(ROOT_FIXTURE, "shim-signals"));
+  for (const signal of ["SIGTERM", "SIGINT"]) {
+    const child = spawn(context.shim, [], {
+      cwd: ROOT,
+      env: shimEnv(context, { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: fake }),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    await waitForLine(child.stdout);
+    child.kill(signal);
+    const { code, signal: closeSignal } = await waitForClose(child);
+    assert.equal(code, null, `${signal}: shim execs Go without a wrapper`);
+    assert.equal(closeSignal, signal);
+  }
+}
+
+async function main() {
+  try {
+    await testResolutionModule();
+    testDirectSwitch();
+    await testDirectSignalRelay();
+    await testRealGoSmoke();
+    testLauncherShim();
+    await testShimSignal();
+    console.log("impl switch tests passed");
+  } finally {
+    rmSync(ROOT_FIXTURE, { recursive: true, force: true });
+  }
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
