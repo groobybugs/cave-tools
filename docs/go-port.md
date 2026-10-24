@@ -125,6 +125,33 @@ Non-Go files under `src/` (`src/plugins/**`) are not ported.
 regexes and whitespace helpers behave like JavaScript (see
 "Regex and whitespace rule" below).
 
+### Durable job worker
+
+TS starts a background job by spawning
+`process.execPath dist/runtime/job-worker.js <jobId> <logPath> <resultPath> <shell> <command>`.
+Go has no separate worker script, so it re-executes its own binary and uses
+argv[1] as the worker selector; the remaining arguments keep TS's positions:
+
+```
+cave-tools-go __job-worker <jobId> <logPath> <resultPath> <shell> <command>
+```
+
+`runtime.JobWorkerCommand` is the selector (`"__job-worker"`). `jobs.StartJob`
+passes it as `StartDurableBackgroundOptions.WorkerPath` to
+`runtime.StartDurableBackgroundCommand`, which invokes the current executable
+with `WorkerPath` first. `cmd/cave-tools-go/main.go` must check for it before
+any flag parsing (W3k wiring):
+
+```go
+if len(os.Args) > 1 && os.Args[1] == runtime.JobWorkerCommand {
+    os.Exit(runtime.RunJobWorker(os.Args[2:]))
+}
+```
+
+The worker writes the same log header, `[cave-job exit=N signal=SIG]` marker
+and `<jobId>.result.json` sidecar as TS, so both implementations can adopt
+each other's running jobs.
+
 ## Package boundaries
 
 ```
@@ -393,6 +420,13 @@ Accepted legacy-migration deviations (one-time import of pre-SQLite files; not w
 - A legacy session with `budgets: null` is stored as `{}` (TS stores `null`).
 - A legacy session missing `savings.byTool` or `bounces.byExtension` keeps its row with no tool/bounce rows in Go; TS keeps the row and throws before the tool/bounce rows.
 - String-typed numbers in legacy `lifetime.json` (e.g. `"calls": "5"`) read as 0 in Go; TS lets SQLite coerce them to 5.
+
+Accepted runtime deviations (W1b, Muse review):
+
+- Fallback file finder (no rg/fd) sorts byte-wise; TS uses `localeCompare` (ICU), so mixed-case order can differ.
+- `RunCommand` options `MaxBytes`/`MaxLines`/`ForceKillAfterMs` treat 0 as "use default"; TS `??` keeps an explicit 0. No TS caller passes 0.
+- `BinResolution` uses `""` for a missing binary where TS uses `null`. W3k: `cave-tools bins` must print `(missing)` for `""` (TS prints it for null).
+- Child output is decoded once from the full byte buffer; TS decodes per chunk, so a multibyte char split across chunks becomes U+FFFD in TS but decodes correctly in Go.
 
 ### TS bugs found while porting
 
