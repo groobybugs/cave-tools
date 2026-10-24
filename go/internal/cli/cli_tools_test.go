@@ -463,6 +463,39 @@ func TestRunFilterCommand(t *testing.T) {
 	}
 }
 
+// TestFilterJSONInvalidJSONUsesV8Message pins the TS behaviour: on malformed
+// stdin, filter --json prints the V8 JSON.parse SyntaxError text, not
+// encoding/json's wording. Expectations recorded from node v24.19.0.
+func TestFilterJSONInvalidJSONUsesV8Message(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"not json", `Unexpected token 'o', "not json" is not valid JSON`},
+		{"", "Unexpected end of JSON input"},
+		{"\uFEFF{}", "Unexpected token '\uFEFF', \"\uFEFF{}\" is not valid JSON"},
+		{"[1 2]", "Expected ',' or ']' after array element in JSON at position 3 (line 1 column 4)"},
+		{"{\"a\":1,}", "Expected double-quoted property name in JSON at position 7 (line 1 column 8)"},
+		{"01", "Unexpected number in JSON at position 1 (line 1 column 2)"},
+		{"{\n  \"a\": 1,\n  \"b\": 2,\n}", "Expected double-quoted property name in JSON at position 22 (line 4 column 1)"},
+		{"NaN", `"NaN" is not valid JSON`},
+	}
+	for _, tc := range cases {
+		var out, errOut bytes.Buffer
+		code := Run(context.Background(), []string{"filter", "--json"}, strings.NewReader(tc.input), &out, &errOut, "test")
+		if code != 1 {
+			t.Fatalf("input %q: exit = %d, want 1", tc.input, code)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("input %q: stdout = %q, want empty", tc.input, out.String())
+		}
+		want := "cave-tools filter: " + tc.want + "\n"
+		if errOut.String() != want {
+			t.Fatalf("input %q:\n got: %q\nwant: %q", tc.input, errOut.String(), want)
+		}
+	}
+}
+
 func TestBinsDisplay(t *testing.T) {
 	if got := binsDisplay(""); got != "(missing)" {
 		t.Fatalf("binsDisplay(\"\") = %q", got)

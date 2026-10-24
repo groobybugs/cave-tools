@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
+	"github.com/groobybugs/cave-tools/go/internal/jsjson"
 	"github.com/groobybugs/cave-tools/go/internal/jsre"
 	rt "github.com/groobybugs/cave-tools/go/internal/runtime"
 	"github.com/groobybugs/cave-tools/go/internal/tools/bash"
@@ -971,7 +972,14 @@ func runFilterCommand(ctx context.Context, argv []string, stdin io.Reader, stdou
 	}
 	var parsed any
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		return finish(stderr, "cave-tools filter: "+err.Error(), 1)
+		// TS surfaces JSON.parse's V8 SyntaxError text; reproduce it instead
+		// of encoding/json's wording. The validator only runs on the error
+		// path, so successful decoding is unchanged.
+		message := err.Error()
+		if v8Message := jsjson.SyntaxErrorMessage(text); v8Message != "" {
+			message = v8Message
+		}
+		return finish(stderr, "cave-tools filter: "+message, 1)
 	}
 	input, ok := parsed.(map[string]any)
 	if !ok {
