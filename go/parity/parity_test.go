@@ -30,6 +30,11 @@ type parityCase struct {
 	args  []string
 	stdin string
 	env   map[string]string
+	// setup names a shared fixture TestParity prepares before running the
+	// case: "bins" puts fake rg/fd first on PATH with a temporary HOME;
+	// "shared" points both sides at one data/config/runtime dir so outputs
+	// that embed those paths stay byte-identical.
+	setup string
 
 	// knownDivergence, when set, explains why the two implementations cannot
 	// be compared byte-for-byte yet. In that mode wantTS / wantGo pin each
@@ -51,14 +56,86 @@ func parityCases(version string) []parityCase {
 		{
 			name: "version",
 			args: []string{"--version"},
-			knownDivergence: "src/cli.ts has no --version branch, so node dist/cli.js --version " +
-				"prints the usage line to stderr and exits 2. The Go stub prints the package.json " +
-				"version and exits 0 (W0 requirement). This case pins both sides until W3 ports the " +
-				"CLI, then it becomes a strict comparison.",
+			knownDivergence: "Intentional compatibility harness: src/cli.ts has no --version " +
+				"branch, so node dist/cli.js --version prints the usage line to stderr and exits 2. " +
+				"The Go binary keeps the W0/W4k version probe (`cave-tools-go <version>`, exit 0).",
 			wantTS: &outcome{stdout: "", stderr: tsUsageLine + "\n", code: 2},
 			wantGo: &outcome{stdout: "cave-tools-go " + version + "\n", stderr: "", code: 0},
 		},
+		{name: "help", args: []string{"help"}},
+		{name: "help-read", args: []string{"help", "read"}},
+		{name: "help-bash", args: []string{"help", "bash"}},
+		{name: "help-unknown", args: []string{"help", "bogus"}},
+		{name: "read", args: []string{"read", "README.md", "--limit", "5"}},
+		{name: "read-session", args: []string{"read", "README.md", "--limit", "2", "--session", "abc"}},
+		{name: "read-bad-flag", args: []string{"read", "README.md", "--bogus", "1"}},
+		{name: "grep", args: []string{"grep", "Token", "README.md", "--limit", "3"}},
+		{name: "bash", args: []string{"bash", "echo cli-parity"}},
+		{name: "raw-exit", args: []string{"raw", "echo x; echo y >&2; exit 4"}},
+		{name: "raw-quote", args: []string{"raw", "--", "printf", "%s|", "a b"}},
+		{name: "raw-signal", args: []string{"raw", "kill -TERM $$"}},
+		{name: "raw-stdin", args: []string{"raw", "cat"}, stdin: "piped\n"},
+		{name: "raw-usage", args: []string{"raw"}},
+		{name: "filter-json", args: []string{"filter", "--json"}, stdin: `{"command":"make","stdout":"ok\n","stderr":"token=ghp_abcdefghijklmnopqrstuvwxyz0123456789","exitCode":0}`},
+		{name: "filter-missing-fields", args: []string{"filter", "--json"}, stdin: `{"stdout":"x"}`},
+		{name: "filter-no-json", args: []string{"filter"}, stdin: `{}`},
+		{name: "status", args: []string{"status", "--verbose"}, env: map[string]string{"CAVE_TOOLS_STATUS_RTK": "0", "CAVE_TOOLS_ASCII": "1"}},
+		{name: "status-emit-statusline", args: []string{"status", "--emit-statusline"}, env: map[string]string{"CAVE_TOOLS_STATUS_RTK": "0"}},
+		{name: "jobs", args: []string{"jobs"}},
+		{name: "jobs-usage", args: []string{"jobs", "kill"}},
+		{name: "jobs-unknown", args: []string{"jobs", "log", "nope"}},
+		{name: "bins", args: []string{"bins"}, setup: "bins"},
+		{name: "daemon-status", args: []string{"daemon", "status"}, setup: "shared"},
+		{name: "daemon-stop", args: []string{"daemon", "stop"}, setup: "shared"},
+		{name: "daemon-usage", args: []string{"daemon", "bogus"}},
+		{name: "errors", args: []string{"errors"}, setup: "shared"},
+		{name: "errors-bad-limit", args: []string{"errors", "--limit", "abc"}, setup: "shared"},
+		{name: "bench", args: []string{"bench"}},
+		{name: "tool-unknown", args: []string{"tool"}},
+		{name: "unknown-command", args: []string{"bogus"}},
 	}
+}
+
+// parityFixtures holds the shared directories CLI cases may need.
+type parityFixtures struct {
+	binDir string
+	home   string
+	shared string
+}
+
+// prepareFixtures creates fake rg/fd executables and the shared data/config/
+// runtime tree used by cases whose output embeds those paths.
+func prepareFixtures(t *testing.T) parityFixtures {
+	t.Helper()
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	home := filepath.Join(root, "home")
+	shared := filepath.Join(root, "shared")
+	for _, dir := range []string{binDir, home, filepath.Join(shared, "data"), filepath.Join(shared, "claude"), filepath.Join(shared, "run")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	script := []byte("#!/bin/sh\nexit 0\n")
+	for _, name := range []string{"rg", "fd"} {
+		path := filepath.Join(binDir, name)
+		if err := os.WriteFile(path, script, 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return parityFixtures{binDir: binDir, home: home, shared: shared}
+}
+
+// mergeEnv copies base and applies extra on top.
+func mergeEnv(base, extra map[string]string) map[string]string {
+	merged := make(map[string]string, len(base)+len(extra))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range extra {
+		merged[key] = value
+	}
+	return merged
 }
 
 func TestParity(t *testing.T) {
@@ -75,7 +152,25 @@ func TestParity(t *testing.T) {
 	version := packageVersion(t, root)
 	goBinary := buildGoBinary(t, root, version)
 
-	for _, testCase := range parityCases(version) {
+	fixtures := prepareFixtures(t)
+	cases := parityCases(version)
+	for i := range cases {
+		switch cases[i].setup {
+		case "bins":
+			cases[i].env = mergeEnv(cases[i].env, map[string]string{
+				"PATH": fixtures.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"HOME": fixtures.home,
+			})
+		case "shared":
+			cases[i].env = mergeEnv(cases[i].env, map[string]string{
+				"CAVE_TOOLS_DATA_DIR": filepath.Join(fixtures.shared, "data"),
+				"CLAUDE_CONFIG_DIR":   filepath.Join(fixtures.shared, "claude"),
+				"XDG_RUNTIME_DIR":     filepath.Join(fixtures.shared, "run"),
+			})
+		}
+	}
+
+	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			tsDir := t.TempDir()
 			goDir := t.TempDir()
