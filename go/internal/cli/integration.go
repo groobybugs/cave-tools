@@ -5,8 +5,8 @@
 // layering (cli is the top entry layer) but wires the concrete server and
 // daemon packages from a separate file so the argument parser, help renderer,
 // status report, jobs/bins commands and raw/filter paths can be built and
-// tested before those packages land. bindings.go installs the production
-// implementations; tests install fixtures.
+// tested before those packages land. bindings_server.go / bindings_daemon.go
+// install the production implementations; tests install fixtures.
 package cli
 
 import (
