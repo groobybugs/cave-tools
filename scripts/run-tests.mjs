@@ -38,6 +38,7 @@ const DEDICATED_SUITE = [
   { name: "edit-handler-v2", script: "scripts/test-edit-handler-v2.mjs" },
   { name: "file-mutation-locks", script: "scripts/test-file-mutation-locks.mjs" },
   { name: "port-bugs", script: "scripts/test-port-bugs.mjs" },
+  { name: "impl-switch", script: "scripts/test-impl-switch.mjs" },
   { name: "usage-analyzer", script: "scripts/test-usage-analyzer.mjs" },
 ];
 
@@ -108,15 +109,20 @@ function runSuite(suite) {
       mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
 
       console.log(`\n[tests] ${test.name}: ${test.script}`);
+      const childEnv = {
+        ...process.env,
+        CAVE_TOOLS_DATA_DIR: dataDir,
+        CLAUDE_CONFIG_DIR: claudeDir,
+        CAVE_TOOLS_DAEMON: "0",
+      };
+      // The TypeScript reference suite must never re-enter the opt-in Go
+      // implementation because the developer's shell exported the switch.
+      delete childEnv.CAVE_TOOLS_IMPL;
+      delete childEnv.CAVE_TOOLS_GO_BIN;
       const result = spawnSync(process.execPath, [scriptPath], {
         cwd: ROOT,
         stdio: "inherit",
-        env: {
-          ...process.env,
-          CAVE_TOOLS_DATA_DIR: dataDir,
-          CLAUDE_CONFIG_DIR: claudeDir,
-          CAVE_TOOLS_DAEMON: "0",
-        },
+        env: childEnv,
       });
 
       if (result.error) {
