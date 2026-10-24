@@ -354,10 +354,10 @@ func TestTruncateCommand(t *testing.T) {
 // TestNonNegativeInteger pins the JS Number/floor semantics.
 func TestNonNegativeInteger(t *testing.T) {
 	if value, ok := nonnegativeInteger(nil, false, 50); !ok || value != 50 {
-		t.Fatalf("undefined = %d/%v", value, ok)
+		t.Fatalf("undefined = %v/%v", value, ok)
 	}
 	if value, ok := nonnegativeInteger("2.9", true, 0); !ok || value != 2 {
-		t.Fatalf("string 2.9 = %d/%v", value, ok)
+		t.Fatalf("string 2.9 = %v/%v", value, ok)
 	}
 	if _, ok := nonnegativeInteger(float64(-1), true, 0); ok {
 		t.Fatal("negative should be null")
@@ -385,5 +385,17 @@ func TestBudgetAndArchive(t *testing.T) {
 	got := compression.ApplyBudget(context.Background(), strings.Repeat("line\n", 100), "bash")
 	if !strings.Contains(got, "lines truncated") {
 		t.Fatalf("budget = %q", got)
+	}
+}
+
+// TestTruncateCommandAstralCutLimitation documents the known deviation: TS
+// oneLine.slice(0, 117) can end on a lone high surrogate, which Go strings
+// cannot hold, so the port emits U+FFFD instead of a surrogate code unit.
+func TestTruncateCommandAstralCutLimitation(t *testing.T) {
+	command := strings.Repeat("a", 116) + "\U0001F600" + "xyz"
+	got := truncateCommand(command)
+	want := strings.Repeat("a", 116) + "\uFFFD..."
+	if got != want {
+		t.Fatalf("truncateCommand = %q, want %q", got, want)
 	}
 }

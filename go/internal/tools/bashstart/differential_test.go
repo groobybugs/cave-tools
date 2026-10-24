@@ -31,6 +31,8 @@ func TestDifferentialAgainstTypeScript(t *testing.T) {
 		{name: "description-fallback", args: `{"command":"echo 'Authorization: Bearer sk-live-abcdefghijklmnop'","description":"","__sessionId":"diff-start"}`},
 		{name: "missing-workdir", args: `{"command":"echo hi","description":"d","workdir":"nope-does-not-exist"}`},
 		{name: "null-description", args: `{"command":"echo hi","description":null,"__sessionId":"diff-start"}`},
+		{name: "missing-command", args: `{"__sessionId":"diff-start"}`},
+		{name: "null-command", args: `{"command":null,"__sessionId":"diff-start"}`},
 	}
 
 	for _, testCase := range cases {

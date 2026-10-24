@@ -3,9 +3,12 @@ package ls
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/groobybugs/cave-tools/go/internal/types"
@@ -180,5 +183,34 @@ func TestOffsetCoercion(t *testing.T) {
 	got := text(t, run(t, map[string]any{"path": dir, "offset": "2", "limit": "2"}))
 	if !strings.Contains(got, "Directory listing truncated. Use offset=4 to continue") {
 		t.Fatalf("text = %q", got)
+	}
+}
+
+// TestReaddirErrorMessages pins the Node fs error strings for the errno codes
+// reachable through readdir; ENOTDIR/ELOOP would otherwise print Go's
+// "readdir <path>: ..." wording.
+func TestReaddirErrorMessages(t *testing.T) {
+	path := filepath.Join(string(filepath.Separator), "tmp", "cave")
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "enoent", err: &fs.PathError{Op: "readdir", Path: path, Err: syscall.ENOENT}, want: "ENOENT: no such file or directory, scandir '" + path + "'"},
+		{name: "eacces", err: &fs.PathError{Op: "readdir", Path: path, Err: syscall.EACCES}, want: "EACCES: permission denied, scandir '" + path + "'"},
+		{name: "enotdir", err: &fs.PathError{Op: "readdir", Path: path, Err: syscall.ENOTDIR}, want: "ENOTDIR: not a directory, scandir '" + path + "'"},
+		{name: "eloop", err: &fs.PathError{Op: "readdir", Path: path, Err: syscall.ELOOP}, want: "ELOOP: too many symbolic links encountered, scandir '" + path + "'"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if goruntime.GOOS == "windows" && testCase.name == "enotdir" {
+				// Windows maps ERROR_PATH_NOT_FOUND (syscall.ENOTDIR) to
+				// fs.ErrNotExist, so the production helper reports ENOENT there.
+				t.Skip("Windows aliases ENOTDIR to fs.ErrNotExist")
+			}
+			if got := readdirErrorMessage(testCase.err, path); got != testCase.want {
+				t.Fatalf("readdirErrorMessage = %q, want %q", got, testCase.want)
+			}
+		})
 	}
 }

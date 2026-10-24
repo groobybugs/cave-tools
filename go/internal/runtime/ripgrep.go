@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,11 +29,13 @@ type GrepMatch struct {
 	Text string `json:"text"`
 }
 
-// LineWindow mirrors one entry of readLineWindow's result.
+// LineWindow mirrors one entry of readLineWindow's result. TS numbers are
+// float64: a fractional context makes `current` fractional, so the line number
+// and the empty text must stay exact.
 type LineWindow struct {
-	Line  int64  `json:"line"`
-	Text  string `json:"text"`
-	Match bool   `json:"match"`
+	Line  float64 `json:"line"`
+	Text  string  `json:"text"`
+	Match bool    `json:"match"`
 }
 
 // RgGrepResult mirrors rgGrep's { matches, truncated } result.
@@ -43,13 +46,13 @@ type RgGrepResult struct {
 
 // RgGrepInput mirrors rgGrep's input object.
 type RgGrepInput struct {
-	Cwd        string `json:"cwd"`
-	Pattern    string `json:"pattern"`
-	File       string `json:"file,omitempty"`
-	Include    string `json:"include,omitempty"`
-	Limit      int64  `json:"limit"`
-	IgnoreCase bool   `json:"ignoreCase,omitempty"`
-	Literal    bool   `json:"literal,omitempty"`
+	Cwd        string  `json:"cwd"`
+	Pattern    string  `json:"pattern"`
+	File       string  `json:"file,omitempty"`
+	Include    string  `json:"include,omitempty"`
+	Limit      float64 `json:"limit"`
+	IgnoreCase bool    `json:"ignoreCase,omitempty"`
+	Literal    bool    `json:"literal,omitempty"`
 }
 
 // port of src/runtime/ripgrep.ts:isInvalidPattern
@@ -109,7 +112,7 @@ func spawnBin(ctx context.Context, command string, args []string, cwd string) sp
 }
 
 // port of src/runtime/ripgrep.ts:parsePathLines
-func parsePathLines(stdout string, limit int) []string {
+func parsePathLines(stdout string, limit float64) []string {
 	lines := strings.Split(stdout, "\n")
 	result := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -122,16 +125,34 @@ func parsePathLines(stdout string, limit int) []string {
 		if trimmed == "" {
 			continue
 		}
-		if limit <= 0 || len(result) >= limit {
-			break
-		}
 		result = append(result, trimmed)
 	}
-	return result
+	// TS ends with .slice(0, limit): ToIntegerOrInfinity truncates, NaN is 0,
+	// a negative end counts from the tail and Infinity keeps everything.
+	return result[:jsSliceEnd(limit, len(result))]
+}
+
+// jsSliceEnd mirrors ToIntegerOrInfinity for Array.prototype.slice(0, limit)
+// with a non-negative start.
+func jsSliceEnd(limit float64, length int) int {
+	if math.IsNaN(limit) {
+		return 0
+	}
+	truncated := math.Trunc(limit)
+	if truncated >= float64(length) {
+		return length
+	}
+	if truncated < 0 {
+		truncated += float64(length)
+		if truncated < 0 {
+			return 0
+		}
+	}
+	return int(truncated)
 }
 
 // port of src/runtime/ripgrep.ts:findWithNode
-func findWithNode(cwd, pattern string, limit int, hidden bool) []string {
+func findWithNode(cwd, pattern string, limit float64, hidden bool) []string {
 	matcherPattern := pattern
 	if !strings.Contains(pattern, "/") {
 		matcherPattern = "**/" + pattern
@@ -143,7 +164,7 @@ func findWithNode(cwd, pattern string, limit int, hidden bool) []string {
 	}
 	results := []string{}
 	stack := []string{cwd}
-	for len(stack) > 0 && len(results) < limit {
+	for len(stack) > 0 && float64(len(results)) < limit {
 		dir := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		entries, err := os.ReadDir(dir)
@@ -173,24 +194,29 @@ func findWithNode(cwd, pattern string, limit int, hidden bool) []string {
 				(basenameMatcher != nil && basenameMatcher.MatchString(filepath.Base(relative))) {
 				results = append(results, relative)
 			}
-			if len(results) >= limit {
+			if float64(len(results)) >= limit {
 				break
 			}
 		}
 	}
-	sort.Slice(results, func(i, j int) bool { return results[i] < results[j] })
+	// TS sorts with a.localeCompare(b); the ICU primary/tertiary order differs
+	// from a byte-wise sort for mixed case. LocaleCompare is the printable-
+	// ASCII equivalent shared with ls.
+	sort.Slice(results, func(i, j int) bool { return LocaleCompare(results[i], results[j]) < 0 })
 	return results
 }
 
 // port of src/runtime/ripgrep.ts:rgFiles
-func RgFiles(ctx context.Context, cwd, pattern string, limit int, hidden bool) ([]string, error) {
+func RgFiles(ctx context.Context, cwd, pattern string, limit float64, hidden bool) ([]string, error) {
 	fd := ResolveFd(ctx, nil)
 	if fd != "" {
 		args := []string{"--glob", pattern}
 		if hidden {
 			args = append(args, "--hidden")
 		}
-		args = append(args, "--exclude", ".git", "--max-results", strconv.Itoa(limit), ".")
+		// TS passes String(limit): fd receives "2.5"/"1e+21"/"Infinity" and
+		// rejects them, which is what sends the call to the rg fallback.
+		args = append(args, "--exclude", ".git", "--max-results", jsNumberString(limit), ".")
 		fdResult := spawnBin(ctx, fd, args, cwd)
 		if fdResult.Err == nil && (fdResult.Code == 0 || fdResult.Code == 1) {
 			return parsePathLines(fdResult.Stdout, limit), nil
@@ -315,26 +341,25 @@ func RgGrep(ctx context.Context, input RgGrepInput) (RgGrepResult, error) {
 			text = truncateUTF16(text, maxLineLength) + "..."
 		}
 		matches = append(matches, GrepMatch{Path: relative, Line: lineNumber, Text: text})
-		if int64(len(matches)) > input.Limit {
+		// TS: matches.length > input.limit. NaN never breaks, so later records
+		// are still parsed (and rejected when malformed) exactly like TS.
+		if float64(len(matches)) > input.Limit {
 			break
 		}
 	}
 
-	end := int(input.Limit)
-	if end > len(matches) {
-		end = len(matches)
-	}
-	if end < 0 {
-		end = 0
-	}
 	return RgGrepResult{
-		Matches:   matches[:end],
-		Truncated: int64(len(matches)) > input.Limit || result.Code == 2,
+		Matches:   matches[:jsSliceEnd(input.Limit, len(matches))],
+		Truncated: float64(len(matches)) > input.Limit || result.Code == 2,
 	}, nil
 }
 
 // port of src/runtime/ripgrep.ts:readLineWindow
-func ReadLineWindow(filePath string, line int64, lineContext int64) ([]LineWindow, error) {
+//
+// line and lineContext are JS numbers. A fractional context makes `current`
+// fractional: TS then reads lines[current - 1] (an undefined array property),
+// so the text is empty and the emitted line number keeps its fraction.
+func ReadLineWindow(filePath string, line float64, lineContext float64) ([]LineWindow, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
@@ -344,19 +369,13 @@ func ReadLineWindow(filePath string, line int64, lineContext int64) ([]LineWindo
 	text = strings.ReplaceAll(text, "\r", "\n")
 	lines := strings.Split(text, "\n")
 
-	start := line - lineContext
-	if start < 1 {
-		start = 1
-	}
-	end := line + lineContext
-	if end > int64(len(lines)) {
-		end = int64(len(lines))
-	}
+	start := math.Max(1, line-lineContext)
+	end := math.Min(float64(len(lines)), line+lineContext)
 	result := []LineWindow{}
 	for current := start; current <= end; current++ {
 		raw := ""
-		if current >= 1 && current <= int64(len(lines)) {
-			raw = lines[current-1]
+		if current == math.Trunc(current) && current >= 1 && current <= float64(len(lines)) {
+			raw = lines[int(current)-1]
 		}
 		if utf16Length(raw) > 500 {
 			raw = truncateUTF16(raw, 500) + "... (truncated)"
@@ -364,4 +383,37 @@ func ReadLineWindow(filePath string, line int64, lineContext int64) ([]LineWindo
 		result = append(result, LineWindow{Line: current, Text: raw, Match: current == line})
 	}
 	return result, nil
+}
+
+// jsNumberString formats a float like ECMAScript Number::toString(10) for the
+// values tool arguments carry. strconv.Itoa would print 1e+21 differently.
+func jsNumberString(value float64) string {
+	switch {
+	case math.IsNaN(value):
+		return "NaN"
+	case math.IsInf(value, 1):
+		return "Infinity"
+	case math.IsInf(value, -1):
+		return "-Infinity"
+	case value == 0:
+		return "0"
+	}
+	abs := math.Abs(value)
+	if abs >= 1e-6 && abs < 1e21 {
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	}
+	formatted := strconv.FormatFloat(value, 'e', -1, 64)
+	if index := strings.IndexByte(formatted, 'e'); index >= 0 {
+		mantissa, exponent := formatted[:index], formatted[index+1:]
+		exponentSign := ""
+		if strings.HasPrefix(exponent, "+") || strings.HasPrefix(exponent, "-") {
+			exponentSign, exponent = exponent[:1], exponent[1:]
+		}
+		exponent = strings.TrimLeft(exponent, "0")
+		if exponent == "" {
+			exponent = "0"
+		}
+		formatted = mantissa + "e" + exponentSign + exponent
+	}
+	return formatted
 }

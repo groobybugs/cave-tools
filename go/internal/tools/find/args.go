@@ -66,6 +66,15 @@ func jsString(value any) string {
 	}
 }
 
+// jsArgString mirrors String(args[key]) where a missing key is ECMAScript
+// undefined. A present JSON null still becomes "null".
+func jsArgString(args map[string]any, key string) string {
+	if value, ok := args[key]; ok {
+		return jsString(value)
+	}
+	return "undefined"
+}
+
 // jsNumber mirrors the ECMAScript ToNumber abstract operation.
 func jsNumber(value any) float64 {
 	switch v := value.(type) {

@@ -29,7 +29,7 @@ var Tool = types.ToolDefinition{
 // handle is the cave__find handler.
 // port of src/tools/find.ts:findTool.handler
 func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) {
-	pattern := jsString(args["pattern"])
+	pattern := jsArgString(args, "pattern")
 	limit := float64(defaultLimit)
 	if raw, ok := args["limit"]; ok {
 		if number := jsNumber(raw); !math.IsNaN(number) && number != 0 {
@@ -49,7 +49,7 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 		return errorResult("Path not found or not a directory: " + resolvePath(rt.GetCwd(ctx), pathArg)), nil
 	}
 
-	lines, err := rt.RgFiles(ctx, searchPath, pattern, limitInt(limit), hidden)
+	lines, err := rt.RgFiles(ctx, searchPath, pattern, limit, hidden)
 	if err != nil {
 		return errorResult("Error: " + err.Error()), nil
 	}
@@ -72,18 +72,6 @@ func resolvePath(cwd, value string) string {
 		return filepath.Clean(value)
 	}
 	return filepath.Join(cwd, value)
-}
-
-// limitInt converts the JS number limit to an int, saturating instead of
-// overflowing.
-func limitInt(limit float64) int {
-	if math.IsNaN(limit) {
-		return 0
-	}
-	if limit >= math.MaxInt32 {
-		return math.MaxInt32
-	}
-	return int(limit)
 }
 
 func textResult(text string) types.ToolResult {
