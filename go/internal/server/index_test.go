@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -327,5 +329,78 @@ func TestMCPPipeNoHTMLEscaping(t *testing.T) {
 	}
 	if !bytes.Contains(pipe.lastRaw, []byte("a <tag> & b")) {
 		t.Fatalf("wire lost literal HTML: %s", pipe.lastRaw)
+	}
+}
+
+// TestMCPCallArgumentsNumberOverflow pins tools/call arguments containing a
+// JSON number outside float64 range to the TypeScript handler: JSON.parse
+// yields Infinity there, so the tool runs with Infinity instead of Go's empty
+// arguments object. Node-recorded expectations: read offset Infinity reports
+// "Offset Infinity is out of range"; read limit Infinity returns the file.
+func TestMCPCallArgumentsNumberOverflow(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CAVE_TOOLS_DATA_DIR", filepath.Join(dir, "data"))
+	t.Setenv("CAVE_TOOLS_DAEMON", "0")
+	t.Setenv("CAVE_TOOLS_PROFILE", "full")
+	pipe := startMCPPipe(t)
+	pipe.initialize(t)
+
+	path := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(path, []byte("a\nb\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	quoted := strconv.Quote(path)
+
+	pipe.in.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cave__read","arguments":{"file_path":` + quoted + `,"offset":1e400}}}` + "\n"))
+	response := pipe.read(t)
+	result := response["result"].(map[string]any)
+	if result["isError"] != true {
+		t.Fatalf("offset overflow result = %#v", result)
+	}
+	if got := firstText(t, result); got != "Offset Infinity is out of range" {
+		t.Fatalf("offset overflow text = %q", got)
+	}
+
+	pipe.in.Write([]byte(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"cave__read","arguments":{"file_path":` + quoted + `,"force":true,"limit":1e400}}}` + "\n"))
+	response = pipe.read(t)
+	result = response["result"].(map[string]any)
+	if got := firstText(t, result); got != "a\nb\n" {
+		t.Fatalf("limit overflow text = %q", got)
+	}
+}
+
+// TestDecodeCallArgumentsNumberOverflow checks the decode step directly: the
+// raw JSON is decoded with JSON.parse's number semantics, and the value is not
+// dropped for the rest of the argument object.
+func TestDecodeCallArgumentsNumberOverflow(t *testing.T) {
+	args, state, err := decodeCallArguments(json.RawMessage(`{"file_path":"/x","limit":1e400,"nested":{"n":-1e400},"list":[1e400]}`))
+	if err != nil {
+		t.Fatalf("decodeCallArguments: %v", err)
+	}
+	if state != argsPresent {
+		t.Fatalf("state = %v", state)
+	}
+	if args["file_path"] != "/x" {
+		t.Fatalf("file_path = %#v", args["file_path"])
+	}
+	if limit, _ := args["limit"].(float64); !math.IsInf(limit, 1) {
+		t.Fatalf("limit = %#v, want +Inf", args["limit"])
+	}
+	nested, _ := args["nested"].(map[string]any)
+	if value, _ := nested["n"].(float64); !math.IsInf(value, -1) {
+		t.Fatalf("nested = %#v", args["nested"])
+	}
+	list, _ := args["list"].([]any)
+	if value, _ := list[0].(float64); !math.IsInf(value, 1) {
+		t.Fatalf("list = %#v", args["list"])
+	}
+
+	// Normal numbers keep their exact value.
+	normal, _, err := decodeCallArguments(json.RawMessage(`{"limit":2,"offset":1.5}`))
+	if err != nil {
+		t.Fatalf("decodeCallArguments normal: %v", err)
+	}
+	if normal["limit"] != float64(2) || normal["offset"] != 1.5 {
+		t.Fatalf("normal args = %#v", normal)
 	}
 }

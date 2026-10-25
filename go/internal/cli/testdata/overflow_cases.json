@@ -1,0 +1,122 @@
+{
+ "nodeVersion": "v24.19.0",
+ "template": "node dist/cli.js <tool> <argv...>",
+ "cases": [
+  {
+   "name": "edits-array-number-overflow",
+   "argv": [
+    "edit",
+    "--edits",
+    "[1e400]"
+   ],
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "Error: edits[0]: must be an edit object\n"
+  },
+  {
+   "name": "edits-start-line-overflow",
+   "argv": [
+    "edit",
+    "--edits",
+    "[{\"file_path\":\"/nonexistent-cave-tools-parity/x\",\"start_line\":1e400,\"end_line\":2,\"content\":\"z\"}]"
+   ],
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "Error: Cannot read file: /nonexistent-cave-tools-parity/x\n"
+  },
+  {
+   "name": "edits-end-line-overflow",
+   "argv": [
+    "edit",
+    "--edits",
+    "[{\"file_path\":\"/nonexistent-cave-tools-parity/x\",\"start_line\":1,\"end_line\":1e400,\"content\":\"z\"}]"
+   ],
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "Error: Cannot read file: /nonexistent-cave-tools-parity/x\n"
+  },
+  {
+   "name": "edits-stdin-number-overflow",
+   "argv": [
+    "edit",
+    "--edits",
+    "-"
+   ],
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "Error: edits[0]: must be an edit object\n",
+   "stdin": "[1e400]"
+  },
+  {
+   "name": "invalidate-file-paths-overflow",
+   "argv": [
+    "invalidate",
+    "--file_paths",
+    "[1e400]"
+   ],
+   "exitCode": 0,
+   "stdout": "Invalidated cache for 1 file(s)\n",
+   "stderr": ""
+  },
+  {
+   "name": "read-offset-overflow",
+   "argv": [
+    "read",
+    "--offset",
+    "1e400",
+    "/nonexistent-cave-tools-parity/x"
+   ],
+   "exitCode": 2,
+   "stdout": "",
+   "stderr": "cave-tools read: --offset expects a number, got \"1e400\"\nusage: cave-tools read <file_path> [--offset <number>] [--limit <number>] [--mode <string>] [--line_numbers] [--force]\n"
+  },
+  {
+   "name": "read-limit-overflow",
+   "argv": [
+    "read",
+    "--limit",
+    "1e400",
+    "/nonexistent-cave-tools-parity/x"
+   ],
+   "exitCode": 2,
+   "stdout": "",
+   "stderr": "cave-tools read: --limit expects a number, got \"1e400\"\nusage: cave-tools read <file_path> [--offset <number>] [--limit <number>] [--mode <string>] [--line_numbers] [--force]\n"
+  },
+  {
+   "name": "bash-timeout-overflow",
+   "argv": [
+    "bash",
+    "--timeout",
+    "1e400",
+    "--command",
+    "true"
+   ],
+   "exitCode": 2,
+   "stdout": "",
+   "stderr": "cave-tools bash: --timeout expects a number, got \"1e400\"\nusage: cave-tools bash <command...> [--description <string>] [--workdir <string>] [--timeout <number>] [--allowFailure] [--redact_secrets]\n"
+  },
+  {
+   "name": "read-offset-normal",
+   "argv": [
+    "read",
+    "--offset",
+    "2",
+    "/nonexistent-cave-tools-parity/x"
+   ],
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "File not found: /nonexistent-cave-tools-parity/x\n"
+  },
+  {
+   "name": "edits-start-line-normal",
+   "argv": [
+    "edit",
+    "--edits",
+    "[{\"file_path\":\"/nonexistent-cave-tools-parity/x\",\"start_line\":2,\"end_line\":3,\"content\":\"z\"}]"
+   ],
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "Error: Cannot read file: /nonexistent-cave-tools-parity/x\n"
+  }
+ ]
+}

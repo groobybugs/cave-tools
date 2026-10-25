@@ -152,8 +152,8 @@ func TestDecodeUTF8Replace(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := decodeUTF8Replace(test.input); got != test.want {
-				t.Fatalf("decodeUTF8Replace(% x) = %q, want %q", test.input, got, test.want)
+			if got := DecodeUTF8Replace(test.input); got != test.want {
+				t.Fatalf("DecodeUTF8Replace(% x) = %q, want %q", test.input, got, test.want)
 			}
 		})
 	}

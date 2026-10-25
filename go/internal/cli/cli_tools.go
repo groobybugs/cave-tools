@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
+	"github.com/groobybugs/cave-tools/go/internal/jsjson"
 	"github.com/groobybugs/cave-tools/go/internal/jsre"
 	rt "github.com/groobybugs/cave-tools/go/internal/runtime"
 	"github.com/groobybugs/cave-tools/go/internal/tools/bash"
@@ -270,8 +271,7 @@ func coerceFlagValue(flag string, prop *propSchema, value string) (any, error) {
 	case "boolean":
 		return parseBoolean(flag, value)
 	case "array":
-		var parsed any
-		if json.Unmarshal([]byte(value), &parsed) == nil {
+		if parsed, err := jsjson.Parse(value); err == nil {
 			if array, ok := parsed.([]any); ok {
 				return array, nil
 			}
@@ -281,8 +281,7 @@ func coerceFlagValue(flag string, prop *propSchema, value string) (any, error) {
 		}
 		return nil, usageErrorf("--%s expects a JSON array", flag)
 	case "object":
-		var parsed any
-		if json.Unmarshal([]byte(value), &parsed) == nil {
+		if parsed, err := jsjson.Parse(value); err == nil {
 			if object, ok := parsed.(map[string]any); ok && object != nil {
 				return object, nil
 			}
@@ -743,14 +742,15 @@ func formatResult(result types.ToolResult) string {
 	return strings.Join(parts, "\n")
 }
 
-// readAllStdin reads stdin as UTF-8, replacing invalid sequences the way
-// Node's setEncoding("utf8") does.
+// readAllStdin reads stdin the way TS does with process.stdin.setEncoding("utf8"):
+// invalid UTF-8 becomes U+FFFD once per maximal invalid subpart, matching
+// Node's StringDecoder for both whole-buffer and chunk-split input.
 func readAllStdin(stdin io.Reader) (string, error) {
 	data, err := io.ReadAll(stdin)
 	if err != nil {
 		return "", err
 	}
-	return strings.ToValidUTF8(string(data), "\uFFFD"), nil
+	return rt.DecodeUTF8Replace(data), nil
 }
 
 // finish is the controlled CLI exit funnel: persist the last tool failure
@@ -969,9 +969,15 @@ func runFilterCommand(ctx context.Context, argv []string, stdin io.Reader, stdou
 	if err != nil {
 		return finish(stderr, "cave-tools filter: "+err.Error(), 1)
 	}
-	var parsed any
-	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		return finish(stderr, "cave-tools filter: "+err.Error(), 1)
+	parsed, err := jsjson.Parse(text)
+	if err != nil {
+		// TS surfaces JSON.parse's V8 SyntaxError text; reproduce it instead
+		// of encoding/json's wording.
+		message := err.Error()
+		if v8Message := jsjson.SyntaxErrorMessage(text); v8Message != "" {
+			message = v8Message
+		}
+		return finish(stderr, "cave-tools filter: "+message, 1)
 	}
 	input, ok := parsed.(map[string]any)
 	if !ok {
@@ -988,7 +994,13 @@ func runFilterCommand(ctx context.Context, argv []string, stdin io.Reader, stdou
 	}
 	var exitCode *int
 	if value, ok := input["exitCode"].(float64); ok {
-		converted := int(value)
+		// TS keeps every number, including ±Infinity, and the pipeline
+		// ignores this field. Avoid Go's implementation-defined float→int
+		// conversion for out-of-range values.
+		converted := 0
+		if !math.IsInf(value, 0) && !math.IsNaN(value) && value >= math.MinInt && value < math.MaxInt {
+			converted = int(value)
+		}
 		exitCode = &converted
 	}
 	output := rt.RunWithContext(ctx, rt.LocalContext(sessionID), func(ctx context.Context) bash.FilteredShellOutput {

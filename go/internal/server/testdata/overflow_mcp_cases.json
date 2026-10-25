@@ -1,0 +1,60 @@
+{
+ "nodeVersion": "v24.19.0",
+ "template": "node dist/cli.js (MCP stdio)",
+ "cases": [
+  {
+   "name": "read-offset-overflow",
+   "frame": "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"cave__read\",\"arguments\":{\"file_path\":\"@@DIR@@/files/note.txt\",\"offset\":1e400}}}",
+   "isError": true,
+   "text": "Offset Infinity is out of range"
+  },
+  {
+   "name": "read-limit-overflow",
+   "frame": "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"cave__read\",\"arguments\":{\"file_path\":\"@@DIR@@/files/note.txt\",\"force\":true,\"limit\":1e400}}}",
+   "isError": false,
+   "text": "a\nb\n"
+  },
+  {
+   "name": "read-offset-negative-overflow",
+   "frame": "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"cave__read\",\"arguments\":{\"file_path\":\"@@DIR@@/files/note.txt\",\"force\":true,\"offset\":-1e400}}}",
+   "isError": false,
+   "text": "a\nb\n"
+  },
+  {
+   "name": "bash-timeout-overflow",
+   "frame": "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"cave__bash\",\"arguments\":{\"command\":\"echo hi\",\"timeout\":1e400}}}",
+   "isError": true,
+   "text": "Invalid timeout value: Infinity. Timeout must be a non-negative number."
+  },
+  {
+   "name": "edit-start-line-overflow",
+   "frame": "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"cave__edit\",\"arguments\":{\"file_path\":\"@@DIR@@/files/note.txt\",\"start_line\":1e400,\"end_line\":2,\"content\":\"z\"}}}",
+   "isError": true,
+   "text": "Error: start_line and end_line must be integers for range mode"
+  },
+  {
+   "name": "ls-offset-overflow",
+   "frame": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"cave__ls\",\"arguments\":{\"path\":\"@@DIR@@/files\",\"offset\":1e400}}}",
+   "isError": false,
+   "text": "(empty directory)"
+  },
+  {
+   "name": "grep-limit-overflow",
+   "frame": "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"cave__grep\",\"arguments\":{\"pattern\":\"root\",\"path\":\"@@DIR@@/files\",\"limit\":1e400}}}",
+   "isError": false,
+   "text": "sub/hit.txt:1: root"
+  },
+  {
+   "name": "grep-context-overflow",
+   "frame": "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"cave__grep\",\"arguments\":{\"pattern\":\"root\",\"path\":\"@@DIR@@/files\",\"context\":1e400}}}",
+   "isError": false,
+   "text": "sub/hit.txt:1: root\nsub/hit.txt-2- other\nsub/hit.txt-3- "
+  },
+  {
+   "name": "find-limit-overflow",
+   "frame": "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"cave__find\",\"arguments\":{\"pattern\":\"note.txt\",\"path\":\"@@DIR@@/files\",\"limit\":1e400}}}",
+   "isError": false,
+   "text": "note.txt"
+  }
+ ]
+}

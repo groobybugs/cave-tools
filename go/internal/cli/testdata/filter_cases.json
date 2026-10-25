@@ -1,0 +1,342 @@
+{
+ "nodeVersion": "v24.19.0",
+ "template": "node dist/cli.js filter --json",
+ "cases": [
+  {
+   "name": "utf8-two-invalid-leads",
+   "inputBase64": "//57fQ==",
+   "stdinBytes": "fffe7b7d",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected token '�', \"��{}\" is not valid JSON\n"
+  },
+  {
+   "name": "utf8-surrogate-sequence",
+   "inputBase64": "7aCA",
+   "stdinBytes": "eda080",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected token '�', \"���\" is not valid JSON\n"
+  },
+  {
+   "name": "utf8-overlong-lead",
+   "inputBase64": "wK8=",
+   "stdinBytes": "c0af",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected token '�', \"��\" is not valid JSON\n"
+  },
+  {
+   "name": "utf8-invalid-lead-text",
+   "inputBase64": "Yf9i",
+   "stdinBytes": "61ff62",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected token 'a', \"a�b\" is not valid JSON\n"
+  },
+  {
+   "name": "utf8-truncated-sequence-eof",
+   "inputBase64": "4oI=",
+   "stdinBytes": "e282",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected token '�', \"�\" is not valid JSON\n"
+  },
+  {
+   "name": "utf8-invalid-inside-valid-json",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6Iv/+In0=",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a22fffe227d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"��\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "utf8-truncated-inside-json-string",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6IuKC",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a22e282",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unterminated string in JSON at position 26 (line 1 column 27)\n"
+  },
+  {
+   "name": "number-overflow-extra-field",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJmb28iOjFlNDAwfQ==",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c22666f6f223a31653430307d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-overflow-exit-code",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6MWU0MDB9",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a31653430307d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-overflow-exit-code-neg",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6LTFlNDAwfQ==",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a2d31653430307d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-overflow-exit-code-1e309",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6MWUzMDl9",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a31653330397d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-overflow-nested",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJ4Ijp7InkiOi0xZTQwMH19",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2278223a7b2279223a2d31653430307d7d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-overflow-bigint",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJuIjo5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk5fQ==",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c226e223a393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939393939397d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-overflow-array",
+   "inputBase64": "WzFlNDAwXQ==",
+   "stdinBytes": "5b31653430305d",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: stdin must be JSON {command, stdout, stderr?, exitCode?}\n"
+  },
+  {
+   "name": "number-underflow",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6MWUtNDAwfQ==",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a31652d3430307d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-underflow-neg",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6LTFlLTQwMH0=",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a2d31652d3430307d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-negative-zero",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6LTB9",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a2d307d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-fractional-exit-code",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6MS41fQ==",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a312e357d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-negative-exit-code",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6LTV9",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a2d357d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-huge-exit-code",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6OTAwNzE5OTI1NDc0MDk5M30=",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a393030373139393235343734303939337d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-null-exit-code",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6bnVsbH0=",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a6e756c6c7d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-string-exit-code",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJleGl0Q29kZSI6IjEifQ==",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2265786974436f6465223a2231227d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "number-mixed-nested",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMiLCJhIjpbMWU0MDAseyJiIjoxZS00MDB9XX0=",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273222c2261223a5b31653430302c7b2262223a31652d3430307d5d7d",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "trailing-garbage",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMifSB4",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273227d2078",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected non-whitespace character after JSON at position 29 (line 1 column 30)\n"
+  },
+  {
+   "name": "trailing-second-value",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMifXsiYSI6MX0=",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273227d7b2261223a317d",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected non-whitespace character after JSON at position 28 (line 1 column 29)\n"
+  },
+  {
+   "name": "trailing-array-garbage",
+   "inputBase64": "W114",
+   "stdinBytes": "5b5d78",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected non-whitespace character after JSON at position 2 (line 1 column 3)\n"
+  },
+  {
+   "name": "trailing-whitespace-ok",
+   "inputBase64": "eyJjb21tYW5kIjoiYyIsInN0ZG91dCI6InMifSAgIAo=",
+   "stdinBytes": "7b22636f6d6d616e64223a2263222c227374646f7574223a2273227d2020200a",
+   "exitCode": 0,
+   "stdout": "{\"stdout\":\"s\",\"stderr\":\"\"}\n",
+   "stderr": ""
+  },
+  {
+   "name": "trailing-number",
+   "inputBase64": "MSAy",
+   "stdinBytes": "312032",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected non-whitespace character after JSON at position 2 (line 1 column 3)\n"
+  },
+  {
+   "name": "json-empty",
+   "inputBase64": "",
+   "stdinBytes": "",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected end of JSON input\n"
+  },
+  {
+   "name": "json-whitespace",
+   "inputBase64": "IAoJ",
+   "stdinBytes": "200a09",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected end of JSON input\n"
+  },
+  {
+   "name": "json-null",
+   "inputBase64": "bnVsbA==",
+   "stdinBytes": "6e756c6c",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: stdin must be JSON {command, stdout, stderr?, exitCode?}\n"
+  },
+  {
+   "name": "json-true",
+   "inputBase64": "dHJ1ZQ==",
+   "stdinBytes": "74727565",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: stdin must be JSON {command, stdout, stderr?, exitCode?}\n"
+  },
+  {
+   "name": "json-array",
+   "inputBase64": "W10=",
+   "stdinBytes": "5b5d",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: stdin must be JSON {command, stdout, stderr?, exitCode?}\n"
+  },
+  {
+   "name": "json-string",
+   "inputBase64": "Ingi",
+   "stdinBytes": "227822",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: stdin must be JSON {command, stdout, stderr?, exitCode?}\n"
+  },
+  {
+   "name": "json-missing-fields",
+   "inputBase64": "eyJzdGRvdXQiOiJ4In0=",
+   "stdinBytes": "7b227374646f7574223a2278227d",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: stdin must be JSON {command, stdout, stderr?, exitCode?}\n"
+  },
+  {
+   "name": "json-bom",
+   "inputBase64": "77u/e30=",
+   "stdinBytes": "efbbbf7b7d",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected token '﻿', \"﻿{}\" is not valid JSON\n"
+  },
+  {
+   "name": "json-not-json",
+   "inputBase64": "bm90IGpzb24=",
+   "stdinBytes": "6e6f74206a736f6e",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected token 'o', \"not json\" is not valid JSON\n"
+  },
+  {
+   "name": "json-array-separator",
+   "inputBase64": "WzEgMl0=",
+   "stdinBytes": "5b3120325d",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Expected ',' or ']' after array element in JSON at position 3 (line 1 column 4)\n"
+  },
+  {
+   "name": "json-trailing-comma",
+   "inputBase64": "eyJhIjoxLH0=",
+   "stdinBytes": "7b2261223a312c7d",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Expected double-quoted property name in JSON at position 7 (line 1 column 8)\n"
+  },
+  {
+   "name": "json-leading-zero",
+   "inputBase64": "MDE=",
+   "stdinBytes": "3031",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Unexpected number in JSON at position 1 (line 1 column 2)\n"
+  },
+  {
+   "name": "json-multiline",
+   "inputBase64": "ewogICJhIjogMSwKICAiYiI6IDIsCn0=",
+   "stdinBytes": "7b0a20202261223a20312c0a20202262223a20322c0a7d",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: Expected double-quoted property name in JSON at position 22 (line 4 column 1)\n"
+  },
+  {
+   "name": "json-nan",
+   "inputBase64": "TmFO",
+   "stdinBytes": "4e614e",
+   "exitCode": 1,
+   "stdout": "",
+   "stderr": "cave-tools filter: \"NaN\" is not valid JSON\n"
+  }
+ ]
+}

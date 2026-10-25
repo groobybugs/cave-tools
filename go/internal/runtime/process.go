@@ -127,7 +127,7 @@ func (c *boundedCapture) finalize() (string, bool) {
 	for _, chunk := range c.chunks {
 		raw = append(raw, chunk...)
 	}
-	return tailUTF8Safe(decodeUTF8Replace(raw), c.maxLines, c.maxBytes), c.cut
+	return tailUTF8Safe(DecodeUTF8Replace(raw), c.maxLines, c.maxBytes), c.cut
 }
 
 // Write makes boundedCapture an io.Writer for os/exec.
@@ -161,11 +161,12 @@ func tailUTF8Safe(raw string, maxLines, maxBytes int) string {
 	return lines[start:end]
 }
 
-// decodeUTF8Replace decodes bytes exactly like Node's Buffer.toString("utf-8"):
-// invalid input becomes U+FFFD, one replacement per maximal invalid subpart
-// (a truncated multibyte sequence is a single replacement, bad continuation
-// bytes are one each). strings.ToValidUTF8 collapses runs instead.
-func decodeUTF8Replace(b []byte) string {
+// DecodeUTF8Replace decodes bytes exactly like Node's Buffer.toString("utf-8")
+// and a stdin stream with setEncoding("utf8"): invalid input becomes U+FFFD,
+// one replacement per maximal invalid subpart (a truncated multibyte sequence
+// is a single replacement, bad continuation bytes are one each).
+// strings.ToValidUTF8 collapses runs instead.
+func DecodeUTF8Replace(b []byte) string {
 	if len(b) == 0 {
 		return ""
 	}
