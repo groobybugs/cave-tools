@@ -1,6 +1,7 @@
 package jsjson
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 )
@@ -110,5 +111,38 @@ func TestStringifyValueMatchesJSONStringify(t *testing.T) {
 	}
 	if value, _ := source["inf"].(float64); !math.IsInf(value, 1) {
 		t.Fatalf("StringifyValue mutated the source: %#v", source["inf"])
+	}
+}
+
+// TestStringifyValueNormalizesNegativeZero pins JSON.stringify(-0) === "0".
+// encoding/json would otherwise emit "-0", which JSON.stringify never writes.
+func TestStringifyValueNormalizesNegativeZero(t *testing.T) {
+	negativeZero := math.Copysign(0, -1)
+	if !math.Signbit(negativeZero) {
+		t.Fatal("fixture is not negative zero")
+	}
+	parsed, err := Parse("-0")
+	if err != nil {
+		t.Fatalf("Parse(-0): %v", err)
+	}
+	cases := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{name: "literal", value: negativeZero, want: "0"},
+		{name: "parsed", value: parsed, want: "0"},
+		{name: "nested", value: map[string]any{"a": []any{negativeZero}}, want: `{"a":[0]}`},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := json.Marshal(StringifyValue(test.value))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(data) != test.want {
+				t.Fatalf("stringify(-0) = %s, want %s", data, test.want)
+			}
+		})
 	}
 }

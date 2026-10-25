@@ -34,20 +34,28 @@ func Parse(text string) (any, error) {
 }
 
 // StringifyValue rewrites a decoded value so encoding/json emits the text
-// JSON.stringify writes: NaN and ±Infinity become null. Maps and slices are
-// copied, never mutated, so callers can keep the original value for an
-// in-process fallback (JSON.stringify does not change its input either).
+// JSON.stringify writes: NaN and ±Infinity become null, and negative zero
+// becomes 0. Maps and slices are copied, never mutated, so callers can keep
+// the original value for an in-process fallback (JSON.stringify does not
+// change its input either).
 func StringifyValue(value any) any {
 	switch typed := value.(type) {
 	case float64:
 		if math.IsNaN(typed) || math.IsInf(typed, 0) {
 			return nil
 		}
+		// JSON.stringify(-0) is "0"; encoding/json would emit "-0".
+		if typed == 0 {
+			return 0.0
+		}
 		return typed
 	case json.Number:
 		number := numberValue(typed)
 		if math.IsNaN(number) || math.IsInf(number, 0) {
 			return nil
+		}
+		if number == 0 {
+			return 0.0
 		}
 		return number
 	case []any:
