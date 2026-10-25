@@ -162,11 +162,17 @@ in `src/cli.ts`/`src/tools/bash.ts`, not the file mapping. The map itself is
 not proof of function coverage; see "Coverage and annotation audit".
 
 `go/internal/cli` additionally holds helpers that belong to the two CLI files
-above rather than separate TS modules: `status_summary.go` (the
-status/statusline half of `cli.ts`), `cli_raw.go` and `cli_platform_*.go` (raw
-shell execution and Win32 `cmd.exe` quoting), `integration.go` and
+above rather than separate TS modules: `status_summary.go` (thin wrappers over
+`go/internal/statusline`), `cli_raw.go` and `cli_platform_*.go` (raw shell
+execution and Win32 `cmd.exe` quoting), `integration.go` and
 `bindings_{server,daemon}.go` (the server/daemon seams `cli-tools.ts` reaches
 through its lazy imports).
+
+`go/internal/statusline` mirrors `src/statusline.ts`: it aggregates lifetime +
+visible-session stats from SQLite, formats the compact badge and writes
+`~/.claude/.cave-tools-statusline-suffix` atomically. Both
+`status --emit-statusline` and the MCP server's debounced post-call refresh
+call into it, so the badge bytes cannot drift between the CLI and MCP paths.
 
 `src/cli.ts` maps to `go/internal/cli/cli.go`, not to the binary:
 `cmd/cave-tools-go/main.go` is the OS entry point and only forwards
@@ -649,6 +655,14 @@ touching budgets or status:
 - `TestHandlerParity` for `cave__status` runs in a fresh test-binary process
   with a temp data dir, so the storage singleton cannot make it pass
   incidentally.
+- The statusline badge is a shared TS/Go side effect: the MCP server refreshes
+  `~/.claude/.cave-tools-statusline-suffix` after each `tools/call` with a
+  ~300 ms trailing-edge debounce and a shutdown flush, instead of spawning
+  `cave-tools status --emit-statusline` per call. `status --emit-statusline`
+  uses the same aggregate/format/write path, and
+  `internal/cli/status_summary_test.go` compares both paths byte-for-byte in a
+  fresh subprocess. Tests must keep `CLAUDE_CONFIG_DIR` inside their sandbox
+  (the `internal/server` TestMain does).
 
 ## Known deviations and limitations
 

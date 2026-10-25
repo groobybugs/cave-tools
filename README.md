@@ -301,7 +301,7 @@ Instruction blocks are advisory — agents may still reach for the built-in `Rea
 
 Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting with status `2` and emitting a message to stderr. The installer wires a single mode-aware redirect group; this section documents the equivalent manual setup.
 
-1. Register the hooks in `~/.claude/settings.json` (`pnpm run install:agents` does this). Plugin installs load the same events from `claude/hooks/hooks.json` via `claude/.claude-plugin/plugin.json` (`"hooks": "./hooks/hooks.json"`); that file's event map must stay wrapped in a top-level `hooks` key, or the plugin registers nothing. Claude Code does support an `args` array (exec form, recommended for `${CLAUDE_PLUGIN_ROOT}` paths), but both wirings emit a single `command` string so every Node hook runs through the `cave-node` launcher shim, which resolves a node >= 20 instead of whatever is first on `PATH`: the installer points at the shim's absolute path, and `hooks.json` guards on `command -v cave-node` and falls back to a bare `node` where the shim is absent. The statusline hooks in `hooks.json` are guarded the same way (`command -v cave-tools`), so a plugin install without the npm bin on `PATH` is a no-op instead of a per-session hook error.
+1. Register the hooks in `~/.claude/settings.json` (`pnpm run install:agents` does this). Plugin installs load the same events from `claude/hooks/hooks.json` via `claude/.claude-plugin/plugin.json` (`"hooks": "./hooks/hooks.json"`); that file's event map must stay wrapped in a top-level `hooks` key, or the plugin registers nothing. Claude Code does support an `args` array (exec form, recommended for `${CLAUDE_PLUGIN_ROOT}` paths), but both wirings emit a single `command` string so every Node hook runs through the `cave-node` launcher shim, which resolves a node >= 20 instead of whatever is first on `PATH`: the installer points at the shim's absolute path, and `hooks.json` guards on `command -v cave-node` and falls back to a bare `node` where the shim is absent. The SessionStart statusline warm-up in `hooks.json` is guarded the same way (`command -v cave-tools`), so a plugin install without the npm bin on `PATH` is a no-op instead of a per-session hook error.
 
    ```json
    {
@@ -342,9 +342,9 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
        ],
        "PostToolUse": [
          {
-           "matcher": "mcp__cave-tools__.*",
+           "matcher": "Bash",
            "hooks": [
-             { "type": "command", "command": "cave-tools status --emit-statusline", "timeout": 3, "async": true }
+             { "type": "command", "command": "node \"/home/you/.claude/hooks/cave-tools-bash-filter.js\"", "timeout": 8 }
            ]
          }
        ],
@@ -375,6 +375,8 @@ Claude Code supports a `PreToolUse` hook that can deny a tool call by exiting wi
    - `CAVE_TOOLS_ALLOW_BASH=1` in the environment
 
    SessionStart / SubagentStart emit `hookSpecificOutput.additionalContext` JSON so Claude injects the compact ruleset (the block between the `cave-tools-compact` markers in `SKILL.md`); UserPromptSubmit adds a short per-turn reminder in `hint` mode only (enforce/strict already block built-ins via PreToolUse). `PostToolUseFailure` and `PermissionDenied` run `cave-tools-recover.js`, which explains the cave-tools retry after a failed `cave__*` call and returns `retry: true` after a classifier denial — otherwise the model tends to fall back to the built-ins it was just blocked from.
+
+   The statusline savings badge is written by the MCP server itself after each `cave__*` call: it re-reads the same SQLite stats `cave-tools status --emit-statusline` uses and rewrites `~/.claude/.cave-tools-statusline-suffix` atomically, trailing-edge debounced (~300 ms) and flushed on shutdown. The SessionStart hook only warms the badge for the first render, so there is no per-call `status --emit-statusline` process. `CAVE_TOOLS_STATUSLINE_SAVINGS=0` disables both the badge text and the in-process refresh.
 
    The `/cave-tools` skill also declares the same `PreToolUse` group in its frontmatter with `--from-skill`, so enforcement still applies on hosts where nothing wired `settings.json` (cloud sessions, fresh machines). That copy exits 0 as soon as `~/.claude/.cave-tools-wired` exists, so it never double-fires next to the settings copy.
 
