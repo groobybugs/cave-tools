@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/groobybugs/cave-tools/go/internal/statusline"
 )
 
 type mcpPipe struct {
@@ -111,6 +113,108 @@ func (p *mcpPipe) call(t *testing.T, id int, method string, params map[string]an
 	t.Helper()
 	p.write(t, map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 	return p.read(t)
+}
+
+// waitForSuffix polls for the statusline badge, returning its content and
+// whether it appeared before the deadline.
+func waitForSuffix(t *testing.T, path string, timeout time.Duration) (string, bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if content, err := os.ReadFile(path); err == nil {
+			return string(content), true
+		}
+		if time.Now().After(deadline) {
+			return "", false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestMCPCallWritesStatuslineSuffix proves a tools/call refreshes the badge
+// in-process (no `status --emit-statusline` child) and that the bytes match
+// what the status command would write for the same state.
+func TestMCPCallWritesStatuslineSuffix(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CAVE_TOOLS_DATA_DIR", filepath.Join(dir, "data"))
+	t.Setenv("CAVE_TOOLS_DAEMON", "0")
+	t.Setenv("CAVE_TOOLS_PROFILE", "full")
+	t.Setenv("CAVE_TOOLS_ASCII", "1")
+
+	pipe := startMCPPipe(t)
+	claudeDir := filepath.Join(dir, "claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	pipe.initialize(t)
+
+	source := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(source, []byte("statusline payload\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response := pipe.call(t, 2, "tools/call", map[string]any{
+		"name":      "cave__read",
+		"arguments": map[string]any{"file_path": source},
+	})
+	if response["result"] == nil {
+		t.Fatalf("tool call failed: %#v", response)
+	}
+
+	path := filepath.Join(claudeDir, ".cave-tools-statusline-suffix")
+	content, ok := waitForSuffix(t, path, 3*time.Second)
+	if !ok {
+		t.Fatalf("statusline suffix %s was not written", path)
+	}
+	if content == "" {
+		t.Fatal("statusline suffix is empty")
+	}
+	if !strings.HasPrefix(content, "v") || !strings.Contains(content, "|") {
+		t.Fatalf("suffix = %q, want ASCII badge", content)
+	}
+	if want := statusline.BuildSuffix(); content != want {
+		t.Fatalf("suffix = %q, want %q (status --emit-statusline content)", content, want)
+	}
+}
+
+// TestMCPCallStatuslineWriteFailureIsSilent proves an unwritable config dir
+// cannot change the tool result or crash the server.
+func TestMCPCallStatuslineWriteFailureIsSilent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CAVE_TOOLS_DATA_DIR", filepath.Join(dir, "data"))
+	t.Setenv("CAVE_TOOLS_DAEMON", "0")
+	t.Setenv("CAVE_TOOLS_PROFILE", "full")
+
+	pipe := startMCPPipe(t)
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// mkdirAll(config dir) now fails: the badge write must stay silent.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(blocker, "claude"))
+	pipe.initialize(t)
+
+	source := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(source, []byte("still works\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response := pipe.call(t, 2, "tools/call", map[string]any{
+		"name":      "cave__read",
+		"arguments": map[string]any{"file_path": source},
+	})
+	result, ok := response["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool call returned no result: %#v", response)
+	}
+	if result["isError"] == true {
+		t.Fatalf("tool result marked as error: %#v", result)
+	}
+	// Let the debounce fire; a panic or failing handler would break later calls.
+	time.Sleep(statusline.EmitDebounce + 100*time.Millisecond)
+	second := pipe.call(t, 3, "tools/call", map[string]any{
+		"name":      "cave__read",
+		"arguments": map[string]any{"file_path": source},
+	})
+	if second["result"] == nil {
+		t.Fatalf("second tool call failed: %#v", second)
+	}
 }
 
 func firstText(t *testing.T, result map[string]any) string {

@@ -38,10 +38,11 @@ else
 fi
 
 # Savings suffix: on by default. Opt out via CAVE_TOOLS_STATUSLINE_SAVINGS=0.
-# Reads a pre-rendered string written by `cave-tools status --emit-statusline`
-# so we don't spawn node on every keystroke. Same symlink/control-byte
-# hardening as the flag file. Until the CLI has run at least once the suffix
-# file is absent and nothing extra is rendered — safe default for fresh installs.
+# Reads a pre-rendered string written in-process by the MCP server after tool
+# calls (and by `cave-tools status --emit-statusline` on SessionStart), so we
+# don't spawn node on every keystroke. Same symlink/control-byte hardening as
+# the flag file. Until the server/CLI has run at least once the suffix file is
+# absent and nothing extra is rendered — safe default for fresh installs.
 if [ "${CAVE_TOOLS_STATUSLINE_SAVINGS:-1}" != "0" ]; then
   SAVINGS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.cave-tools-statusline-suffix"
   if [ -f "$SAVINGS_FILE" ] && [ ! -L "$SAVINGS_FILE" ]; then

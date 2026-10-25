@@ -27,6 +27,7 @@ import { brotliCompressSync } from "node:zlib";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = join(ROOT, "dist", "cli.js");
 const INSTALLER = join(ROOT, "scripts", "install-agent-instructions.mjs");
+const REMOVER = join(ROOT, "scripts", "remove-agent-instructions.mjs");
 const GO_BIN = join(ROOT, "go", "bin", process.platform === "win32" ? "cave-tools-go.exe" : "cave-tools-go");
 const POSIX = process.platform !== "win32";
 
@@ -872,6 +873,125 @@ async function testShimSignal() {
   }
 }
 
+// runInstaller reruns the Claude installer against an existing fake home.
+function runInstaller(context) {
+  const result = spawnSync(process.execPath, [INSTALLER, "--agent", "claude"], {
+    cwd: ROOT,
+    env: {
+      ...cleanEnv(),
+      HOME: context.home,
+      NVM_DIR: context.nvm,
+      CLAUDE_CONFIG_DIR: join(context.home, ".claude"),
+    },
+    encoding: "utf8",
+    timeout: 30000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result;
+}
+
+function settingsHooks(context) {
+  const settings = JSON.parse(
+    readFileSync(join(context.home, ".claude", "settings.json"), "utf8"),
+  );
+  return settings.hooks ?? {};
+}
+
+function hookCommands(context, event) {
+  return (settingsHooks(context)[event] ?? [])
+    .flatMap((group) => group.hooks ?? [])
+    .map((hook) => String(hook.command ?? ""));
+}
+
+// The statusline badge is refreshed in-process by the MCP server: the
+// installer must not register a per-call `status --emit-statusline` hook, must
+// remove one left by an older install, and must keep the SessionStart warm-up.
+function testStatuslineHookMigration() {
+  const context = installFakeHome();
+  for (const command of hookCommands(context, "PostToolUse")) {
+    assert.doesNotMatch(
+      command,
+      /emit-statusline/,
+      "fresh install must not register a PostToolUse statusline hook",
+    );
+  }
+  assert.ok(
+    hookCommands(context, "SessionStart").some((command) => command.includes("emit-statusline")),
+    "SessionStart statusline warm-up stays registered",
+  );
+
+  // Simulate an upgrade from an installer that registered the per-call hook.
+  const settingsPath = join(context.home, ".claude", "settings.json");
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  settings.hooks.PostToolUse ??= [];
+  settings.hooks.PostToolUse.push({
+    matcher: "mcp__cave-tools__.*",
+    hooks: [
+      {
+        type: "command",
+        command: `"${context.shim}" status --emit-statusline`,
+        timeout: 3,
+        async: true,
+      },
+    ],
+  });
+  settings.hooks.PostToolUse.push({
+    matcher: "Unrelated",
+    hooks: [{ type: "command", command: "true" }],
+  });
+  writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+
+  const upgrade = runInstaller(context);
+  assert.match(upgrade.stderr + upgrade.stdout, /legacy PostToolUse statusline hook/);
+  const postToolUse = hookCommands(context, "PostToolUse");
+  assert.ok(
+    !postToolUse.some((command) => command.includes("emit-statusline")),
+    "upgrade removes the legacy PostToolUse statusline hook",
+  );
+  assert.ok(
+    postToolUse.includes("true"),
+    "upgrade leaves unrelated PostToolUse hooks untouched",
+  );
+  assert.ok(
+    hookCommands(context, "SessionStart").some((command) => command.includes("emit-statusline")),
+    "upgrade keeps the SessionStart statusline hook",
+  );
+  console.log("ok - installer drops legacy PostToolUse statusline hook");
+}
+
+// Uninstall removes every cave-tools hook, including the SessionStart
+// statusline warm-up.
+function testStatuslineHookUninstall() {
+  const context = installFakeHome("uninstall home ü");
+  const result = spawnSync(process.execPath, [REMOVER, "--agent", "claude"], {
+    cwd: ROOT,
+    env: {
+      ...cleanEnv(),
+      HOME: context.home,
+      NVM_DIR: context.nvm,
+      CLAUDE_CONFIG_DIR: join(context.home, ".claude"),
+    },
+    encoding: "utf8",
+    timeout: 30000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const hooks = settingsHooks(context);
+  for (const [event, groups] of Object.entries(hooks)) {
+    const commands = (groups ?? [])
+      .flatMap((group) => group.hooks ?? [])
+      .map((hook) => String(hook.command ?? ""));
+    assert.ok(
+      !commands.some((command) => command.includes("cave-tools")),
+      `${event} keeps a cave-tools hook after uninstall: ${commands.join(" | ")}`,
+    );
+  }
+  assert.ok(
+    !existsSync(join(context.home, ".claude", "hooks", "cave-tools-statusline.sh")),
+    "uninstall removes the statusline script",
+  );
+  console.log("ok - uninstall removes statusline hooks");
+}
+
 async function main() {
   try {
     await testResolutionModule();
@@ -880,6 +1000,8 @@ async function main() {
     await testRealGoSmoke();
     await testLiveWebfetchRouting();
     testLauncherShim();
+    testStatuslineHookMigration();
+    testStatuslineHookUninstall();
     await testShimSignal();
     console.log("impl switch tests passed");
   } finally {

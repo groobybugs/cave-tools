@@ -13,16 +13,6 @@ import (
 // isWindowsPlatform tells joinCommandArgs whether it is running on win32.
 func isWindowsPlatform() bool { return false }
 
-// statuslineDirOwnerOK ports the getuid() ownership check for a symlinked
-// Claude config dir.
-func statuslineDirOwnerOK(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return false
-	}
-	return int(stat.Uid) == os.Getuid()
-}
-
 // rawCommand mirrors the POSIX spawn in src/cli-tools.ts:runRaw.
 func rawCommand(shell, command string) *exec.Cmd {
 	return exec.Command(shell, "-c", command)

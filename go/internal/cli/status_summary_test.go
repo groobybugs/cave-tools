@@ -3,13 +3,16 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	goruntime "runtime"
 	"strings"
 	"testing"
 
+	"github.com/groobybugs/cave-tools/go/internal/statusline"
 	"github.com/groobybugs/cave-tools/go/internal/storage"
 )
 
@@ -125,6 +128,101 @@ func TestStatusEmitStatusline(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(claudeDir, ".cave-tools-statusline-suffix")); err != nil {
 		t.Fatalf("suffix missing: %v", err)
+	}
+}
+
+const (
+	statuslineHelperEnv  = "CAVE_TOOLS_TEST_STATUSLINE_HELPER"
+	statuslineHelperData = "CAVE_TOOLS_TEST_STATUSLINE_DATA"
+)
+
+// TestStatuslineHelperProcess is the subprocess body for
+// TestEmitStatuslineMatchesMCPBadge. Each mode gets a fresh process (and a
+// fresh SQLite connection), so background stats writes from other tests cannot
+// race the comparison.
+func TestStatuslineHelperProcess(t *testing.T) {
+	mode := os.Getenv(statuslineHelperEnv)
+	if mode == "" {
+		t.Skip("helper process only")
+	}
+	if dataDir := os.Getenv(statuslineHelperData); dataDir != "" {
+		_ = os.Setenv("CAVE_TOOLS_DATA_DIR", dataDir)
+	}
+	switch mode {
+	case "seed":
+		err := storage.UpsertSessionStats(storage.PersistedStats{
+			Pid:          int64(os.Getpid()),
+			SessionStart: 1,
+			UpdatedAt:    5,
+			Cache:        storage.CacheStats{Hits: 3, Misses: 1, Total: 4, FilesTracked: 2},
+			Savings: storage.SavingsStats{
+				TotalCalls:            4,
+				RawChars:              1000,
+				CompressedChars:       500,
+				CompressionSavedChars: 400,
+				DedupSavedChars:       100,
+				SavedChars:            500,
+			},
+			Budgets: map[string]storage.BudgetConfig{
+				"bash": {MaxLines: 50, HeadLines: 15, TailLines: 35},
+			},
+		})
+		if err != nil {
+			t.Fatalf("UpsertSessionStats: %v", err)
+		}
+		// Exactly what the MCP server's in-process refresh writes.
+		statusline.Write(statusline.BuildSuffix())
+	case "cli":
+		if code := Run(context.Background(), []string{"status", "--emit-statusline"}, strings.NewReader(""), io.Discard, io.Discard, "test"); code != 0 {
+			t.Fatalf("status --emit-statusline exit = %d", code)
+		}
+	default:
+		t.Fatalf("unknown helper mode %q", mode)
+	}
+}
+
+// TestEmitStatuslineMatchesMCPBadge pins the invariant that the badge written
+// by the MCP server's in-process refresh is byte-identical to what
+// `status --emit-statusline` writes for the same DB state. The seed process
+// writes while its session is live; the CLI process then sees the same stats
+// banked from the ended session, so the totals (and bytes) must agree.
+func TestEmitStatuslineMatchesMCPBadge(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	directDir := filepath.Join(root, "direct")
+	cliDir := filepath.Join(root, "cli")
+
+	run := func(mode, claudeDir string) {
+		t.Helper()
+		cmd := exec.Command(os.Args[0], "-test.run=^TestStatuslineHelperProcess$")
+		cmd.Env = append(os.Environ(),
+			statuslineHelperEnv+"="+mode,
+			statuslineHelperData+"="+dataDir,
+			"CLAUDE_CONFIG_DIR="+claudeDir,
+			"CAVE_TOOLS_ASCII=1",
+			"CAVE_TOOLS_STATUS_RTK=0",
+			"CAVE_TOOLS_DAEMON=0",
+		)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s helper: %v\n%s", mode, err, output)
+		}
+	}
+	run("seed", directDir)
+	run("cli", cliDir)
+
+	want, err := os.ReadFile(filepath.Join(directDir, ".cave-tools-statusline-suffix"))
+	if err != nil {
+		t.Fatalf("read direct badge: %v", err)
+	}
+	if len(want) == 0 {
+		t.Fatal("direct badge is empty")
+	}
+	got, err := os.ReadFile(filepath.Join(cliDir, ".cave-tools-statusline-suffix"))
+	if err != nil {
+		t.Fatalf("read CLI badge: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("badge mismatch\n direct: %q\n    cli: %q", want, got)
 	}
 }
 

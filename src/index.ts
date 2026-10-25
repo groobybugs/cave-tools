@@ -7,6 +7,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { filterByProfile } from "./profile.js";
 import { daemonEnabled, getDaemonClient } from "./daemon-client.js";
+import { scheduleStatuslineEmit, flushStatuslineEmit } from "./statusline.js";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -39,7 +40,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return { tools: filterByProfile(tools) };
 });
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+async function handleCallTool(request: {
+  params: { name: string; arguments?: unknown };
+}) {
   const { name, arguments: args } = request.params;
 
   // Caller session id from MCP _meta (opencode sends sessionID after the
@@ -60,9 +63,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   const { callTool } = await import("./dispatch.js");
   return callTool(name, toolArgs, { sessionId });
+}
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const result = await handleCallTool(request);
+  // The statusline badge reads aggregated stats from SQLite; keep it fresh in
+  // this process instead of spawning `status --emit-statusline` per tool call.
+  // Debounced and fire-and-forget so it never delays or fails the response.
+  scheduleStatuslineEmit();
+  return result;
 });
 
 export async function startServer(): Promise<void> {
+  // A pending badge write must land even when the transport closes immediately
+  // after a call (the debounce timer is unref'd and does not hold the process).
+  process.once("exit", flushStatuslineEmit);
   // With the daemon, housekeeping runs there; this process stays thin.
   if (!daemonEnabled()) {
     const { isSubagentContext, pruneDeadSessions } = await import("./compression/utils.js");

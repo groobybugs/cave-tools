@@ -139,11 +139,12 @@ func runMCPCommand(ctx context.Context, version string, stdin io.Reader, stdout,
 // runStatusCommand implements `status [--emit-statusline|--verbose|-v]`.
 // port of src/cli.ts:status branch
 func runStatusCommand(args []string, stdout io.Writer) int {
-	summary := buildStatusSummary()
 	if containsArg(args, "--emit-statusline") {
-		writeStatuslineSuffix(formatStatuslineSuffix(summary))
+		// Only the aggregates the badge needs: no rtk probe, no by-tool table.
+		writeStatuslineSuffix(buildStatuslineSuffix())
 		return 0
 	}
+	summary := buildStatusSummary()
 	rtkSkipped := os.Getenv("CAVE_TOOLS_STATUS_RTK") == "0"
 	var rtkGain *RtkGainSummary
 	if !rtkSkipped {

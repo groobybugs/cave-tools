@@ -39,6 +39,7 @@ const DEDICATED_SUITE = [
   { name: "file-mutation-locks", script: "scripts/test-file-mutation-locks.mjs" },
   { name: "port-bugs", script: "scripts/test-port-bugs.mjs" },
   { name: "impl-switch", script: "scripts/test-impl-switch.mjs" },
+  { name: "statusline-emit", script: "scripts/test-statusline-emit.mjs" },
   { name: "usage-analyzer", script: "scripts/test-usage-analyzer.mjs" },
 ];
 

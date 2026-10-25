@@ -15,10 +15,6 @@ import (
 // isWindowsPlatform tells joinCommandArgs the process is on win32.
 func isWindowsPlatform() bool { return true }
 
-// statuslineDirOwnerOK: Node's process.getuid is undefined on Windows, so the
-// TS ownership check is skipped.
-func statuslineDirOwnerOK(info os.FileInfo) bool { return true }
-
 // rawCommand mirrors Node's win32 spawn: cmd.exe gets /d /s /c with verbatim
 // arguments, every other shell gets -c.
 func rawCommand(shell, command string) *exec.Cmd {
