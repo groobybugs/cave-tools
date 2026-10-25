@@ -693,6 +693,14 @@ touching budgets or status:
   `internal/cli/status_summary_test.go` compares both paths byte-for-byte in a
   fresh subprocess. Tests must keep `CLAUDE_CONFIG_DIR` inside their sandbox
   (the `internal/server` TestMain does).
+- The badge write is temp-file + rename, so an existing badge is recreated with
+  mode `0600` instead of keeping its previous mode. That stricter mode is
+  intended (both writers now agree, and the tests assert it); the only
+  side effect is that a crash between temp create and rename can leave a
+  `.cave-tools-statusline-suffix.*.tmp` file behind. The MCP server has no
+  SIGTERM/SIGINT handler, so a signal-killed server drops at most one pending
+  debounce window; stdin EOF and normal shutdown flush. TS behaves the same
+  way (`process.once("exit")` does not run on those signals).
 
 ## Known deviations and limitations
 
