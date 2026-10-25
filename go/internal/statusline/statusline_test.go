@@ -125,6 +125,57 @@ func TestWriteRefusesSymlinkTarget(t *testing.T) {
 	}
 }
 
+// TestBuildCoreUsesStoredCompressionSaved pins the TS semantics of
+// `s.savings.compressionSavedChars`: it is a plain number, normalized to 0 by
+// the storage layer when a legacy row lacked the field, so the aggregate must
+// never substitute savedChars for it.
+func TestBuildCoreUsesStoredCompressionSaved(t *testing.T) {
+	cases := []struct {
+		name             string
+		compressionSaved int64
+		savedChars       int64
+		want             int64
+	}{
+		{name: "legacy row without the field", compressionSaved: 0, savedChars: 500, want: 0},
+		{name: "explicit zero", compressionSaved: 0, savedChars: 500, want: 0},
+		{name: "stored value", compressionSaved: 400, savedChars: 500, want: 400},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			seedSavings(t, test.compressionSaved, test.savedChars)
+			summary := BuildCore()
+			if summary.CompressionSavedChars != test.want {
+				t.Fatalf("compressionSavedChars = %d, want %d", summary.CompressionSavedChars, test.want)
+			}
+			if summary.SavedChars != test.want {
+				t.Fatalf("savedChars = %d, want %d", summary.SavedChars, test.want)
+			}
+		})
+	}
+}
+
+// seedSavings inserts one live session row (this test process) with the given
+// compression accounting and no dedup savings, so the aggregate equals it.
+func seedSavings(t *testing.T, compressionSaved, savedChars int64) {
+	t.Helper()
+	err := storage.UpsertSessionStats(storage.PersistedStats{
+		Pid:          int64(os.Getpid()),
+		SessionStart: 1,
+		UpdatedAt:    time.Now().UnixMilli(),
+		Cache:        storage.CacheStats{Hits: 3, Misses: 1, Total: 4, FilesTracked: 2},
+		Savings: storage.SavingsStats{
+			TotalCalls:            4,
+			RawChars:              1000,
+			CompressedChars:       500,
+			CompressionSavedChars: compressionSaved,
+			SavedChars:            savedChars,
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpsertSessionStats: %v", err)
+	}
+}
+
 func TestBuildSuffixAggregates(t *testing.T) {
 	claudeDir := filepath.Join(t.TempDir(), "claude")
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)

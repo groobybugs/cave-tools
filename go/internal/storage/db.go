@@ -108,6 +108,11 @@ type CacheStats struct {
 }
 
 // SavingsStats is the token-savings accounting of one session.
+// port of src/storage/db.ts:PersistedStats["savings"]
+//
+// CompressionSavedChars is always a number, like TS: the legacy normalizer
+// applies num() (missing or null becomes 0), so no caller can observe an
+// absent field.
 type SavingsStats struct {
 	TotalCalls            int64                  `json:"totalCalls"`
 	RawChars              int64                  `json:"rawChars"`

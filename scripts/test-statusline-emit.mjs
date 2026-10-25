@@ -15,6 +15,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -171,6 +172,37 @@ async function testAtomicWrite() {
     rmSync(root, { recursive: true, force: true });
   }
   console.log("ok - atomic write");
+}
+
+// The writer must refuse a symlinked suffix target instead of following it
+// (mirrors Go TestWriteRefusesSymlinkTarget).
+async function testWriteRefusesSymlinkTarget() {
+  const { writeStatuslineSuffix } = await import("../dist/statusline.js");
+  const root = fixtureRoot();
+  try {
+    const claudeDir = join(root, "claude");
+    mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+    const victim = join(root, "victim");
+    writeFileSync(victim, "keep");
+    try {
+      symlinkSync(victim, join(claudeDir, SUFFIX));
+    } catch (error) {
+      console.log(`skip - symlink refusal (${error.code ?? error.message})`);
+      return;
+    }
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = claudeDir;
+    try {
+      writeStatuslineSuffix("new badge");
+      assert.equal(readFileSync(victim, "utf8"), "keep", "must not follow symlink");
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  console.log("ok - symlink refusal");
 }
 
 // startMCP launches the TS server and returns a minimal JSON-RPC client.
@@ -330,6 +362,7 @@ async function main() {
   await testEmitterOptOut();
   await testEmitterFailuresAreSilent();
   await testAtomicWrite();
+  await testWriteRefusesSymlinkTarget();
   await testMCPRefreshMatchesStatusCommand();
   await testMCPWriteFailureIsSilent();
   console.log("statusline emit tests passed");
