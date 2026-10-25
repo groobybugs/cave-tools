@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/groobybugs/cave-tools/go/internal/runtime"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 )
 
 // Differential harness: runs the TypeScript handler from dist/ and the Go
@@ -101,7 +102,7 @@ func runTS(t *testing.T, root string, args map[string]any, env map[string]string
 	captureFile := filepath.Join(dir, "capture.jsonl")
 	command := exec.Command("node", runner, filepath.Join(root, "dist/tools/websearch.js"), "websearchTool")
 	command.Stdin = bytes.NewReader(encoded)
-	command.Env = append(os.Environ(),
+	command.Env = append(testenv.Environ(),
 		"PARITY_FETCH_BASE="+fetchBase,
 		"PARITY_CAPTURE_FILE="+captureFile,
 	)
@@ -461,6 +462,7 @@ import(path).then((mod) => {
 		t.Fatalf("runner: %v", err)
 	}
 	command := exec.Command("node", runner, filepath.Join(root, toolPath), exportName)
+	command.Env = testenv.Environ()
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

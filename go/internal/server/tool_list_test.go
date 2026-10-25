@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 )
 
 // TestToolListOrder pins the exact TS loader/allTools order.
@@ -82,6 +84,7 @@ func TestToolDefinitionDifferential(t *testing.T) {
 	script := `import { allTools } from "./dist/tool-list.js"; process.stdout.write(JSON.stringify(allTools));`
 	cmd := exec.Command(node, "--input-type=module", "-e", script)
 	cmd.Dir = root
+	cmd.Env = testenv.Environ()
 	output, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("node: %v", err)

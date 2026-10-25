@@ -38,10 +38,18 @@ function fixtureRoot() {
 
 const ROOT_FIXTURE = fixtureRoot();
 
+// Subagent-like keys change CLI behavior (fresh reads) and make the child log
+// "unknown subagent-like env keys" to stderr (src/compression/utils.ts).
+const SUBAGENT_CANDIDATE = /(?:SUBAGENT|^CLAUDE_CODE_)/;
+const TASK_ID_STYLE = /(?:^|_)TASK_ID$/;
+
 function cleanEnv() {
   const env = { ...process.env };
-  for (const key of ["CAVE_TOOLS_IMPL", "CAVE_TOOLS_GO_BIN", "CAVE_TOOLS_DATA_DIR", "CLAUDE_CONFIG_DIR"]) {
+  for (const key of ["CAVE_TOOLS_IMPL", "CAVE_TOOLS_GO_BIN", "CAVE_TOOLS_DATA_DIR", "CLAUDE_CONFIG_DIR", "CAVE_TOOLS_FORCE_FRESH"]) {
     delete env[key];
+  }
+  for (const key of Object.keys(env)) {
+    if (SUBAGENT_CANDIDATE.test(key) || TASK_ID_STYLE.test(key)) delete env[key];
   }
   return env;
 }

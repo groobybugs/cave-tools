@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
 
@@ -50,7 +51,7 @@ func TestToolErrorsInteropWithTS(t *testing.T) {
 	}
 	cmd := exec.Command(node, script)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "CAVE_TOOLS_DATA_DIR="+dir, "CLAUDE_CONFIG_DIR="+filepath.Join(dir, "claude"))
+	cmd.Env = append(testenv.Environ(), "CAVE_TOOLS_DATA_DIR="+dir, "CLAUDE_CONFIG_DIR="+filepath.Join(dir, "claude"))
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -91,7 +92,7 @@ func TestToolErrorsInteropWithTS(t *testing.T) {
 	}
 	cmd = exec.Command(node, script)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "CAVE_TOOLS_DATA_DIR="+dir, "CLAUDE_CONFIG_DIR="+filepath.Join(dir, "claude"))
+	cmd.Env = append(testenv.Environ(), "CAVE_TOOLS_DATA_DIR="+dir, "CLAUDE_CONFIG_DIR="+filepath.Join(dir, "claude"))
 	stdout.Reset()
 	stderr.Reset()
 	cmd.Stdout = &stdout

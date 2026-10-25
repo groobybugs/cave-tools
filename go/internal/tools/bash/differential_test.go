@@ -12,6 +12,7 @@ import (
 	"time"
 
 	rt "github.com/groobybugs/cave-tools/go/internal/runtime"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 )
 
 // Handler-level differential: run the TypeScript handler from dist/ and the Go
@@ -174,7 +175,7 @@ func runNodeJSON(t *testing.T, nodePath, script string, env map[string]string, c
 
 // nodeEnv merges overrides into the process environment without duplicate keys.
 func nodeEnv(overrides map[string]string) []string {
-	env := rt.EnvFromEnviron(os.Environ())
+	env := testenv.ScrubMap(rt.EnvFromEnviron(os.Environ()))
 	for key, value := range overrides {
 		env[key] = value
 	}

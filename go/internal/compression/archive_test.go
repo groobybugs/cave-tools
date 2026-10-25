@@ -11,10 +11,14 @@ import (
 	"testing"
 
 	"github.com/groobybugs/cave-tools/go/internal/storage"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 )
 
-// TestMain isolates the storage singleton in a temp data dir.
+// TestMain isolates the storage singleton in a temp data dir and clears any
+// subagent signal the developer's shell would otherwise inject into the
+// cache/read-freshness tests.
 func TestMain(m *testing.M) {
+	testenv.ScrubProcess()
 	dir, err := os.MkdirTemp("", "cave-tools-go-archive-")
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
 
@@ -24,13 +25,9 @@ func TestMain(m *testing.M) {
 	}
 	os.Setenv("CAVE_TOOLS_DATA_DIR", filepath.Join(dir, "data"))
 	os.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(dir, "claude"))
-	// A subagent environment would disable stubs and snapshots.
-	for _, key := range []string{
-		"CAVE_TOOLS_FORCE_FRESH", "CLINE_TASK_ID", "CLAUDE_CODE_SUBAGENT",
-		"ANTHROPIC_SUBAGENT", "CURSOR_TASK_ID",
-	} {
-		os.Setenv(key, "")
-	}
+	// A subagent environment would disable stubs and snapshots. Scrub every
+	// detection key, not just the four known signals.
+	testenv.ScrubProcess()
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

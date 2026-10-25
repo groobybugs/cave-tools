@@ -17,6 +17,7 @@ import (
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
 	"github.com/groobybugs/cave-tools/go/internal/runtime"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
 
@@ -69,7 +70,7 @@ func runClientHelper(mode string) int {
 	outcome, err := client.Call(context.Background(), "cave__fixture_echo", map[string]any{"text": text}, &runtime.CallContext{
 		SessionID: "spawn-test",
 		Cwd:       cwd,
-		Env:       runtime.EnvFromEnviron(os.Environ()),
+		Env:       testenv.ScrubMap(runtime.EnvFromEnviron(os.Environ())),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "client helper:", err)
@@ -725,7 +726,7 @@ func TestSpawnedDaemonAndConcurrentSpawn(t *testing.T) {
 			cmd := exec.Command(os.Args[0])
 			// Stay inside the repository so the client can resolve dist/ for
 			// the daemon it spawns; the call's cwd travels separately.
-			cmd.Env = append(os.Environ(),
+			cmd.Env = append(testenv.Environ(),
 				"CAVE_TOOLS_DAEMON=1",
 				"CAVE_TOOLS_DAEMON_IDLE_MS=60000",
 				testClientModeEnv+"=call",
