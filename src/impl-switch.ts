@@ -19,24 +19,28 @@ import { accessSync, constants, statSync, writeSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { TS_ROUTED_COMMANDS } from "../scripts/impl-routes.mjs";
+import { TS_ROUTED_COMMANDS, TS_ROUTED_TOOLS } from "../scripts/impl-routes.mjs";
 
 export const IMPL_ENV = "CAVE_TOOLS_IMPL";
 export const GO_BIN_ENV = "CAVE_TOOLS_GO_BIN";
 
-/** First-arg commands that keep running in TypeScript under `CAVE_TOOLS_IMPL=go`. */
-export { TS_ROUTED_COMMANDS };
+/** Commands that keep running in TypeScript under `CAVE_TOOLS_IMPL=go`. */
+export { TS_ROUTED_COMMANDS, TS_ROUTED_TOOLS };
 
 /**
  * Whether argv must stay in TypeScript even when Go is selected. Mirrors
  * src/cli.ts dispatch exactly: no arguments and first token `mcp` start the
  * stdio MCP server, and `webfetch`/`websearch` are the Node-fetch-backed tool
- * commands. Everything else (including `__job-worker`, `filter`, `status`,
- * `raw`, `bash`, `jobs`, daemon control and `tool <name>`) keeps going to Go.
+ * commands. Those tools are also reachable through the explicit
+ * `tool <name>` dispatcher, which loads the same handler, so that form is
+ * routed here too. Everything else (including `__job-worker`, `filter`,
+ * `status`, `raw`, `bash`, `jobs`, daemon control and `tool <other>`) keeps
+ * going to Go.
  */
 export function routesToTypeScript(argv: readonly string[]): boolean {
   if (argv.length === 0) return true;
-  return TS_ROUTED_COMMANDS.includes(argv[0]);
+  if (TS_ROUTED_COMMANDS.includes(argv[0])) return true;
+  return argv[0] === "tool" && TS_ROUTED_TOOLS.includes(argv[1] ?? "");
 }
 
 export interface GoBinaryResolution {

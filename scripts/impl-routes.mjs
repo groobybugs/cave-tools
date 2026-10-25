@@ -8,6 +8,12 @@
 // A bare invocation (no arguments) starts the stdio MCP server, so argc 0 is
 // routed to TypeScript as well. src/impl-switch.ts imports this module for the
 // runtime check and scripts/install-agent-instructions.mjs interpolates the
-// same list into the generated POSIX launcher shim, so the two cannot drift.
+// same lists into the generated POSIX launcher shim, so the two cannot drift.
+//
+// The web tools have two dispatch forms in src/cli.ts and both reach the same
+// runToolCommand handler: the direct `webfetch <url>` form and the explicit
+// `tool webfetch <url>` form. TS_ROUTED_TOOLS feeds both checks.
 
-export const TS_ROUTED_COMMANDS = Object.freeze(["mcp", "webfetch", "websearch"]);
+export const TS_ROUTED_TOOLS = Object.freeze(["webfetch", "websearch"]);
+
+export const TS_ROUTED_COMMANDS = Object.freeze(["mcp", ...TS_ROUTED_TOOLS]);
