@@ -16,6 +16,7 @@ import (
 	"github.com/groobybugs/cave-tools/go/internal/compression"
 	"github.com/groobybugs/cave-tools/go/internal/daemon"
 	callruntime "github.com/groobybugs/cave-tools/go/internal/runtime"
+	"github.com/groobybugs/cave-tools/go/internal/statusline"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
 
@@ -84,7 +85,14 @@ func newMCPServer(version string) *mcp.Server {
 			case "tools/list":
 				return &mcpToolListResult{Tools: listToolsForRequest(ctx)}, nil
 			case "tools/call":
-				return callToolForRequest(ctx, req)
+				result, err := callToolForRequest(ctx, req)
+				if err == nil {
+					// Keep the statusline badge fresh in-process instead of
+					// spawning `status --emit-statusline` per tool call.
+					// Debounced and off the response path.
+					statusline.Schedule()
+				}
+				return result, err
 			default:
 				return next(ctx, method, req)
 			}
@@ -226,6 +234,8 @@ func zodArgumentsError(received string) error {
 // written to stdout except JSON-RPC frames.
 // port of src/index.ts:startServer
 func StartServer(ctx context.Context, version string, stdin io.Reader, stdout, stderr io.Writer) error {
+	// A pending badge write must land when the transport closes.
+	defer statusline.Flush()
 	// With the daemon, housekeeping runs there; this process stays thin.
 	if !daemon.DaemonEnabled() {
 		// Probe env once so unknown Claude Code / subagent keys log at boot.

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
-	"math/big"
 	"os"
 	"os/exec"
 	"sort"
@@ -23,15 +22,6 @@ import (
 // calculations (src/status-ui.ts pad regex).
 var ansiPattern = jsre.MustCompile(`\x1b\[[0-9;]*m`, "g")
 
-// ToolBreakdown is one row of the by-tool table.
-// port of src/status-ui.ts:ToolBreakdown
-type ToolBreakdown struct {
-	Name       string `json:"name"`
-	Calls      int64  `json:"calls"`
-	RawChars   int64  `json:"rawChars"`
-	SavedChars int64  `json:"savedChars"`
-}
-
 // RtkGainSummary is `rtk gain -f json`'s summary block.
 // port of src/status-ui.ts:RtkGainSummary
 type RtkGainSummary struct {
@@ -42,21 +32,6 @@ type RtkGainSummary struct {
 	AvgSavingsPct float64 `json:"avgSavingsPct"`
 	TotalTimeMs   int64   `json:"totalTimeMs"`
 	AvgTimeMs     int64   `json:"avgTimeMs"`
-}
-
-// Budget is the rendered part of one tool's line budget.
-// port of src/status-ui.ts:StatusRenderInput budgets value
-type Budget struct {
-	MaxLines  float64 `json:"maxLines"`
-	HeadLines float64 `json:"headLines"`
-	TailLines float64 `json:"tailLines"`
-}
-
-// BudgetEntry keeps the insertion order TS's Object.entries(budgets) renders;
-// a Go map would randomize the table.
-type BudgetEntry struct {
-	Name  string
-	Value Budget
 }
 
 // StatusRenderInput is everything the status renderer displays.
@@ -733,45 +708,6 @@ func jsNumberToString(value float64) string {
 		}
 	}
 	if negative {
-		return "-" + out
-	}
-	return out
-}
-
-// jsToFixed mirrors Number.prototype.toFixed, including its round-half-away
-// rule: Go's strconv rounds half to even, which would turn 14.5k into "14k".
-func jsToFixed(x float64, digits int) string {
-	if math.IsNaN(x) {
-		return "NaN"
-	}
-	if math.IsInf(x, 1) {
-		return "Infinity"
-	}
-	if math.IsInf(x, -1) {
-		return "-Infinity"
-	}
-	if math.Abs(x) >= 1e21 {
-		return strconv.FormatFloat(x, 'g', -1, 64)
-	}
-	neg := x < 0
-	abs := math.Abs(x)
-	rat := new(big.Rat).SetFloat64(abs)
-	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(digits)), nil)
-	rat.Mul(rat, new(big.Rat).SetInt(scale))
-	q, rem := new(big.Int).QuoRem(rat.Num(), rat.Denom(), new(big.Int))
-	rem.Abs(rem)
-	rem.Lsh(rem, 1)
-	if rem.Cmp(rat.Denom()) >= 0 {
-		q.Add(q, big.NewInt(1))
-	}
-	out := q.String()
-	if digits > 0 {
-		for len(out) <= digits {
-			out = "0" + out
-		}
-		out = out[:len(out)-digits] + "." + out[len(out)-digits:]
-	}
-	if neg {
 		return "-" + out
 	}
 	return out
