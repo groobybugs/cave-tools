@@ -125,60 +125,55 @@ func TestWriteRefusesSymlinkTarget(t *testing.T) {
 	}
 }
 
-// TestCompressionSavedOfMatchesTSFallback pins the `?? savedChars` rule: only
-// an absent field falls back; an explicit 0 stays 0 like TS.
-func TestCompressionSavedOfMatchesTSFallback(t *testing.T) {
+// TestBuildCoreUsesStoredCompressionSaved pins the TS semantics of
+// `s.savings.compressionSavedChars`: it is a plain number, normalized to 0 by
+// the storage layer when a legacy row lacked the field, so the aggregate must
+// never substitute savedChars for it.
+func TestBuildCoreUsesStoredCompressionSaved(t *testing.T) {
 	cases := []struct {
-		name    string
-		savings storage.SavingsStats
-		want    int64
+		name             string
+		compressionSaved int64
+		savedChars       int64
+		want             int64
 	}{
-		{
-			name:    "absent field falls back to savedChars",
-			savings: storage.SavingsStats{SavedChars: 500},
-			want:    500,
-		},
-		{
-			name:    "explicit zero does not fall back",
-			savings: storage.SavingsStats{CompressionSavedCharsSet: true, CompressionSavedChars: 0, SavedChars: 500},
-			want:    0,
-		},
-		{
-			name:    "present field wins",
-			savings: storage.SavingsStats{CompressionSavedCharsSet: true, CompressionSavedChars: 400, SavedChars: 500},
-			want:    400,
-		},
+		{name: "legacy row without the field", compressionSaved: 0, savedChars: 500, want: 0},
+		{name: "explicit zero", compressionSaved: 0, savedChars: 500, want: 0},
+		{name: "stored value", compressionSaved: 400, savedChars: 500, want: 400},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			if got := compressionSavedOf(test.savings); got != test.want {
-				t.Fatalf("compressionSavedOf = %d, want %d", got, test.want)
+			seedSavings(t, test.compressionSaved, test.savedChars)
+			summary := BuildCore()
+			if summary.CompressionSavedChars != test.want {
+				t.Fatalf("compressionSavedChars = %d, want %d", summary.CompressionSavedChars, test.want)
+			}
+			if summary.SavedChars != test.want {
+				t.Fatalf("savedChars = %d, want %d", summary.SavedChars, test.want)
 			}
 		})
 	}
 }
 
-// TestStoredSessionCarriesCompressionSavedField proves DB rows always set the
-// presence bit, so the aggregate keeps using the stored field (not savedChars).
-func TestStoredSessionCarriesCompressionSavedField(t *testing.T) {
-	seedSession(t)
-	sessions, err := storage.ListSessionStats(false)
+// seedSavings inserts one live session row (this test process) with the given
+// compression accounting and no dedup savings, so the aggregate equals it.
+func seedSavings(t *testing.T, compressionSaved, savedChars int64) {
+	t.Helper()
+	err := storage.UpsertSessionStats(storage.PersistedStats{
+		Pid:          int64(os.Getpid()),
+		SessionStart: 1,
+		UpdatedAt:    time.Now().UnixMilli(),
+		Cache:        storage.CacheStats{Hits: 3, Misses: 1, Total: 4, FilesTracked: 2},
+		Savings: storage.SavingsStats{
+			TotalCalls:            4,
+			RawChars:              1000,
+			CompressedChars:       500,
+			CompressionSavedChars: compressionSaved,
+			SavedChars:            savedChars,
+		},
+	})
 	if err != nil {
-		t.Fatalf("ListSessionStats: %v", err)
+		t.Fatalf("UpsertSessionStats: %v", err)
 	}
-	for _, session := range sessions {
-		if session.Pid != int64(os.Getpid()) {
-			continue
-		}
-		if !session.Savings.CompressionSavedCharsSet {
-			t.Fatal("DB row did not mark compressionSavedChars as present")
-		}
-		if session.Savings.CompressionSavedChars != 400 {
-			t.Fatalf("compressionSavedChars = %d, want 400", session.Savings.CompressionSavedChars)
-		}
-		return
-	}
-	t.Fatal("seeded session row not found")
 }
 
 func TestBuildSuffixAggregates(t *testing.T) {

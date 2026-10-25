@@ -76,18 +76,6 @@ type Summary struct {
 // defaults must keep that order; unknown (custom) tools sort after them.
 var knownBudgetOrder = []string{"bash", "read", "grep", "web", "find", "ls"}
 
-// compressionSavedOf mirrors TS
-// `s.savings.compressionSavedChars ?? s.savings.savedChars ?? 0`: the fallback
-// applies only when the row did not carry the field at all (undefined), not
-// when it explicitly holds 0. DB rows always carry it, so this is the same
-// value they already had.
-func compressionSavedOf(savings storage.SavingsStats) int64 {
-	if !savings.CompressionSavedCharsSet {
-		return savings.SavedChars
-	}
-	return savings.CompressionSavedChars
-}
-
 // BuildCore aggregates lifetime + visible-session stats without the rtk probe
 // or the by-tool table (neither is part of the statusline badge).
 // port of src/statusline.ts:buildStatusCore
@@ -135,7 +123,7 @@ func BuildCore() Summary {
 	rtkPassthrough := lifetime.RtkPassthrough
 
 	for _, session := range visibleSessions {
-		compressionSaved := compressionSavedOf(session.Savings)
+		compressionSaved := session.Savings.CompressionSavedChars
 		dedup := session.Savings.DedupSavedChars
 		filesTracked += session.Cache.FilesTracked
 		hits += session.Cache.Hits

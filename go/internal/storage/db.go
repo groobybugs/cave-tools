@@ -108,19 +108,20 @@ type CacheStats struct {
 }
 
 // SavingsStats is the token-savings accounting of one session.
+// port of src/storage/db.ts:PersistedStats["savings"]
+//
+// CompressionSavedChars is always a number, like TS: the legacy normalizer
+// applies num() (missing or null becomes 0), so no caller can observe an
+// absent field.
 type SavingsStats struct {
-	TotalCalls            int64 `json:"totalCalls"`
-	RawChars              int64 `json:"rawChars"`
-	CompressedChars       int64 `json:"compressedChars"`
-	CompressionSavedChars int64 `json:"compressionSavedChars"`
-	// CompressionSavedCharsSet reports whether the source carried the
-	// compressionSavedChars field at all (TS undefined vs an explicit 0).
-	// DB rows always carry it; hand-built legacy rows may not.
-	CompressionSavedCharsSet bool                   `json:"-"`
-	DedupSavedChars          int64                  `json:"dedupSavedChars"`
-	SavedChars               int64                  `json:"savedChars"`
-	EstimatedTokensSaved     int64                  `json:"estimatedTokensSaved"`
-	ByTool                   map[string]ToolSavings `json:"byTool"`
+	TotalCalls            int64                  `json:"totalCalls"`
+	RawChars              int64                  `json:"rawChars"`
+	CompressedChars       int64                  `json:"compressedChars"`
+	CompressionSavedChars int64                  `json:"compressionSavedChars"`
+	DedupSavedChars       int64                  `json:"dedupSavedChars"`
+	SavedChars            int64                  `json:"savedChars"`
+	EstimatedTokensSaved  int64                  `json:"estimatedTokensSaved"`
+	ByTool                map[string]ToolSavings `json:"byTool"`
 }
 
 // BounceSummary is the dedup-bounce accounting of one session.
@@ -696,15 +697,14 @@ func normalizeLegacyStats(raw []byte) (PersistedStats, bool) {
 			FilesTracked: legacyNumber(cache["filesTracked"]),
 		},
 		Savings: SavingsStats{
-			TotalCalls:               legacyNumber(savings["totalCalls"]),
-			RawChars:                 legacyNumber(savings["rawChars"]),
-			CompressedChars:          legacyNumber(savings["compressedChars"]),
-			CompressionSavedChars:    legacyNumber(savings["compressionSavedChars"]),
-			CompressionSavedCharsSet: savings["compressionSavedChars"] != nil,
-			DedupSavedChars:          legacyNumber(savings["dedupSavedChars"]),
-			SavedChars:               legacyNumber(savings["savedChars"]),
-			EstimatedTokensSaved:     legacyNumber(savings["estimatedTokensSaved"]),
-			ByTool:                   byTool,
+			TotalCalls:            legacyNumber(savings["totalCalls"]),
+			RawChars:              legacyNumber(savings["rawChars"]),
+			CompressedChars:       legacyNumber(savings["compressedChars"]),
+			CompressionSavedChars: legacyNumber(savings["compressionSavedChars"]),
+			DedupSavedChars:       legacyNumber(savings["dedupSavedChars"]),
+			SavedChars:            legacyNumber(savings["savedChars"]),
+			EstimatedTokensSaved:  legacyNumber(savings["estimatedTokensSaved"]),
+			ByTool:                byTool,
 		},
 		Rtk: RtkStats{
 			Rewrites:       legacyNumber(rtk["rewrites"]),
@@ -895,13 +895,12 @@ func rowToStats(conn queryer, row sessionRow) (SessionStatsRow, error) {
 				FilesTracked: row.filesTracked,
 			},
 			Savings: SavingsStats{
-				TotalCalls:               row.totalCalls,
-				RawChars:                 row.rawChars,
-				CompressedChars:          row.compressedChars,
-				CompressionSavedChars:    row.compressionSavedChars,
-				CompressionSavedCharsSet: true,
-				DedupSavedChars:          row.dedupSavedChars,
-				SavedChars:               row.savedChars,
+				TotalCalls:            row.totalCalls,
+				RawChars:              row.rawChars,
+				CompressedChars:       row.compressedChars,
+				CompressionSavedChars: row.compressionSavedChars,
+				DedupSavedChars:       row.dedupSavedChars,
+				SavedChars:            row.savedChars,
 				// TS: Math.round(saved_chars / 4).
 				EstimatedTokensSaved: int64(math.Round(float64(row.savedChars) / 4)),
 				ByTool:               byTool,

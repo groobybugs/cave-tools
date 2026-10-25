@@ -3,6 +3,7 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -1023,6 +1024,64 @@ func TestLegacyMigrationNormalizesStats(t *testing.T) {
 	budgets := queryStrings(t, conn, "SELECT budgets_json FROM sessions WHERE pid = 4242")
 	if len(budgets) != 1 || budgets[0] != "{}" {
 		t.Fatalf("budgets_json = %v, want [{}]", budgets)
+	}
+}
+
+// TestLegacyCompressionSavedCharsMirrorsTSNum pins num() semantics for the
+// field the statusline aggregates: a pre-field session file (absent key) or an
+// explicit null becomes 0, never savedChars. TS normalizes the same way in
+// src/storage/db.ts:446, so the badge cannot disagree on this legacy path.
+func TestLegacyCompressionSavedCharsMirrorsTSNum(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "data")
+	t.Setenv("CAVE_TOOLS_DATA_DIR", dir)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	resetDB(t)
+	t.Cleanup(func() { resetDB(t) })
+
+	cases := []struct {
+		pid     int64
+		savings string
+		want    int64
+	}{
+		{pid: 5101, savings: `{"totalCalls":4,"rawChars":1000,"savedChars":500}`, want: 0},
+		{pid: 5102, savings: `{"compressionSavedChars":null,"savedChars":500}`, want: 0},
+		{pid: 5103, savings: `{"compressionSavedChars":0,"savedChars":500}`, want: 0},
+		{pid: 5104, savings: `{"compressionSavedChars":400,"savedChars":500}`, want: 400},
+		// TS num() only accepts finite numbers; a string is 0.
+		{pid: 5105, savings: `{"compressionSavedChars":"400","savedChars":500}`, want: 0},
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0o700); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	for _, test := range cases {
+		body := fmt.Sprintf(`{"pid":%d,"sessionStart":1,"updatedAt":2,"savings":%s}`, test.pid, test.savings)
+		name := fmt.Sprintf("%d.json", test.pid)
+		if err := os.WriteFile(filepath.Join(dir, "sessions", name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	rows, err := ListSessionStats(true)
+	if err != nil {
+		t.Fatalf("ListSessionStats: %v", err)
+	}
+	byPid := map[int64]SessionStatsRow{}
+	for _, row := range rows {
+		byPid[row.Pid] = row
+	}
+	for _, test := range cases {
+		row, ok := byPid[test.pid]
+		if !ok {
+			t.Fatalf("pid %d was not migrated", test.pid)
+		}
+		if row.Savings.CompressionSavedChars != test.want {
+			t.Errorf("pid %d compressionSavedChars = %d, want %d", test.pid, row.Savings.CompressionSavedChars, test.want)
+		}
+		// savedChars stays untouched: it is the value TS also keeps on the row.
+		if row.Savings.SavedChars != 500 {
+			t.Errorf("pid %d savedChars = %d, want 500", test.pid, row.Savings.SavedChars)
+		}
 	}
 }
 
