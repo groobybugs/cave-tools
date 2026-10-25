@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -199,10 +198,9 @@ func findWithNode(cwd, pattern string, limit float64, hidden bool) []string {
 			}
 		}
 	}
-	// TS sorts with a.localeCompare(b); the ICU primary/tertiary order differs
-	// from a byte-wise sort for mixed case. LocaleCompare is the printable-
-	// ASCII equivalent shared with ls.
-	sort.Slice(results, func(i, j int) bool { return LocaleCompare(results[i], results[j]) < 0 })
+	// TS sorts with a.localeCompare(b) (stable). Key-based locale sort keeps the
+	// same order without paying for two collations per comparison.
+	SortStringsLocale(results)
 	return results
 }
 

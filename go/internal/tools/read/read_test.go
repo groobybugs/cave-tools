@@ -622,6 +622,35 @@ func TestDirectoryListing(t *testing.T) {
 	}
 }
 
+// TestDirectoryListingUnicodeCollation pins the collation the listing sort
+// relies on: accents sort next to their base letter, Turkish dotless i sorts
+// before i, and canonically equivalent names (NFC vs NFD) tie, so the readdir
+// order libuv produces decides between them.
+func TestDirectoryListingUnicodeCollation(t *testing.T) {
+	ctx := resetState(t)
+	dir := fixtureRoot(t)
+	for _, name := range []string{
+		"apple.txt", "Apple.txt", "APPLE.txt",
+		"arger.txt", "\u00c4rger.txt",
+		"cafe\u0301.txt", "caf\u00e9.txt",
+		"istanbul.txt", "\u0131stanbul.txt", "\u0130stanbul.txt",
+		"zebra.txt", "Zebra.txt",
+	} {
+		mustWrite(t, filepath.Join(dir, name), "x")
+	}
+
+	want := strings.Join([]string{
+		"apple.txt", "Apple.txt", "APPLE.txt",
+		"arger.txt", "\u00c4rger.txt",
+		"cafe\u0301.txt", "caf\u00e9.txt", // NFD then NFC: libuv readdir is bytewise, and the collator ties
+		"istanbul.txt", "\u0130stanbul.txt", "\u0131stanbul.txt",
+		"zebra.txt", "Zebra.txt",
+	}, "\n")
+	if got := resultText(t, callRead(t, ctx, map[string]any{"file_path": dir})); got != want {
+		t.Fatalf("listing = %q, want %q", got, want)
+	}
+}
+
 // TestMediaBlocks covers the svg/pdf branches.
 func TestMediaBlocks(t *testing.T) {
 	ctx := resetState(t)

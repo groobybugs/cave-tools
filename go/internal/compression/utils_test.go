@@ -925,3 +925,36 @@ func TestLineCompaction(t *testing.T) {
 		t.Fatal("oversized text must not fit read")
 	}
 }
+
+// TestGetRtkTopPassthroughLocaleTieBreak pins the tie-break to
+// String.prototype.localeCompare: equal counts order by prefix in ICU order,
+// not byte order, so "arger" sorts before "Ärger" and lowercase before
+// uppercase on an otherwise equal prefix.
+func TestGetRtkTopPassthroughLocaleTieBreak(t *testing.T) {
+	t.Cleanup(waitPendingPersists)
+	ctx := context.Background()
+	ResetStats(ctx)
+
+	for _, command := range []string{
+		"zebracmd --flag",
+		"Zebracmd --flag",
+		"\u00c4rgermd --flag",
+		"argermd --flag",
+	} {
+		notePassthrough(ctx, command)
+	}
+
+	var prefixes []string
+	for _, entry := range GetRtkTopPassthrough(ctx) {
+		prefixes = append(prefixes, entry.Prefix)
+	}
+	want := []string{"argermd --flag", "\u00c4rgermd --flag", "zebracmd --flag", "Zebracmd --flag"}
+	if len(prefixes) != len(want) {
+		t.Fatalf("prefixes = %q, want %q", prefixes, want)
+	}
+	for index := range want {
+		if prefixes[index] != want[index] {
+			t.Fatalf("prefixes = %q, want %q", prefixes, want)
+		}
+	}
+}
