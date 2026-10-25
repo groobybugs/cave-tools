@@ -130,6 +130,10 @@ func handle(ctx context.Context, args map[string]any) (types.ToolResult, error) 
 // sortEntries orders directories first, then by localeCompare on the name,
 // mirroring `a.type === b.type ? a.name.localeCompare(b.name) : ...`. Two
 // stable passes: locale-sort by name, then move directories to the front.
+//
+// No byte pre-sort is needed here, unlike read's directory listing: os.ReadDir
+// already returns entries sorted by filename, so names the collator ties on
+// (NFC/NFD pairs, ignorables) keep the bytewise order Node's scandir produced.
 func sortEntries(entries []entry) {
 	rt.SortStableByLocale(entries, func(value entry) string { return value.name })
 	sort.SliceStable(entries, func(i, j int) bool {
