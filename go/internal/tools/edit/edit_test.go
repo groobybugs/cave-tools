@@ -1324,3 +1324,71 @@ func TestFindClosestLineHintUTF16(t *testing.T) {
 		t.Fatalf("preview must stop before the emoji: %q", got)
 	}
 }
+
+// TestCheckRangeChecksumOrErrorJSUnicodeCase pins the `expected:` preview,
+// which mirrors `String(expected).trim().toLowerCase().slice(0, 16)` in
+// src/tools/edit.ts. Values measured with node 24.19.0:
+//
+//	"\u0391\u03a3\u0391\u03a3\u0391\u03a3".toLowerCase() = "\u03b1\u03c3\u03b1\u03c3\u03b1\u03c2"
+//	"\u0130".repeat(10).toLowerCase().slice(0, 16)      = "i\u0307".repeat(8)
+//	"\u0130\u03a3\u0130\u03a3".toLowerCase()            = "i\u0307\u03c3i\u0307\u03c2"
+func TestCheckRangeChecksumOrErrorJSUnicodeCase(t *testing.T) {
+	content := "a\nb\nc\n"
+	cases := []struct {
+		name     string
+		expected string
+		wantLine string
+	}{
+		{"final sigma", "\u0391\u03a3\u0391\u03a3\u0391\u03a3", "expected: \u03b1\u03c3\u03b1\u03c3\u03b1\u03c2"},
+		{"dotted I expands", strings.Repeat("\u0130", 10), "expected: " + strings.Repeat("i\u0307", 8)},
+		{"mixed", "\u0130\u03a3\u0130\u03a3", "expected: i\u0307\u03c3i\u0307\u03c2"},
+	}
+	for _, tc := range cases {
+		result := checkRangeChecksumOrError(content, 1, 1, tc.expected)
+		if result == nil || !result.IsError {
+			t.Fatalf("%s: want an error, got %+v", tc.name, result)
+		}
+		if got := resultText(*result); !strings.Contains(got, tc.wantLine+"\n") {
+			t.Fatalf("%s: message %q missing %q", tc.name, got, tc.wantLine)
+		}
+	}
+}
+
+// TestCheckExpectedHashUTF16Length pins the min-length gate of
+// checkExpectedHash to `String.prototype.length` (UTF-16 code units), not
+// UTF-8 bytes. Values measured with node 24.19.0:
+//
+//	"€€€".trim().toLowerCase().length = 3  (9 UTF-8 bytes) -> "at least 8"
+//	"İİİ".trim().toLowerCase().length = 6  (9 UTF-8 bytes) -> "at least 8"
+//
+// (U+0130 lowercases to "i" + U+0307, so three of them are six units.)
+func TestCheckExpectedHashUTF16Length(t *testing.T) {
+	source := []byte("alpha\nbeta\n")
+	cases := []struct {
+		name     string
+		expected any
+		wantText string
+	}{
+		{"euro signs below min", "€€€", "expected_hash must be at least 8 hex characters"},
+		{"dotted I below min", strings.Repeat("\u0130", 3), "expected_hash must be at least 8 hex characters"},
+	}
+	for _, tc := range cases {
+		result := checkExpectedHash(tc.expected, source)
+		if result == nil || !result.IsError {
+			t.Fatalf("%s: want an error, got %+v", tc.name, result)
+		}
+		if got := strings.TrimPrefix(resultText(*result), "Error: "); got != tc.wantText {
+			t.Fatalf("%s: got %q, want %q", tc.name, got, tc.wantText)
+		}
+	}
+
+	// 8 ASCII hex characters still clear the length gate and reach the
+	// mismatch path.
+	okLen := checkExpectedHash("deadbeef", source)
+	if okLen == nil || !okLen.IsError {
+		t.Fatalf("deadbeef: want a mismatch error, got %+v", okLen)
+	}
+	if got := resultText(*okLen); !strings.HasPrefix(strings.TrimPrefix(got, "Error: "), "expected_hash mismatch") {
+		t.Fatalf("deadbeef: got %q, want an expected_hash mismatch", got)
+	}
+}

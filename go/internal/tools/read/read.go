@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
+	"github.com/groobybugs/cave-tools/go/internal/jsre"
 	rt "github.com/groobybugs/cave-tools/go/internal/runtime"
 	"github.com/groobybugs/cave-tools/go/internal/tools"
 	"github.com/groobybugs/cave-tools/go/internal/types"
@@ -201,7 +202,7 @@ func isBinaryFile(filePath string, ext string) bool {
 // port of src/tools/read.ts:suggestPaths
 func suggestPaths(filePath string) string {
 	dir := nodeDirname(filePath)
-	base := strings.ToLower(nodeBasename(filePath))
+	base := jsre.ToLowerJS(nodeBasename(filePath))
 
 	handle, err := os.Open(dir)
 	if err != nil {
@@ -212,11 +213,16 @@ func suggestPaths(filePath string) string {
 	if err != nil {
 		return ""
 	}
+	// Node's readdir uses libuv's scandir, which sorts entries bytewise
+	// (strcmp) on POSIX; Go's File.ReadDir preserves filesystem order.
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
 
 	matches := make([]string, 0, 3)
 	for _, entry := range entries {
 		name := entry.Name()
-		lower := strings.ToLower(name)
+		lower := jsre.ToLowerJS(name)
 		if !strings.Contains(lower, base) && !strings.Contains(base, lower) {
 			continue
 		}

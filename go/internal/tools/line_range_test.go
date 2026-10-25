@@ -417,3 +417,19 @@ func TestLineRangeCountsUTF16Units(t *testing.T) {
 		t.Fatalf("VerifyRangeChecksum(ñññ) error = %q", v.Error)
 	}
 }
+
+// TestVerifyRangeChecksumJSUnicodeCase pins String.prototype.toLowerCase for
+// the expected value. Values measured with node 24.19.0:
+//
+//	"\u0130\u0130".toLowerCase().length === 4   -> clears the four-character minimum
+//	"\u0391\u03a3".toLowerCase() === "\u03b1\u03c2" -> two characters, rejected
+func TestVerifyRangeChecksumJSUnicodeCase(t *testing.T) {
+	dotted := VerifyRangeChecksum("a\nb\nc", 1, 1, "\u0130\u0130")
+	if dotted.OK || !strings.Contains(dotted.Error, "mismatch") {
+		t.Fatalf("dotted-I expected = %+v, want a mismatch (4 code units)", dotted)
+	}
+	sigma := VerifyRangeChecksum("a\nb\nc", 1, 1, "\u0391\u03a3")
+	if sigma.OK || sigma.Error != "expected_range_checksum must be at least 4 hex characters" {
+		t.Fatalf("final-sigma expected = %+v, want the short-expected error", sigma)
+	}
+}

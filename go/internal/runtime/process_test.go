@@ -507,3 +507,49 @@ printf 'job=%s log=%s shell=%s command=%s' "$1" "$2" "$4" "$5" > "$3"
 		w1bWait(t, settled, "executable failure close")
 	})
 }
+
+// TestRunCommandRejectsEmptyCommand pins Node's normalizeSpawnArguments
+// behavior: an exactly-empty file argument fails before shell handling instead
+// of running the shell and exiting 0.
+func TestRunCommandRejectsEmptyCommand(t *testing.T) {
+	ctx := w1bCtx(t, t.TempDir(), nil)
+
+	_, err := RunCommand(ctx, "", RunCommandOptions{Timeout: 5000})
+	if !errors.Is(err, ErrEmptyCommand) {
+		t.Fatalf("err = %v, want ErrEmptyCommand", err)
+	}
+	const want = "The argument 'file' cannot be empty. Received ''"
+	if err.Error() != want {
+		t.Fatalf("message = %q, want %q", err.Error(), want)
+	}
+
+	// Whitespace-only commands are not empty to Node and still reach the shell.
+	result, err := RunCommand(ctx, " ", RunCommandOptions{Timeout: 5000})
+	if err != nil {
+		t.Fatalf("RunCommand(\" \"): %v", err)
+	}
+	if result.Stdout != "" || result.Stderr != "" || result.ExitCode == nil || *result.ExitCode != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+// TestStartBackgroundCommandEmptyCommand checks the handle path reports the
+// same spawn failure it reports for every other start error.
+func TestStartBackgroundCommandEmptyCommand(t *testing.T) {
+	handle := StartBackgroundCommand(w1bCtx(t, t.TempDir(), nil), "", StartBackgroundOptions{})
+	if handle.Pid != 0 {
+		t.Fatalf("pid = %d, want 0 (never started)", handle.Pid)
+	}
+	done := make(chan struct{}, 1)
+	handle.OnClose(func(code *int, signal *string) {
+		if code != nil || signal != nil {
+			t.Errorf("close = %v/%v, want nil/nil", code, signal)
+		}
+		done <- struct{}{}
+	})
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close listener never fired")
+	}
+}

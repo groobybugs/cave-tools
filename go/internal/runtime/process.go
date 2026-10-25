@@ -364,6 +364,15 @@ func StartDurableBackgroundCommand(ctx context.Context, command string, options 
 // port of src/runtime/process.ts:startBackgroundCommand
 func StartBackgroundCommand(ctx context.Context, command string, options StartBackgroundOptions) *BackgroundHandle {
 	handle := &BackgroundHandle{}
+	// Shape differs from TS: src/runtime/process.ts:startBackgroundCommand lets
+	// Node's spawn throw synchronously for an empty command, while this
+	// signature has no error slot. Instead the handle fires (nil, nil), the same
+	// way every other spawn failure is reported here. The difference is
+	// unobservable in practice: there are no production callers.
+	if command == "" {
+		go handle.fire(nil, nil)
+		return handle
+	}
 	shell := options.Shell
 	if shell == "" {
 		shell = DefaultShell(ctx)
@@ -417,6 +426,11 @@ func backgroundLogFile(fd int) *os.File {
 
 // port of src/runtime/process.ts:runCommand
 func RunCommand(ctx context.Context, command string, options RunCommandOptions) (RunCommandResult, error) {
+	// Node rejects an empty `file` before shell handling, so the shell never
+	// runs (and never exits 0) for an exactly-empty command.
+	if command == "" {
+		return RunCommandResult{}, ErrEmptyCommand
+	}
 	shell := options.Shell
 	if shell == "" {
 		shell = DefaultShell(ctx)
@@ -533,6 +547,13 @@ const (
 	signalTerm processSignal = iota
 	signalKill
 )
+
+// ErrEmptyCommand is Node's normalizeSpawnArguments rejection of an empty
+// `file` argument. Node validates the file before it applies `shell` options,
+// so an exactly-empty command never reaches the shell and fails to launch;
+// whitespace-only commands still run.
+// port of Node's child_process.normalizeSpawnArguments (ERR_INVALID_ARG_VALUE)
+var ErrEmptyCommand = errors.New("The argument 'file' cannot be empty. Received ''")
 
 func spawnError(command string, err error) error {
 	switch {

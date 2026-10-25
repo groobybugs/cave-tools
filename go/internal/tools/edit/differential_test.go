@@ -254,6 +254,14 @@ func differentialCases() []diffCase {
 			Fixture: []diffFixture{{Path: "o6.txt", Content: "alpha\nbeta\n"}}},
 		{Name: "edit hash upper exponent", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o7.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": 1e21},
 			Fixture: []diffFixture{{Path: "o7.txt", Content: "alpha\nbeta\n"}}},
+
+		// The expected_hash min-length gate is String.prototype.length (UTF-16
+		// units), so 3 euro signs (9 bytes) and 3 dotted capital I (9 bytes,
+		// 6 units after toLowerCase) are below 8 in both implementations.
+		{Name: "edit hash euro below min", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o19.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": "€€€"},
+			Fixture: []diffFixture{{Path: "o19.txt", Content: "alpha\nbeta\n"}}},
+		{Name: "edit hash dotted I below min", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o20.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_hash": "İİİ"},
+			Fixture: []diffFixture{{Path: "o20.txt", Content: "alpha\nbeta\n"}}},
 		{Name: "edit checksum empty object", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o8.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": map[string]any{}},
 			Fixture: []diffFixture{{Path: "o8.txt", Content: "alpha\nbeta\n"}}},
 		{Name: "edit checksum empty array", Tool: "edit", Args: map[string]any{"file_path": "$DIR/o9.txt", "start_line": 1, "end_line": 1, "content": "ALPHA", "expected_range_checksum": []any{}},

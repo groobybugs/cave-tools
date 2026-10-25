@@ -816,3 +816,80 @@ func TestJSONShape(t *testing.T) {
 		t.Fatalf("json = %s", encoded)
 	}
 }
+
+// TestSuggestPathsSortedBytewise pins the readdir ordering TS gets from
+// Node/libuv: entries come back sorted by strcmp on POSIX, so the first three
+// matches are chosen bytewise rather than in filesystem order.
+func TestSuggestPathsSortedBytewise(t *testing.T) {
+	dir := t.TempDir()
+	// Created out of order; uppercase sorts before lowercase bytewise, so the
+	// expected prefix is Bmatch.txt, Zmatch.txt, amatch.txt.
+	for _, name := range []string{"cmatch.txt", "Zmatch.txt", "amatch.txt", "Bmatch.txt", "nomatch.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	got := suggestPaths(filepath.Join(dir, "MATCH"))
+	want := "\n\nDid you mean one of these?\n" +
+		filepath.Join(dir, "Bmatch.txt") + "\n" +
+		filepath.Join(dir, "Zmatch.txt") + "\n" +
+		filepath.Join(dir, "amatch.txt")
+	if got != want {
+		t.Fatalf("suggestPaths = %q, want %q", got, want)
+	}
+}
+
+// TestSuggestPathsCases pins the unchanged single-match, no-match and
+// fewer-than-three-match paths around the ordering fix.
+func TestSuggestPathsCases(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"one.txt", "two.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	if got, want := suggestPaths(filepath.Join(dir, "one")), "\n\nDid you mean one of these?\n"+filepath.Join(dir, "one.txt"); got != want {
+		t.Fatalf("single match = %q, want %q", got, want)
+	}
+	if got := suggestPaths(filepath.Join(dir, "zzz")); got != "" {
+		t.Fatalf("no match = %q, want empty", got)
+	}
+	if got := suggestPaths(filepath.Join(dir, "nomatchdir", "x")); got != "" {
+		t.Fatalf("missing dir = %q, want empty", got)
+	}
+}
+
+// TestSuggestPathsJSUnicodeCase pins String.prototype.toLowerCase parity for
+// non-ASCII names. Values measured with node 24.19.0:
+//
+//	"imatch".toLowerCase()   = "imatch"
+//	"\u0130match".toLowerCase() = "i\u0307match"   (U+0130 -> U+0069 U+0307)
+//	"\u0391\u03a3".toLowerCase() = "\u03b1\u03c2" (final sigma -> U+03C2)
+func TestSuggestPathsJSUnicodeCase(t *testing.T) {
+	dir := t.TempDir()
+	dottedI := "\u0130match.txt"
+	for _, name := range []string{dottedI, "imatch.txt", "\u0391\u03a3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	if got, want := suggestPaths(filepath.Join(dir, "imatch")),
+		"\n\nDid you mean one of these?\n"+filepath.Join(dir, "imatch.txt"); got != want {
+		t.Fatalf("ascii needle = %q, want %q", got, want)
+	}
+	if got, want := suggestPaths(filepath.Join(dir, dottedI)),
+		"\n\nDid you mean one of these?\n"+filepath.Join(dir, dottedI); got != want {
+		t.Fatalf("dotted-I needle = %q, want %q", got, want)
+	}
+	// Word-final sigma lowercases to U+03C2, so the ASCII "σ" needle misses.
+	if got := suggestPaths(filepath.Join(dir, "\u03b1\u03c3")); got != "" {
+		t.Fatalf("sigma needle = %q, want empty", got)
+	}
+	if got, want := suggestPaths(filepath.Join(dir, "\u03b1\u03c2")),
+		"\n\nDid you mean one of these?\n"+filepath.Join(dir, "\u0391\u03a3"); got != want {
+		t.Fatalf("final-sigma needle = %q, want %q", got, want)
+	}
+}

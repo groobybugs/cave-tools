@@ -451,3 +451,77 @@ func TestSignalNote(t *testing.T) {
 }
 
 func ptrString(value string) *string { return &value }
+
+// TestEmptyCommandMatchesNodeSpawnRejection pins the exactly-empty command
+// case: Node's normalizeSpawnArguments rejects an empty `file` before shell
+// handling, so the tool reports "Command failed to launch" instead of running
+// the shell. Whitespace-only commands still reach the shell.
+func TestEmptyCommandMatchesNodeSpawnRejection(t *testing.T) {
+	const wantMessage = "Command failed to launch\n" +
+		"Original command: \n" +
+		"Executed command: \n" +
+		"Message: The argument 'file' cannot be empty. Received ''"
+
+	t.Run("cli error", func(t *testing.T) {
+		result := run(t, map[string]any{"command": "", "description": "empty", "__cli": true})
+		if !result.IsError {
+			t.Fatalf("isError = false, want true")
+		}
+		if got := text(t, result); got != wantMessage {
+			t.Fatalf("text = %q, want %q", got, wantMessage)
+		}
+		// TS's catch block returns no _meta, so the CLI prints the text to
+		// stderr and exits 1 through the generic isError path.
+		if result.Meta != nil {
+			t.Fatalf("meta = %v, want nil", result.Meta)
+		}
+	})
+
+	t.Run("cli allowFailure", func(t *testing.T) {
+		result := run(t, map[string]any{"command": "", "description": "empty", "__cli": true, "allowFailure": true})
+		if result.IsError {
+			t.Fatalf("isError = true, want false with allowFailure")
+		}
+		if got := text(t, result); got != wantMessage {
+			t.Fatalf("text = %q, want %q", got, wantMessage)
+		}
+	})
+
+	t.Run("mcp result folds message into text", func(t *testing.T) {
+		result := run(t, map[string]any{"command": "", "description": "empty"})
+		if !result.IsError {
+			t.Fatalf("isError = false, want true")
+		}
+		if got := text(t, result); got != wantMessage {
+			t.Fatalf("text = %q, want %q", got, wantMessage)
+		}
+	})
+
+	t.Run("whitespace-only still runs the shell", func(t *testing.T) {
+		result := run(t, map[string]any{"command": " ", "description": "space", "__cli": true})
+		if result.IsError {
+			t.Fatalf("isError = true: %s", text(t, result))
+		}
+		if got := text(t, result); got != "" {
+			t.Fatalf("text = %q, want empty", got)
+		}
+		meta, ok := result.Meta["caveCli"].(map[string]any)
+		if !ok {
+			t.Fatalf("meta = %v", result.Meta)
+		}
+		if meta["exitCode"] != 0 {
+			t.Fatalf("exitCode = %v, want 0", meta["exitCode"])
+		}
+	})
+
+	t.Run("workdir error wins over the empty command", func(t *testing.T) {
+		result := run(t, map[string]any{"command": "", "description": "empty", "__cli": true, "workdir": filepath.Join(t.TempDir(), "missing")})
+		if !result.IsError {
+			t.Fatalf("isError = false, want true")
+		}
+		got := text(t, result)
+		if !strings.Contains(got, "ENOENT") || strings.Contains(got, "cannot be empty") {
+			t.Fatalf("text = %q, want the cwd ENOENT launch failure", got)
+		}
+	})
+}
