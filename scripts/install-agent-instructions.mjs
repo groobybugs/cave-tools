@@ -1706,6 +1706,28 @@ function dedupeCaveToolsHooks(settings) {
   return removed;
 }
 
+// Drop `status --emit-statusline` handlers from PostToolUse only. Older
+// installers registered one to refresh the badge after every cave MCP call;
+// the MCP server now does that in-process, so that hook was one process per
+// call. Returns the number of handlers removed.
+function removePostToolUseStatuslineHook(settings) {
+  const groups = settings.hooks?.PostToolUse;
+  if (!Array.isArray(groups)) return 0;
+  let removed = 0;
+  for (const group of groups) {
+    if (!Array.isArray(group.hooks)) continue;
+    group.hooks = group.hooks.filter((handler) => {
+      if (hookHandlerIdentity(handler) !== 'cave-tools:status-emit-statusline') return true;
+      removed++;
+      return false;
+    });
+  }
+  settings.hooks.PostToolUse = groups.filter(
+    (group) => !Array.isArray(group.hooks) || group.hooks.length > 0,
+  );
+  return removed;
+}
+
 // The shipped SKILL.md registers its fallback PreToolUse hook via
 // ${CLAUDE_PLUGIN_ROOT}, which only resolves for plugin installs. Point it at
 // the hook directory this install populated instead.
@@ -1851,13 +1873,6 @@ function installCaveToolsClaudeHooks() {
     timeout: 3,
   });
 
-  upsertHookHandler(settings, 'PostToolUse', 'mcp__cave-tools__.*', {
-    type: 'command',
-    command: `"${caveToolsBin()}" status --emit-statusline`,
-    timeout: 3,
-    async: true,
-  });
-
   // Keep a failed or classifier-denied cave-tools call from pushing the model
   // back onto the built-ins: PostToolUseFailure injects the cave-tools retry,
   // PermissionDenied returns retry:true.
@@ -1867,6 +1882,15 @@ function installCaveToolsClaudeHooks() {
       command: `"${nodeBin}" "${recoverPath}"`,
       timeout: 5,
     });
+  }
+
+  // The MCP server refreshes the statusline badge in-process after each
+  // tools/call (debounced, no child process). Remove the legacy PostToolUse
+  // matcher that spawned `status --emit-statusline` per call; keep the
+  // SessionStart warm-up registered above.
+  const removedStatusHook = removePostToolUseStatuslineHook(settings);
+  if (removedStatusHook > 0) {
+    log(`removed: legacy PostToolUse statusline hook (${removedStatusHook} handler(s)) — refreshed in-process now`);
   }
 
   const deduped = dedupeCaveToolsHooks(settings);

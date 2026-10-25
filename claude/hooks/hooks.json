@@ -1,5 +1,5 @@
 {
-  "description": "cave-tools auto-init: SessionStart skill injection, SubagentStart injection, per-turn reinforcement, PreToolUse redirect, MCP failure/denial recovery, statusline refresh.",
+  "description": "cave-tools auto-init: SessionStart skill injection, SubagentStart injection, per-turn reinforcement, PreToolUse redirect, MCP failure/denial recovery.",
   "hooks": {
     "SessionStart": [
       {
@@ -71,17 +71,6 @@
             "type": "command",
             "command": "if command -v cave-node >/dev/null 2>&1; then exec cave-node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-bash-filter.js\"; else exec node \"${CLAUDE_PLUGIN_ROOT}/hooks/cave-tools-bash-filter.js\"; fi",
             "timeout": 8
-          }
-        ]
-      },
-      {
-        "matcher": "mcp__cave-tools__.*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "command -v cave-tools >/dev/null 2>&1 && cave-tools status --emit-statusline || true",
-            "timeout": 3,
-            "async": true
           }
         ]
       }
