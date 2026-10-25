@@ -1,30 +1,15 @@
 #!/usr/bin/env node
 
-import {
-  getAllBudgets,
-  pruneDeadSessions,
-  getLifetimeStats,
-  listSessionStats,
-  reductionPercent,
-  isRtkAvailable,
-} from "./compression/utils.js";
-import {
-  existsSync,
-  mkdirSync,
-  writeFileSync,
-  lstatSync,
-  realpathSync,
-  statSync,
-} from "fs";
-import { homedir } from "os";
-import { join, basename } from "path";
+import { existsSync, writeFileSync } from "fs";
+import { join } from "path";
 import { isToolName } from "./dispatch.js";
 import { redactSecrets } from "./compression/redact.js";
+import { fetchRtkGainSummary, renderStatusCli } from "./status-ui.js";
 import {
-  fetchRtkGainSummary,
-  renderStatusCli,
-  type ToolBreakdown,
-} from "./status-ui.js";
+  buildStatuslineSuffix,
+  buildStatusSummary,
+  writeStatuslineSuffix,
+} from "./statusline.js";
 import { maybeRunGoImplementation } from "./impl-switch.js";
 
 // Static imports above always evaluate before this hook, so the switch cannot
@@ -34,236 +19,6 @@ import { maybeRunGoImplementation } from "./impl-switch.js";
 // lazy server/tool/daemon imports and command dispatch do not. Without the
 // switch it returns immediately and the TypeScript CLI below is unchanged.
 await maybeRunGoImplementation();
-
-interface SessionStats {
-  pid: number;
-  sessionStart: number;
-  updatedAt: number;
-  cache: {
-    hits: number;
-    misses: number;
-    total: number;
-    hitRate: number;
-    filesTracked: number;
-  };
-  savings: {
-    totalCalls: number;
-    rawChars: number;
-    compressedChars: number;
-    compressionSavedChars: number;
-    dedupSavedChars: number;
-    savedChars: number;
-    estimatedTokensSaved: number;
-    byTool: Record<
-      string,
-      {
-        calls: number;
-        rawChars: number;
-        compressedChars: number;
-        savedChars: number;
-      }
-    >;
-  };
-  rtk?: {
-    rewrites: number;
-    alreadyWrapped: number;
-    passthrough: number;
-  };
-  budgets?: ReturnType<typeof getAllBudgets>;
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-interface StatusSummary {
-  rtkAvailable: boolean;
-  reductionPct: number;
-  hitRatePct: number;
-  cacheHits: number;
-  cacheMisses: number;
-  filesTracked: number;
-  rtkRewrites: number;
-  rtkAlreadyWrapped: number;
-  rtkPassthrough: number;
-  totalCalls: number;
-  rawChars: number;
-  compressedChars: number;
-  compressionSavedChars: number;
-  dedupSavedChars: number;
-  savedChars: number;
-  tokensSaved: number;
-  liveSessions: number;
-  endedSessions: number;
-  visibleSessions: number;
-  lastUpdate: number;
-  hasData: boolean;
-  budgets: ReturnType<typeof getAllBudgets>;
-  byTool: ToolBreakdown[];
-}
-
-async function buildStatusSummary(): Promise<StatusSummary> {
-  await pruneDeadSessions();
-  const rtkAvailable = await isRtkAvailable();
-  const lifetime = await getLifetimeStats();
-  const sessions = readSessionStats();
-  const liveSessions = sessions.filter((s) => isProcessAlive(s.pid));
-  const visibleSessions = liveSessions.length > 0 ? liveSessions : sessions;
-  const latestSession = visibleSessions
-    .slice()
-    .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-  const budgets = latestSession?.budgets || getAllBudgets();
-
-  const totals = visibleSessions.reduce(
-    (acc, s) => {
-      const compressionSavedChars =
-        s.savings.compressionSavedChars ?? s.savings.savedChars ?? 0;
-      const dedupSavedChars = s.savings.dedupSavedChars ?? 0;
-      acc.filesTracked += s.cache.filesTracked ?? 0;
-      acc.hits += s.cache.hits ?? 0;
-      acc.misses += s.cache.misses ?? 0;
-      acc.rawChars += s.savings.rawChars ?? 0;
-      acc.compressedChars += s.savings.compressedChars ?? 0;
-      acc.compressionSavedChars += compressionSavedChars;
-      acc.dedupSavedChars += dedupSavedChars;
-      acc.savedChars += compressionSavedChars + dedupSavedChars;
-      acc.calls += s.savings.totalCalls ?? 0;
-      acc.rtkRewrites += s.rtk?.rewrites ?? 0;
-      acc.rtkAlreadyWrapped += s.rtk?.alreadyWrapped ?? 0;
-      acc.rtkPassthrough += s.rtk?.passthrough ?? 0;
-      return acc;
-    },
-    {
-      filesTracked: 0,
-      hits: lifetime.hits,
-      misses: lifetime.misses,
-      rawChars: lifetime.rawChars,
-      compressedChars: lifetime.compressedChars,
-      compressionSavedChars: lifetime.compressionSavedChars,
-      dedupSavedChars: lifetime.dedupSavedChars,
-      savedChars: lifetime.savedChars,
-      calls: lifetime.calls,
-      rtkRewrites: lifetime.rtkRewrites,
-      rtkAlreadyWrapped: lifetime.rtkAlreadyWrapped,
-      rtkPassthrough: lifetime.rtkPassthrough,
-    },
-  );
-
-  const cacheTotal = totals.hits + totals.misses;
-  const hitRate = cacheTotal > 0 ? totals.hits / cacheTotal : 0;
-  const compressionPct = reductionPercent(
-    totals.rawChars,
-    totals.compressionSavedChars,
-  );
-
-  const updateTimes = visibleSessions.map((s) => s.updatedAt);
-  if (lifetime.updatedAt > 0) updateTimes.push(lifetime.updatedAt);
-  const lastUpdate = updateTimes.length > 0 ? Math.max(...updateTimes) : 0;
-
-  // Aggregate by-tool from all sessions (live + ended) for the breakdown table.
-  const byToolMap = new Map<string, ToolBreakdown>();
-  for (const s of listSessionStats(true)) {
-    const tools = s.savings?.byTool ?? {};
-    for (const [name, t] of Object.entries(tools)) {
-      const cur = byToolMap.get(name) ?? {
-        name,
-        calls: 0,
-        rawChars: 0,
-        savedChars: 0,
-      };
-      cur.calls += t.calls ?? 0;
-      cur.rawChars += t.rawChars ?? 0;
-      cur.savedChars += t.savedChars ?? 0;
-      byToolMap.set(name, cur);
-    }
-  }
-
-  return {
-    rtkAvailable,
-    reductionPct: compressionPct,
-    hitRatePct: hitRate * 100,
-    cacheHits: totals.hits,
-    cacheMisses: totals.misses,
-    filesTracked: totals.filesTracked,
-    rtkRewrites: totals.rtkRewrites,
-    rtkAlreadyWrapped: totals.rtkAlreadyWrapped,
-    rtkPassthrough: totals.rtkPassthrough,
-    totalCalls: totals.calls,
-    rawChars: totals.rawChars,
-    compressedChars: totals.compressedChars,
-    compressionSavedChars: totals.compressionSavedChars,
-    dedupSavedChars: totals.dedupSavedChars,
-    savedChars: totals.savedChars,
-    tokensSaved: Math.round(totals.savedChars / 4),
-    liveSessions: liveSessions.length,
-    endedSessions: lifetime.bankedSessions,
-    visibleSessions: visibleSessions.length,
-    lastUpdate,
-    hasData: visibleSessions.length > 0 || lifetime.bankedSessions > 0,
-    budgets,
-    byTool: [...byToolMap.values()],
-  };
-}
-
-// Compact one-liner for the statusline suffix.
-// Format: "↓38% • 1.1M tok" (or "↓38% • 18cache" when no tokens yet).
-// Pure ASCII fallback for terminals without UTF-8 — controlled by env var.
-function formatStatuslineSuffix(s: StatusSummary): string {
-  if (!s.hasData) return "";
-  const pct = s.reductionPct.toFixed(0);
-  const tokens = s.tokensSaved;
-  let amount: string;
-  if (tokens >= 1_000_000) amount = `${(tokens / 1_000_000).toFixed(1)}M tok`;
-  else if (tokens >= 1000) amount = `${(tokens / 1000).toFixed(0)}k tok`;
-  else if (tokens > 0) amount = `${tokens} tok`;
-  else amount = `${s.cacheHits}cache`;
-  const arrow = process.env.CAVE_TOOLS_ASCII === "1" ? "v" : "↓";
-  const bullet = process.env.CAVE_TOOLS_ASCII === "1" ? "|" : "•";
-  return `${arrow}${pct}% ${bullet} ${amount}`;
-}
-
-// Symlink-safe write of the statusline suffix file. Refuses to write through
-// a symlink (would let a local attacker clobber an unrelated file). Verifies
-// directory ownership when the parent itself is a legitimately symlinked
-// ~/.claude (common in shared-config setups).
-function writeStatuslineSuffix(suffix: string): void {
-  const claudeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
-  const suffixPath = join(claudeDir, ".cave-tools-statusline-suffix");
-  try {
-    mkdirSync(claudeDir, { recursive: true });
-    let realDir = claudeDir;
-    try {
-      const ls = lstatSync(claudeDir);
-      if (ls.isSymbolicLink()) {
-        realDir = realpathSync(claudeDir);
-        const rs = statSync(realDir);
-        if (!rs.isDirectory()) return;
-        if (typeof process.getuid === "function" && rs.uid !== process.getuid()) return;
-      }
-    } catch {
-      return;
-    }
-    const realPath = join(realDir, basename(suffixPath));
-    try {
-      if (lstatSync(realPath).isSymbolicLink()) return;
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") return;
-    }
-    writeFileSync(realPath, suffix, { mode: 0o600 });
-  } catch {
-    // Silent fail — suffix is best-effort. Statusline script handles absence.
-  }
-}
-
-function readSessionStats(): SessionStats[] {
-  return listSessionStats(false);
-}
 
 const CAVE_INSTRUCTIONS = `# Cave Tools — token-optimized MCP
 
@@ -309,15 +64,16 @@ if (args[0] === "mcp" || args.length === 0) {
   });
 } else if (args[0] === "status") {
   (async () => {
-  const summary = await buildStatusSummary();
-
   // --emit-statusline: write compact one-liner to ~/.claude/.cave-tools-statusline-suffix
   // for the statusline script to read. No stdout output. Used by SessionStart and
-  // PostToolUse hooks to keep the badge fresh without re-rendering on every keystroke.
+  // the MCP server's in-process refresh to keep the badge fresh without
+  // re-rendering on every keystroke.
   if (args.includes("--emit-statusline")) {
-    writeStatuslineSuffix(formatStatuslineSuffix(summary));
+    // Only the aggregates the badge needs: no rtk probe, no by-tool table.
+    writeStatuslineSuffix(buildStatuslineSuffix());
     process.exit(0);
   }
+  const summary = await buildStatusSummary();
 
   const rtkSkipped = process.env.CAVE_TOOLS_STATUS_RTK === "0";
   const rtkGain = rtkSkipped ? null : await fetchRtkGainSummary();
