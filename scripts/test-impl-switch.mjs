@@ -7,6 +7,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import {
   chmodSync,
   existsSync,
@@ -21,6 +22,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { brotliCompressSync } from "node:zlib";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = join(ROOT, "dist", "cli.js");
@@ -165,10 +167,23 @@ async function testResolutionModule() {
     ["mcp", "webfetch", "websearch"],
     "canonical TS-routed command list",
   );
+  assert.deepEqual(
+    [...mod.TS_ROUTED_TOOLS],
+    ["webfetch", "websearch"],
+    "canonical TS-routed tool list",
+  );
   assert.equal(mod.routesToTypeScript([]), true, "bare invocation is the stdio MCP server");
   for (const command of mod.TS_ROUTED_COMMANDS) {
     assert.equal(mod.routesToTypeScript([command]), true, `routes ${command} to TS`);
     assert.equal(mod.routesToTypeScript([command, "--flag"]), true, `first token decides for ${command}`);
+  }
+  // The explicit `tool <name>` dispatcher loads the same handler in src/cli.ts.
+  for (const tool of mod.TS_ROUTED_TOOLS) {
+    assert.equal(mod.routesToTypeScript(["tool", tool]), true, `routes tool ${tool} to TS`);
+    assert.equal(mod.routesToTypeScript(["tool", tool, "--flag"]), true, `tool ${tool} trailing flags stay in TS`);
+  }
+  for (const argv of [["tool"], ["tool", "filter"], ["tool", "read"], ["tool", "webfetch "], ["tool", "Webfetch"]]) {
+    assert.equal(mod.routesToTypeScript(argv), false, `keeps ${JSON.stringify(argv)} on the Go path`);
   }
   for (const command of [
     "__job-worker",
@@ -178,7 +193,6 @@ async function testResolutionModule() {
     "bash",
     "jobs",
     "daemon",
-    "tool",
     "help",
     "--version",
     "not-a-command",
@@ -295,11 +309,13 @@ function testDirectSwitch() {
     ["webfetch", /cave-tools webfetch: missing required: url/],
     ["websearch", /cave-tools websearch: missing required: query/],
   ]) {
-    rmSync(marker, { force: true });
-    const routed = runCli([command], { env: routedEnv, input: "" });
-    assert.equal(routed.status, 2, `${command} stays in TS and reports a usage error`);
-    assert.match(routed.stderr, missing, `${command} usage comes from TS`);
-    assert.equal(existsSync(marker), false, `${command} must not start Go`);
+    for (const argv of [[command], ["tool", command]]) {
+      rmSync(marker, { force: true });
+      const routed = runCli(argv, { env: routedEnv, input: "" });
+      assert.equal(routed.status, 2, `${JSON.stringify(argv)} stays in TS and reports a usage error`);
+      assert.match(routed.stderr, missing, `${JSON.stringify(argv)} usage comes from TS`);
+      assert.equal(existsSync(marker), false, `${JSON.stringify(argv)} must not start Go`);
+    }
   }
 
   // Everything else keeps going to Go: the durable job worker, the CLI
@@ -312,7 +328,7 @@ function testDirectSwitch() {
     ["raw", "cat"],
     ["jobs"],
     ["daemon", "status"],
-    ["tool", "webfetch"],
+    ["tool", "filter", "--json"],
   ]) {
     rmSync(marker, { force: true });
     const forwarded = runCli(argv, {
@@ -479,6 +495,112 @@ async function testRealGoSmoke() {
   assert.match(stderr, /Cave Tools MCP server running on stdio/);
 }
 
+function runAsync(file, args, options = {}) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(file, args, {
+      cwd: options.cwd ?? ROOT,
+      env: options.env ?? cliEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`timed out (${options.timeout ?? 30000}ms): ${file} ${args.join(" ")}`));
+    }, options.timeout ?? 30000);
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      resolvePromise({ status: code, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
+    });
+  });
+}
+
+const BROTLI_BODY = "hello brotli world";
+
+// Loopback origin that always answers with a Brotli-encoded text body, which is
+// exactly the encoding the Go webfetch port passes through untouched. undici
+// decodes it whether or not the request advertised `br`, so the body is sent
+// unconditionally and the difference is purely in the client.
+async function startBrotliServer() {
+  const compressed = brotliCompressSync(Buffer.from(BROTLI_BODY));
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push(String(request.headers["accept-encoding"] ?? ""));
+    response.writeHead(200, {
+      "content-type": "text/plain; charset=utf-8",
+      "content-encoding": "br",
+      "content-length": compressed.length,
+    });
+    response.end(compressed);
+  });
+  await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const { port } = server.address();
+  return { server, url: `http://127.0.0.1:${port}/brotli`, requests };
+}
+
+// Live parity for the two dispatch forms that reach the Node-fetch webfetch
+// handler: `webfetch <url>` and `tool webfetch <url>`. Both must decode Brotli
+// identically to plain TypeScript, on the direct and generated-shim entries.
+async function testLiveWebfetchRouting() {
+  const { server, url, requests } = await startBrotliServer();
+  try {
+    const dataDir = join(ROOT_FIXTURE, "live webfetch data");
+    const args = ["--format", "text"];
+    const expected = Buffer.from(`${BROTLI_BODY}\n`);
+    const baseline = await runAsync(process.execPath, [CLI, "webfetch", url, ...args], {
+      env: cliEnv({ CAVE_TOOLS_DATA_DIR: dataDir, CAVE_TOOLS_DAEMON: "0" }),
+    });
+    assert.equal(baseline.status, 0, baseline.stderr.toString());
+    assert.equal(Buffer.compare(baseline.stdout, expected), 0, "plain TS decodes the Brotli body");
+    assert.ok(requests.length > 0, "baseline reached the loopback server");
+
+    const fake = fakeGo(join(ROOT_FIXTURE, "live webfetch"));
+    const marker = join(ROOT_FIXTURE, "live webfetch", "marker");
+    const optInEnv = {
+      CAVE_TOOLS_IMPL: "go",
+      CAVE_TOOLS_GO_BIN: fake,
+      CAVE_TOOLS_SWITCH_MARKER: marker,
+      CAVE_TOOLS_DATA_DIR: dataDir,
+      CAVE_TOOLS_DAEMON: "0",
+    };
+    for (const argv of [
+      ["webfetch", url, ...args],
+      ["tool", "webfetch", url, ...args],
+    ]) {
+      rmSync(marker, { force: true });
+      const routed = await runAsync(process.execPath, [CLI, ...argv], { env: cliEnv(optInEnv) });
+      assert.equal(routed.status, 0, `${JSON.stringify(argv)}: ${routed.stderr.toString()}`);
+      assert.equal(Buffer.compare(routed.stdout, expected), 0, `${JSON.stringify(argv)}: TS bytes, not raw Brotli`);
+      assert.equal(Buffer.compare(routed.stdout, baseline.stdout), 0, `${JSON.stringify(argv)}: byte-identical to plain TS`);
+      assert.equal(routed.stderr.toString(), baseline.stderr.toString(), `${JSON.stringify(argv)}: stderr matches TS`);
+      assert.equal(existsSync(marker), false, `${JSON.stringify(argv)} must not start Go`);
+    }
+
+    if (POSIX) {
+      const context = installFakeHome();
+      for (const argv of [
+        ["webfetch", url, ...args],
+        ["tool", "webfetch", url, ...args],
+      ]) {
+        rmSync(marker, { force: true });
+        const routed = await runAsync(context.shim, argv, { env: shimEnv(context, optInEnv) });
+        assert.equal(routed.status, 0, `shim ${JSON.stringify(argv)}: ${routed.stderr.toString()}`);
+        assert.equal(Buffer.compare(routed.stdout, expected), 0, `shim ${JSON.stringify(argv)}: TS bytes`);
+        assert.equal(Buffer.compare(routed.stdout, baseline.stdout), 0, `shim ${JSON.stringify(argv)}: byte-identical to plain TS`);
+        assert.equal(existsSync(marker), false, `shim ${JSON.stringify(argv)} must not start Go`);
+      }
+    }
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+}
+
 function installFakeHome(name = "home with spaces ü") {
   installFakeHome.contexts ??= new Map();
   if (installFakeHome.contexts.has(name)) return installFakeHome.contexts.get(name);
@@ -557,6 +679,10 @@ function testLauncherShim() {
   const routedCase = shim.indexOf("mcp|webfetch|websearch) cave_tools_use_go=0");
   assert.ok(routedCase > 0, "shim routes mcp/webfetch/websearch to TS");
   assert.ok(routedCase < goExec, "TS routing precedes the Go exec");
+  const toolCase = shim.indexOf("tool)\n      case \"${2:-}\" in");
+  assert.ok(toolCase > 0, "shim inspects the second token after `tool`");
+  assert.match(shim, /webfetch\|websearch\) cave_tools_use_go=0/, "shim routes tool webfetch/websearch to TS");
+  assert.ok(toolCase < goExec, "tool-form TS routing precedes the Go exec");
 
   const settings = JSON.parse(readFileSync(join(context.home, ".claude", "settings.json"), "utf8"));
   const sessionCommands = (settings.hooks?.SessionStart ?? [])
@@ -623,14 +749,16 @@ function testLauncherShim() {
     ["webfetch", /cave-tools webfetch: missing required: url/],
     ["websearch", /cave-tools websearch: missing required: query/],
   ]) {
-    rmSync(marker, { force: true });
-    const routed = runShim(context, [command], {
-      env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: fake, CAVE_TOOLS_SWITCH_MARKER: marker },
-      input: "",
-    });
-    assert.equal(routed.status, 2, `${command} stays in TS`);
-    assert.match(routed.stderr, missing, `shim ${command} usage comes from TS`);
-    assert.equal(existsSync(marker), false, `${command} must not start Go`);
+    for (const argv of [[command], ["tool", command]]) {
+      rmSync(marker, { force: true });
+      const routed = runShim(context, argv, {
+        env: { CAVE_TOOLS_IMPL: "go", CAVE_TOOLS_GO_BIN: fake, CAVE_TOOLS_SWITCH_MARKER: marker },
+        input: "",
+      });
+      assert.equal(routed.status, 2, `${JSON.stringify(argv)} stays in TS`);
+      assert.match(routed.stderr, missing, `shim ${JSON.stringify(argv)} usage comes from TS`);
+      assert.equal(existsSync(marker), false, `${JSON.stringify(argv)} must not start Go`);
+    }
   }
 
   // Representative non-routed forms still exec Go from the shim.
@@ -742,6 +870,7 @@ async function main() {
     testDirectSwitch();
     await testDirectSignalRelay();
     await testRealGoSmoke();
+    await testLiveWebfetchRouting();
     testLauncherShim();
     await testShimSignal();
     console.log("impl switch tests passed");
