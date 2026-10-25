@@ -61,10 +61,12 @@ func loadFixture(t *testing.T, name string, target any) {
 }
 
 var (
-	envFixtureOnce    sync.Once
-	envFixtureValue   localeEnvFixture
-	corpusFixtureOnce sync.Once
-	corpusFixtureVal  collateCorpusFixture
+	envFixtureOnce      sync.Once
+	envFixtureValue     localeEnvFixture
+	corpusFixtureOnce   sync.Once
+	corpusFixtureVal    collateCorpusFixture
+	realisticCorpusOnce sync.Once
+	realisticCorpusVal  collateCorpusFixture
 )
 
 func envFixture(t *testing.T) *localeEnvFixture {
@@ -77,6 +79,14 @@ func corpusFixture(t *testing.T) *collateCorpusFixture {
 	t.Helper()
 	corpusFixtureOnce.Do(func() { loadFixture(t, "collate_corpus.json", &corpusFixtureVal) })
 	return &corpusFixtureVal
+}
+
+// realisticCorpusFixture loads the ordinary-filename corpus. It shares the
+// collate corpus shape but has no pairwise signs.
+func realisticCorpusFixture(t *testing.T) *collateCorpusFixture {
+	t.Helper()
+	realisticCorpusOnce.Do(func() { loadFixture(t, "realistic_corpus.json", &realisticCorpusVal) })
+	return &realisticCorpusVal
 }
 
 func fixtureLookup(env map[string]string) func(string) (string, bool) {
@@ -247,9 +257,12 @@ func sign(value int) int {
 //   - Han and kana, whose collation data was regenerated between the two CLDR
 //     releases.
 //
-// Those names are excluded from the exact-sequence assertion and covered by the
-// concordance floors instead; every other name must match Node exactly. The
-// concrete residual pairs are logged per locale and listed in docs/go-port.md.
+// Those names are excluded from the relative-order assertion and covered by the
+// concordance floors instead; every other name must appear in Node's exact
+// relative order. Absolute positions are not asserted here (the excluded names
+// still shift indices); TestLocaleCollationRealisticCorpus pins those on a
+// corpus without skew neighbours. The concrete residual pairs are logged per
+// locale and listed in docs/go-port.md.
 func TestLocaleCollationCorpus(t *testing.T) {
 	fixture := corpusFixture(t)
 	t.Logf("fixture from node %s, ICU %s, CLDR %s, Unicode %s; %d names",
@@ -276,30 +289,44 @@ func TestLocaleCollationCorpus(t *testing.T) {
 				expected[position] = fixture.Names[index]
 			}
 
-			// Exact sequence equality outside the CLDR-version-skew classes.
-			gotStable := make([]string, 0, len(names))
-			wantStable := make([]string, 0, len(expected))
+			// Relative order of the names outside the CLDR-version-skew
+			// classes: the skew names are filtered out of both sequences, so
+			// this measures order only, not absolute position. Absolute
+			// indices still move where the skew names interleave; the logged
+			// absolute count shows that, and
+			// TestLocaleCollationRealisticCorpus pins absolute positions on a
+			// corpus without skew neighbours.
+			gotRelative := make([]string, 0, len(names))
+			wantRelative := make([]string, 0, len(expected))
 			for _, name := range names {
 				if !hasVersionSkewRune(name) {
-					gotStable = append(gotStable, name)
+					gotRelative = append(gotRelative, name)
 				}
 			}
 			for _, name := range expected {
 				if !hasVersionSkewRune(name) {
-					wantStable = append(wantStable, name)
+					wantRelative = append(wantRelative, name)
 				}
 			}
-			stableEqual := equalStrings(gotStable, wantStable)
-			if !stableEqual {
-				first := -1
-				for index := range wantStable {
-					if index >= len(gotStable) || gotStable[index] != wantStable[index] {
-						first = index
-						break
+			if !equalStrings(gotRelative, wantRelative) {
+				mismatches, first := 0, -1
+				for index := range wantRelative {
+					if index >= len(gotRelative) || gotRelative[index] != wantRelative[index] {
+						mismatches++
+						if first < 0 {
+							first = index
+						}
 					}
 				}
-				t.Fatalf("%d of %d names outside the documented skew classes are out of order (first at %d: got %q, want %q)",
-					len(gotStable)-len(wantStable), len(wantStable), first, sliceAt(gotStable, first), sliceAt(wantStable, first))
+				t.Fatalf("relative order of non-skew names differs at index %d of %d: got %q, want %q (%d indices differ)",
+					first, len(wantRelative), sliceAt(gotRelative, first), sliceAt(wantRelative, first), mismatches)
+			}
+
+			absoluteMatch := 0
+			for position := range expected {
+				if names[position] == expected[position] {
+					absoluteMatch++
+				}
 			}
 
 			// Concordance: how many adjacent pairs of Node's order does Go keep?
@@ -331,8 +358,8 @@ func TestLocaleCollationCorpus(t *testing.T) {
 			}
 			signRate := 1 - float64(signMismatches)/float64(len(fixture.Pairs[locale.EnvValue]))
 
-			t.Logf("%s (%s): %d/%d names outside skew match exactly; adjacent concordance %.5f (%d/%d reversed); pair signs %.5f (%d/%d)",
-				locale.EnvValue, tag, len(wantStable), len(names), concordance, reversed, len(expected)-1,
+			t.Logf("%s (%s): relative order of %d non-skew names exact; absolute position %d/%d; adjacent concordance %.5f (%d/%d reversed); pair signs %.5f (%d/%d)",
+				locale.EnvValue, tag, len(wantRelative), absoluteMatch, len(names), concordance, reversed, len(expected)-1,
 				signRate, signMismatches, len(fixture.Pairs[locale.EnvValue]))
 			for _, example := range examples {
 				t.Logf("  reversed: %s", example)
@@ -348,6 +375,41 @@ func TestLocaleCollationCorpus(t *testing.T) {
 			}
 			if signRate < 0.99 {
 				t.Fatalf("pair sign match rate %.5f below the 0.99 floor", signRate)
+			}
+		})
+	}
+}
+
+// TestLocaleCollationRealisticCorpus pins absolute positions, not just relative
+// order, on the ordinary-filename corpus (testdata/realistic_corpus.json, 227
+// names generated from Node): accented Latin, German umlauts and sharp s,
+// Spanish ñ, Turkish dotted/dotless i, Swedish å/ä/ö, Greek, Cyrillic, a few
+// CJK/emoji names, NFC/NFD twins, numeric-looking names, dotfiles, mixed case
+// and separators. It contains no CLDR-skew neighbour that changes an index, so
+// every name must land exactly where Node puts it.
+func TestLocaleCollationRealisticCorpus(t *testing.T) {
+	fixture := realisticCorpusFixture(t)
+	if len(fixture.Names) < 200 || len(fixture.Names) > 500 {
+		t.Fatalf("realistic corpus has %d names, want 200..500", len(fixture.Names))
+	}
+	for _, locale := range fixture.Locales {
+		locale := locale
+		t.Run(locale.EnvValue, func(t *testing.T) {
+			tag := resolveLocale(fixtureLookup(map[string]string{"LANG": locale.EnvValue}))
+			if locale.Locale != "default" && tag != locale.Locale {
+				t.Fatalf("resolved %q, want %q", tag, locale.Locale)
+			}
+			got := append([]string{}, fixture.Names...)
+			sortStringsLocaleIn(tag, got)
+			order := fixture.Orders[locale.EnvValue]
+			if len(order) != len(got) {
+				t.Fatalf("fixture order has %d entries, corpus has %d", len(order), len(got))
+			}
+			for position, index := range order {
+				if got[position] != fixture.Names[index] {
+					t.Fatalf("absolute position %d differs: got %q, want %q",
+						position, got[position], fixture.Names[index])
+				}
 			}
 		})
 	}

@@ -361,7 +361,126 @@ const corpusFixture = {
 
 writeFileSync(join(here, "collate_corpus.json"), JSON.stringify(corpusFixture) + "\n");
 
+// --- realistic filename corpus ----------------------------------------------
+// The adversarial corpus above manufactures CLDR-skew neighbours on purpose.
+// This one is what a user's project directory actually contains: accented
+// Latin, German umlauts and sharp s, Spanish ñ, Turkish dotted/dotless i,
+// Swedish å/ä/ö, Greek, Cyrillic, a handful of CJK/emoji names, NFC/NFD twins,
+// numeric-looking names, dotfiles and mixed case. It must sort in exactly the
+// same absolute positions as Node for every measured locale.
+const realisticCategories = {
+  "accented Latin": [
+    "café.txt", "café.md", "naïve.txt", "résumé.pdf", "déjà-vu.txt", "façade.html",
+    "cliché.txt", "crème-brûlée.txt", "jalapeño.txt", "piñata.txt", "über.txt",
+    "übermäßig.txt", "müller.txt", "Müller.txt", "schön.txt", "schönheit.txt",
+    "für.txt", "fünf.txt", "zürich.txt", "Zürich.txt", "élan.txt", "ÉLAN.txt",
+    "garçon.txt", "leçon.txt", "père.txt", "mère.txt", "frère.txt", "sœur.txt",
+    "noël.txt", "Noël.txt",
+  ],
+  "sharp s and umlauts": [
+    "straße.txt", "STRASSE.txt", "strasse.txt", "weiß.txt", "weiss.txt",
+    "groß.txt", "gross.txt", "fußball.txt", "FUSSBALL.txt", "größe.txt",
+    "GRÖSSE.txt",
+  ],
+  "Spanish ñ": [
+    "mañana.txt", "niño.txt", "niña.txt", "año.txt", "años.txt", "señor.txt",
+    "señora.txt", "español.txt", "Español.txt", "muñeco.txt",
+  ],
+  "Swedish/Finnish åäö": [
+    "ångström.txt", "Ångström.txt", "äpple.txt", "ärende.txt", "öppna.txt",
+    "öl.txt", "kärlek.txt", "vänner.txt", "åsa.txt", "Åsa.txt", "smörgås.txt",
+    "blåbär.txt",
+  ],
+  Turkish: [
+    "istanbul.txt", "İstanbul.txt", "ıstanbul.txt", "İZMİR.txt", "izmir.txt",
+    "ığdır.txt", "Iğdır.txt", "şehir.txt", "Şehir.txt", "çiçek.txt", "güneş.txt",
+    "GÜNEŞ.txt",
+  ],
+  Greek: [
+    "αθήνα.txt", "ΑΘΗΝΑ.txt", "αλφα.txt", "βητα.txt", "γάμμα.txt", "δέλτα.txt",
+    "έψιλον.txt", "ζήτα.txt", "ήτα.txt", "θήτα.txt", "ελλάδα.txt", "ελληνικά.txt",
+    "σίγμα.txt", "ωμέγα.txt", "π.txt", "φ.txt", "λ.txt", "μ.txt", "ν.txt", "ξ.txt",
+  ],
+  Cyrillic: [
+    "москва.txt", "Москва.txt", "привет.txt", "Привет.txt", "ёлка.txt", "Ёлка.txt",
+    "язык.txt", "Язык.txt", "україна.txt", "Київ.txt", "русский.txt", "РУССКИЙ.txt",
+    "документ.txt", "Документ.txt", "отчёт.txt", "Отчёт.txt", "файл.txt", "Файл.txt",
+    "тест.txt", "Тест.txt",
+  ],
+  "CJK and emoji": [
+    "中文.txt", "日本語.md", "한국어.txt", "报告.txt", "テスト.txt", "😀.txt", "🎉.txt",
+    "café-😀.txt", "x中文.txt", "中文-2.txt", "日本語.txt", "한국어.md",
+  ],
+  "NFC/NFD twins": [
+    "café-receipt.txt", "cafe\u0301-receipt.txt", "A\u030angström.txt",
+    "nandú.txt", "nandu\u0301.txt", "ḿ.txt", "m\u0301.txt", "e\u0301clair.txt",
+  ],
+  "digits and versions": [
+    "file1.txt", "file2.txt", "file3.txt", "file10.txt", "file20.txt",
+    "file100.txt", "v1.2.txt", "v1.10.txt", "2024-01-01.txt", "2024-12-31.txt",
+    "a1.txt", "a01.txt", "01.txt", "10.txt", "2.txt", "1.txt", "0.txt",
+    "007.txt", "3.14.txt", "1e6.txt",
+  ],
+  dotfiles: [
+    ".gitignore", ".env", ".env.local", ".bashrc", ".zshrc", ".hidden", ".config",
+    ".DS_Store", ".eslintrc.json", ".prettierrc", ".npmrc", ".editorconfig",
+  ],
+  "mixed case": [
+    "README.md", "readme.md", "Readme.md", "Makefile", "makefile", "MAKEFILE",
+    "Apple.txt", "apple.txt", "APPLE.txt", "Zebra.txt", "zebra.txt", "ZEBRA.txt",
+    "Index.ts", "index.ts", "INDEX.TS", "Main.go", "main.go", "MAIN.GO",
+  ],
+  separators: [
+    "my file.txt", "my-file.txt", "my_file.txt", "my.file.txt", "(draft).txt",
+    "[final].txt", "note#1.txt", "100%.txt", "a+b.txt", "x=y.txt", "v2 (copy).txt",
+    "todo-list.md", "TODO.md", "notes-2024.txt",
+  ],
+  "typical project files": [
+    "index.js", "main_test.go", "package.json", "pnpm-lock.yaml", "tsconfig.json",
+    "README", "LICENSE", "CHANGELOG.md", "Dockerfile", "docker-compose.yml",
+    "config.yaml", "config.yml", "settings.json", "notes.txt", "todo.md",
+    "photo.jpg", "image.PNG", "archive.tar.gz", "backup.zip", "script.sh",
+    "build.log", "output.csv", "data.xml", "style.css", "app.tsx", "server.py",
+    "requirements.txt", "go.mod",
+  ],
+};
+
+const realisticNames = Object.values(realisticCategories).flat();
+if (new Set(realisticNames).size !== realisticNames.length) {
+  throw new Error("realistic corpus has duplicate names");
+}
+if (realisticNames.length < 200 || realisticNames.length > 500) {
+  throw new Error(`realistic corpus out of range: ${realisticNames.length}`);
+}
+
+const realisticIndex = new Map(realisticNames.map((name, i) => [name, i]));
+const realisticOrders = {};
+for (const { key, tag } of locales) {
+  const compare = compareWith(tag);
+  realisticOrders[key] = [...realisticNames]
+    .sort(compare)
+    .map((name) => realisticIndex.get(name));
+}
+
+writeFileSync(
+  join(here, "realistic_corpus.json"),
+  JSON.stringify({
+    generator: "go/internal/runtime/testdata/gen_locale_fixture.mjs",
+    node: nodeVersion,
+    icu,
+    cldr,
+    unicode,
+    locales: locales.map(({ key, tag }) => ({ envValue: key, locale: tag ?? "default" })),
+    categories: Object.fromEntries(
+      Object.entries(realisticCategories).map(([name, values]) => [name, values.length]),
+    ),
+    names: realisticNames,
+    orders: realisticOrders,
+  }) + "\n",
+);
+
 process.stdout.write(
-  `wrote locale_env.json (${envFixture.scenarios.length} scenarios) and ` +
-    `collate_corpus.json (${names.length} names)\n`,
+  `wrote locale_env.json (${envFixture.scenarios.length} scenarios), ` +
+    `collate_corpus.json (${names.length} names) and ` +
+    `realistic_corpus.json (${realisticNames.length} names)\n`,
 );
