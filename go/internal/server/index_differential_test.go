@@ -23,7 +23,7 @@ type tsMCPProcess struct {
 	waitErr error
 }
 
-func startTSMCP(t *testing.T, root, cwd, dataDir, profile string) *tsMCPProcess {
+func startTSMCP(t *testing.T, root, cwd, dataDir, claudeDir, profile string) *tsMCPProcess {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -37,6 +37,7 @@ func startTSMCP(t *testing.T, root, cwd, dataDir, profile string) *tsMCPProcess 
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(),
 		"CAVE_TOOLS_DATA_DIR="+dataDir,
+		"CLAUDE_CONFIG_DIR="+claudeDir,
 		"CAVE_TOOLS_DAEMON=0",
 		"CAVE_TOOLS_PROFILE="+profile,
 	)
@@ -122,6 +123,7 @@ func TestMCPWireDifferential(t *testing.T) {
 	cwd := t.TempDir()
 	goData := filepath.Join(cwd, "go-data")
 	tsData := filepath.Join(cwd, "ts-data")
+	tsClaude := filepath.Join(cwd, "ts-claude")
 	t.Setenv("CAVE_TOOLS_DATA_DIR", goData)
 	t.Setenv("CAVE_TOOLS_DAEMON", "0")
 	t.Setenv("CAVE_TOOLS_PROFILE", "full")
@@ -141,7 +143,7 @@ func TestMCPWireDifferential(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ts := startTSMCP(t, root, cwd, tsData, "full")
+	ts := startTSMCP(t, root, cwd, tsData, tsClaude, "full")
 	goPipe := startMCPPipe(t)
 
 	type frame struct {
