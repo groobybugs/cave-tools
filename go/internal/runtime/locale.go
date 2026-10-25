@@ -14,12 +14,13 @@
 // uprv_getDefaultLocaleID (icu4c/source/common/putil.cpp), whose POSIX path
 // reads the environment chain LC_ALL, LC_MESSAGES, LANG (LC_COLLATE is ignored
 // for collation) and maps "C"/"POSIX" — including "C.UTF-8" once the codeset
-// is stripped — to en_US_POSIX. Only a genuinely absent locale leaves it
-// empty, which is ICU's root locale ("und"). Note that a variable that is set
-// but empty wins over the ones after it and yields that root locale; that is
-// the one place the ICU code diverges from plain POSIX precedence, and
-// locale_env.json records it. TestResolveLocaleMatchesNode replays the measured
-// matrix from Node 24.19 (ICU 78.3).
+// is stripped — to en_US_POSIX. When none of the three variables is set, the
+// chain falls back to en_US_POSIX as well, which V8 reports as "en-US". A
+// variable that is set but empty wins over the ones after it and yields the
+// empty (root) locale, which V8 reports as "und"; that is the one place the
+// ICU code diverges from plain POSIX precedence, and locale_env.json records
+// it. TestResolveLocaleMatchesNode replays the measured matrix from Node 24.19
+// (ICU 78.3).
 //
 // # Thread safety
 //
@@ -161,7 +162,8 @@ func LocaleTag() string {
 // resolveLocale mirrors ICU's POSIX default-locale resolution. `lookup`
 // reports whether a variable is set; ICU distinguishes an absent variable from
 // one that is set to the empty string, which it keeps as a locale of "" (root)
-// rather than skipping like the C library would.
+// rather than skipping like the C library would. When no variable is set at
+// all the chain defaults to en_US_POSIX.
 func resolveLocale(lookup func(string) (string, bool)) string {
 	posix, found := "", false
 	for _, key := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {

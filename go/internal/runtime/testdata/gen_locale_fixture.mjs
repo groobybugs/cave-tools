@@ -100,6 +100,12 @@ scenarios.push(
   { name: "LANG=tr_TR.UTF-8@euro", env: { LANG: "tr_TR.UTF-8@euro" } },
   { name: "LANG=C.utf8", env: { LANG: "C.utf8" } },
   { name: "LANG=bogus_XX.UTF-8", env: { LANG: "bogus_XX.UTF-8" } },
+  // Set-but-empty outside LC_ALL, and locales whose region is not the probe's
+  // default region. Both are exercised only by these rows.
+  { name: "LANG=''", env: { LANG: "" } },
+  { name: "LC_MESSAGES=''", env: { LC_MESSAGES: "" } },
+  { name: "LANG=es_MX.UTF-8", env: { LANG: "es_MX.UTF-8" } },
+  { name: "LANG=pt_BR.UTF-8", env: { LANG: "pt_BR.UTF-8" } },
 );
 
 const envFixture = {
