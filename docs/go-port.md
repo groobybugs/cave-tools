@@ -662,8 +662,9 @@ not portable benchmarks; the reproducible harness and provenance pins are in
 `scripts/bench-ts-go.md`.
 
 - ~147 CLI starts/day, median 40 starts per session, p90 190.
-- 85% of starts are the async `status --emit-statusline` hook that runs after
-  each cave MCP tool call, so they are off the critical path.
+- 85% of starts were the async `status --emit-statusline` PostToolUse hook that
+  ran after each cave MCP tool call (off the critical path). W5 replaced it with
+  the in-process statusline refresh described below, so those starts are gone.
 - 13% are `filter --json`, the only blocking path: ~112 ms → ~50 ms with Go.
 - Per-start saving is ~55 ms when the launcher `exec`s the Go binary directly,
   ~30 ms when startup goes through the `cave-node` shim.
