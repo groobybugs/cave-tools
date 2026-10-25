@@ -561,11 +561,47 @@ CAVE_TOOLS_IMPL=go node dist/cli.js help
   an actual Go executable, not a TS launcher or wrapper that re-enters the
   switch.
 - `src/impl-switch.ts` forwards argv, env, cwd and inherited stdin/stdout/stderr,
-  mirrors exit status and relays supported signals. All CLI modes, including
-  noargs MCP and `__job-worker`, pass through this one boundary.
-- Direct `node dist/cli.js` selects Go before CLI command execution, but static
-  imports still initialize first. It does not avoid Node startup. Newly
-  generated POSIX installer shims select Go with `exec` before starting Node;
+  mirrors exit status and relays supported signals. Every non-TS-routed mode,
+  including `__job-worker`, passes through this one boundary.
+
+### Routing table (hybrid switch)
+
+Go serves the short-lived CLI paths. The long-lived stdio MCP server and the
+two Node-fetch-backed web tools stay in TypeScript even when
+`CAVE_TOOLS_IMPL=go`:
+
+| argv first token | Runs | Why |
+| --- | --- | --- |
+| *(no arguments)* | TypeScript | a bare invocation starts the stdio MCP server |
+| `mcp` (any trailing args) | TypeScript | long-lived stdio session: no startup win, and the Go compression step is slower |
+| `webfetch` | TypeScript | depends on Node `fetch`/undici behaviour |
+| `websearch` | TypeScript | depends on Node `fetch`/undici behaviour |
+| everything else (`__job-worker`, `filter`, `status`, `raw`, `jobs`, `daemon`, `help`, `tool <name>`, `read`/`bash`/… tool commands, unknown commands) | Go | short-lived; the pre-Node Go exec is the win |
+
+- The decision is made from the **first argv token exactly as `src/cli.ts`
+  dispatches** (argc 0 is the MCP case); trailing flags and subcommands never
+  change it. `mcp --stdio` is still the MCP server, and `webfetch`/`websearch`
+  route by first token only. Explicit dispatcher forms start with another
+  token, so `cave-tools help webfetch` and `cave-tools tool webfetch …` go to
+  Go like every other `help`/`tool` invocation.
+- Single source of truth: the canonical list lives in
+  `scripts/impl-routes.mjs`. `src/impl-switch.ts` imports it for the runtime
+  check and `scripts/install-agent-instructions.mjs` interpolates the same list
+  into the generated POSIX shim's `case`, so the two cannot drift.
+- Rationale: the MCP server is long-lived, so skipping Node startup buys
+  nothing and the Go compression path is slower; `webfetch`/`websearch` depend
+  on Node `fetch`/undici semantics, which are the reference behaviour.
+- The Go stdio MCP server and the Go `webfetch`/`websearch` implementations
+  remain in the tree; they are reachable only by invoking the Go binary
+  directly (`go/bin/cave-tools-go mcp`, `… webfetch <url>`, `… websearch
+  <query>`). Their documented gaps (Brotli, stacked Content-Encoding, zstd) are
+  exactly why the switch does not send these surfaces there. No Go code was
+  removed.
+
+- Direct `node dist/cli.js` selects Go before CLI command execution (unless
+  argv is TS-routed), but static imports still initialize first. It does not
+  avoid Node startup. Newly generated POSIX installer shims run the same
+  argc/first-token check and then select Go with `exec` before starting Node;
   static paths and caller arguments are quoted, including spaces and shell
   metacharacters.
 - A missing binary exits 127; direct Node reports a non-executable path with
@@ -580,8 +616,10 @@ CAVE_TOOLS_IMPL=go node dist/cli.js help
   NDJSON protocol. Switching does not require stopping a compatible daemon
   built from the same `dist/`; normal reconnect/spawn behavior applies after
   rebuilding.
-- `scripts/test-impl-switch.mjs` covers default/opt-in selection, fake and real
-  Go binaries, missing/non-executable paths, argv/stdin/exit/signal forwarding,
+- `scripts/test-impl-switch.mjs` covers default/opt-in selection, hybrid
+  routing (every TS-routed form and representative Go-routed forms, through
+  both the direct Node entry point and the generated shim), fake and real Go
+  binaries, missing/non-executable paths, argv/stdin/exit/signal forwarding,
   bare-relative overrides and generated POSIX shims in private fake homes.
   The coordinator ran this suite with a real local Go binary and no skips.
   TS reference test children clear switch variables to avoid accidentally
