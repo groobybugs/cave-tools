@@ -19,14 +19,29 @@ deviations and limitations".
   `AGENTS.md` and `CLAUDE.md` have zero diff against `6cefd81`. The sync adds
   two Go mirrors (the CLI instruction text and the bash tool metadata) and
   exact init/metadata tests; see "Verification status".
-- W5 is **not complete**. Main sync, the opt-in switch and benchmark harness
-  are integrated; expanded parity and remaining acceptance gaps are pending.
-  Initial CLI/warm-MCP measurements and large-filter profiling are recorded in
-  `scripts/bench-ts-go.md`. Switch integration at `a0dcc6e` passed the checks
-  listed under "Verification status".
+- W5 is at its final integration state: main sync (`d163dae`), the opt-in
+  hybrid switch (`a0dcc6e`) and the expanded parity suite (CLI black-box, MCP
+  wire, daemon and durable-job interop) are integrated. The W5 fix set is
+  merged: byte-wise read suggestion order, the empty `bash` command rejection,
+  JS `String.prototype.toLowerCase` through `jsre.ToLowerJS` with the Node
+  24.19.0-measured Unicode delta tables, and the V8 `JSON.parse` error text,
+  Node-compatible stdin UTF-8 decoding and ±Infinity numbers. The last three
+  land on `go-w5-fix-b`; they are written here as part of W5 because the
+  coordinator merges that branch before `go-port` advances. Measurements are in
+  `scripts/bench-ts-go.md` and summarized under "Performance".
 - TypeScript remains the default implementation. `CAVE_TOOLS_IMPL=go` opts
   into the locally built Go binary; see "Implementations switch". No live
   user installation or configuration was changed.
+
+### Platform scope
+
+- **Linux is the supported target.** Every runtime gate (daemon Unix sockets,
+  signals, durable job workers, parity) runs on Linux.
+- **macOS is planned.** `GOOS=darwin go vet ./...` passes, but no macOS runtime
+  run is claimed.
+- **Windows runtime is TODO.** Only `GOOS=windows go vet ./...` is claimed.
+  Named pipes, signal forwarding and MSYS path translation are untested, and
+  the Unix-socket daemon interop tests skip on Windows.
 
 ## Layout
 
@@ -488,7 +503,7 @@ Both implementations share `CAVE_TOOLS_DATA_DIR` (default
 ## Waves
 
 The waves below are the ones that actually ran; early plan labels were folded
-into W3. W5 is not finished.
+into W3. W5 is integrated; see "Status".
 
 - **W0 foundation**: `go.mod`, `types`, `runtime/context`, `storage/data-dir`,
   `storage/db`, the parity harness and this contract.
@@ -512,11 +527,11 @@ into W3. W5 is not finished.
   - W4i: MCP server (`index`, `dispatch`, `tool-list`) and dispatch integration.
   - W4j: daemon server/client plus transport.
   - W4k: CLI (`cli`, `cli-tools`) and the `cave-tools-go` executable wiring.
-- **W5 integration (partial)**: main sync completed at `d163dae` (shared
-  files zero diff vs `6cefd81`; two Go mirrors plus exact init/metadata tests),
-  and `CAVE_TOOLS_IMPL=go` switch integrated at `a0dcc6e`.
-  Benchmark harness `106940f` and initial replicated measurements are also
-  integrated. Remaining: expanded parity and final acceptance. W5 is not complete.
+- **W5 integration**: main sync completed at `d163dae` (shared files zero diff
+  vs `6cefd81`; two Go mirrors plus exact init/metadata tests),
+  `CAVE_TOOLS_IMPL=go` switch integrated at `a0dcc6e`, benchmark harness
+  `106940f`, and the expanded parity suite and fix set described under
+  "Status".
 
 ### Ownership per worker
 
@@ -634,6 +649,21 @@ two Node-fetch-backed web tools stay in TypeScript even when
   TS reference test children clear switch variables to avoid accidentally
   comparing Go against itself.
 
+## Performance and measurement
+
+Machine-specific numbers from a 14-day trace on one Linux workstation. They are
+not portable benchmarks; the reproducible harness and provenance pins are in
+`scripts/bench-ts-go.md`.
+
+- ~147 CLI starts/day, median 40 starts per session, p90 190.
+- 85% of starts are the async `status --emit-statusline` hook that runs after
+  each cave MCP tool call, so they are off the critical path.
+- 13% are `filter --json`, the only blocking path: ~112 ms → ~50 ms with Go.
+- Per-start saving is ~55 ms when the launcher `exec`s the Go binary directly,
+  ~30 ms when startup goes through the `cave-node` shim.
+- Node-only hooks (~43 ms each) are unaffected by Go; they still pay Node
+  startup.
+
 ## Review fixes worth keeping
 
 These are implemented behaviour, not deviations; they are easy to regress when
@@ -652,9 +682,10 @@ touching budgets or status:
 
 ## Known deviations and limitations
 
-These are verified against the code and tests at `d163dae`. They are **not**
-blanket parity claims and none of them is labelled "accepted parity"; each
-needs a follow-up decision or stays a documented limit.
+These are verified against the code and tests at the W5 integration tip (base
+`36117d9`, main sync `d163dae` plus the W5 fixes). They are **not** blanket
+parity claims and none of them is labelled "accepted parity"; each needs a
+follow-up decision or stays a documented limit.
 
 ### Storage and serialization
 
@@ -691,14 +722,25 @@ needs a follow-up decision or stays a documented limit.
 
 ### Web transport
 
-- **Brotli is unresolved.** Go standard library has no Brotli decoder and no
-  new dependency is allowed. Both tools send `Accept-Encoding: gzip, deflate`;
-  a forced `Content-Encoding: br` body passes through undecoded (TS/Node
-  decodes it). `go/internal/tools/webfetch/known-gaps.md` records the repro,
-  and `TestParityBrotliKnownGap` pins the difference. No Brotli parity claim.
-- **Stacked `Content-Encoding`** (e.g. `gzip, deflate`) is not decoded; the
-  decoder matches a single token and the body passes through unchanged. This
-  is rare and explicitly deferred; no parity claim.
+- Under the opt-in switch, `webfetch` and `websearch` stay in TypeScript, so
+  they run the reference Node/undici stack and the gaps below are **not** on
+  the routed path. The Go-native web code is reachable only by invoking the Go
+  binary directly (`go/bin/cave-tools-go webfetch <url>`,
+  `… websearch <query>`). That code keeps:
+  - **Brotli.** Go's standard library has no Brotli decoder and no new
+    dependency is allowed. The tools advertise `Accept-Encoding: gzip,
+    deflate`; a forced `Content-Encoding: br` body passes through undecoded
+    (Node decodes it). `go/internal/tools/webfetch/known-gaps.md` records the
+    repro and `TestParityBrotliKnownGap` pins it. No Brotli parity claim.
+  - **Stacked `Content-Encoding`** (e.g. `gzip, deflate`) is not decoded; the
+    decoder matches a single token and the body passes through unchanged.
+  - **zstd** is not decoded. Node fetch handles it; Go advertises only `gzip`
+    and `deflate`, and a forced zstd body passes through.
+  - Gzip trailing-junk tolerance and the pre-decode `Content-Length`
+    mismatch check are pre-existing Go-native behaviour; they are not claims
+    about the routed path.
+  Branch `go-w5-fix-c` (andybalholm/brotli plus a shared decoder) was **not
+  merged**, by decision: W5 adds no new Go dependency.
 - `daemon-client` models only text/image/resource content. An unknown MCP
   content-block type in a daemon reply is reported as connection-lost (never
   retried) instead of being passed through as arbitrary JSON. No cave-tools
@@ -718,14 +760,23 @@ needs a follow-up decision or stays a documented limit.
   decoded by the Go SDK's typed request parameters, so their protocol error
   text differs from the TS SDK's zod text. Valid names, every tool schema,
   argument-record validation and all tool results match.
+- The JSON-RPC envelope's key order can differ from the TS SDK's insertion
+  order. Clients parse JSON, and every payload value matches; the wire
+  differential test compares decoded frames, not raw key order.
 
 ### Compression
 
 - Lone-surrogate JSON escapes (`"\uD800"`) decode to U+FFFD in Go because Go
-  strings cannot hold a lone code unit; TS keeps the surrogate. This is
-  reachable only with deliberately malformed JSON text. Go raw UTF-8 file
-  writes and JSON output are not claimed to be identical to TS for lone
-  surrogates.
+  strings cannot hold a lone code unit; TS keeps the surrogate. CLI text
+  output converges: both sides print U+FFFD. JSON does not: the TS MCP server
+  keeps the `\uXXXX` escape for a lone surrogate while Go emits U+FFFD.
+- JS-behaviour fixtures are pinned to node 24.19.0 (ICU 78.3, Unicode 17.0):
+  `internal/jsre/testdata/lower_node.txt` and `lower_sequences.txt` for
+  `ToLowerJS`, plus the measured JSON/whitespace expectations in
+  `internal/jsre/jsre_test.go`. The regeneration one-liners are listed in the
+  `internal/jsre/lower_test.go` header. A different Node version changes the
+  fixtures, not the implementation; the delta tables in
+  `lower_unicode17.go` shrink if Go's Unicode tables catch up.
 - `compressXML` returns `nil` for every error. TS has exactly one error today
   (`errUnparseableXML`), so callers observe the same results; a future TS error
   path needs a matching Go branch.
@@ -810,6 +861,33 @@ hash cases. The TS side was already correct.
 Evidence recorded for this document. Do not turn any line into a broader claim
 than it states.
 
+- W5 docs branch `groobybugs/go-w5-docs` (base `36117d9`), Linux, with the
+  parent shell's `CLAUDE_CODE_*` variables present:
+  - `go vet ./...`, `GOOS=windows go vet ./...`, `GOOS=darwin go vet ./...` →
+    clean.
+  - `go test -count=1 ./...` → 1682 pass, 2 skip, 0 fail (28 packages); the
+    same counts with those variables unset.
+  - `go test -tags parity -count=1 ./parity/` → 222 pass, 1 failure:
+    `TestCLIBlackBoxDifferential/filter.invalid-json`, the `go-w5-fix-b` gap
+    (V8 `JSON.parse` error text). With the variables unset: 221 pass and the
+    same failure, plus one `errors.live-single` sampling flake (below).
+  - `go test -race -count=1` on the changed packages (`cli`, `daemon`,
+    `runtime`, `server`, `storage`, `testenv`, `tools/...`) → clean. `-race`
+    parity → no data races, same `filter.invalid-json` failure.
+  - Test hermeticity: every Go test that spawns the TS CLI/MCP/daemon scrubs
+    the subagent-like environment keys through `go/internal/testenv`, derived
+    from the detection predicates in `src/compression/utils.ts`
+    (`CLAUDE_CODE_*`, any `*SUBAGENT*`, `*_TASK_ID`, `CAVE_TOOLS_FORCE_FRESH`).
+    `scripts/test-impl-switch.mjs` applies the same rule to the children it
+    spawns through the Go shim.
+  - Pre-existing flake, not caused by that scrub: `errors.live-single` can
+    sample 0 persisted Go tool errors when the process exits right after a
+    failed read (base `36117d9`: 8/100 runs, this branch: 5/100). A second
+    pre-existing flake, `TestMCPPipeInitializeListCallError` failing its
+    `TempDir` cleanup with `directory not empty` when a background write lands
+    too late (base: 2/100, this branch: 5/100). Neither is fixed here; both are
+    recorded as residuals.
+
 - Run on this docs branch before the sync merge (tip `6d64a7a`, code baseline
   `02890a1`):
   - `go test ./internal/tools/edit -run TestDifferentialAgainstTypeScript -count=1`
@@ -860,11 +938,14 @@ than it states.
   timed sample passed validation; provenance artifact pins matched. Results,
   profiling evidence and limitations are in `scripts/bench-ts-go.md`.
 - Not verified / pending:
-  - W5 parity expansion; the sync gate above ran the existing parity scopes,
-    not the final expanded suite.
-  - Brotli and stacked `Content-Encoding` parity (unresolved/deferred).
+  - `go-w5-fix-b` (`filter.invalid-json`: V8 `JSON.parse` error text, Node
+    stdin UTF-8, ±Infinity numbers) is not on this branch; the parity case is
+    expected to fail until the coordinator merges it. It is written as part of
+    W5 in "Status".
+  - Brotli, stacked `Content-Encoding` and zstd parity in the Go-native web
+    path: `go-w5-fix-c` was not merged, by decision.
   - Windows runtime behavior: only `GOOS=windows go vet` is claimed. The
     Unix-socket daemon interop tests skip on Windows, so named-pipe interop is
-    not proven by tests.
+    not proven by tests. macOS has no runtime run either.
   - Full function-by-function equivalence for every TS function; only the
     mapped files, differential/parity cases and listed tests are evidence.
