@@ -3,6 +3,8 @@ package read
 import (
 	"math"
 	"testing"
+
+	rt "github.com/groobybugs/cave-tools/go/internal/runtime"
 )
 
 // TestNodePathHelpers pins nodeDirname/nodeBasename/nodeExtname against values
@@ -60,33 +62,33 @@ func TestNodePathHelpers(t *testing.T) {
 	}
 }
 
-// TestJsLocaleCompare pins the ICU-compatible ordering the directory listing
-// sort relies on, using values from Node's localeCompare.
-func TestJsLocaleCompare(t *testing.T) {
+// TestDirectoryListingCollation pins the ICU-compatible ordering the directory
+// listing sort relies on, using values from Node's localeCompare.
+func TestDirectoryListingCollation(t *testing.T) {
 	ordered := []string{
 		"a.txt", "A.txt", "B", "b.txt", "c.md",
 	}
 	for i := 0; i+1 < len(ordered); i++ {
-		if got := jsLocaleCompare(ordered[i], ordered[i+1]); got >= 0 {
+		if got := rt.LocaleCompare(ordered[i], ordered[i+1]); got >= 0 {
 			t.Fatalf("%q should sort before %q (got %d)", ordered[i], ordered[i+1], got)
 		}
 	}
 	// Primary order is case-folded; case only breaks ties.
-	if jsLocaleCompare("A", "ab") >= 0 {
+	if rt.LocaleCompare("A", "ab") >= 0 {
 		t.Fatal("\"A\" must sort before \"ab\" (primary prefix rule)")
 	}
-	if jsLocaleCompare("_x", "1a") >= 0 {
+	if rt.LocaleCompare("_x", "1a") >= 0 {
 		t.Fatal("punctuation sorts before digits in ICU order")
 	}
 	for _, pair := range [][2]string{
 		{"a", "A"}, {"aA", "Aa"}, {"aa", "aA"}, {"Ab", "aB"},
 		{"z10", "z2"}, {"Z1", "z10"}, {"b.txt", "A.txt"}, {"", "a"},
 	} {
-		if jsLocaleCompare(pair[0], pair[1]) != -jsLocaleCompare(pair[1], pair[0]) {
+		if rt.LocaleCompare(pair[0], pair[1]) != -rt.LocaleCompare(pair[1], pair[0]) {
 			t.Fatalf("comparator is not antisymmetric for %q/%q", pair[0], pair[1])
 		}
 	}
-	if jsLocaleCompare("same", "same") != 0 {
+	if rt.LocaleCompare("same", "same") != 0 {
 		t.Fatal("identical strings must compare equal")
 	}
 }

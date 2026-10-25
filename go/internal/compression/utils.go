@@ -864,7 +864,7 @@ func GetRtkTopPassthrough(ctx context.Context) []RtkPassthroughEntry {
 		if entries[i].Count != entries[j].Count {
 			return entries[i].Count > entries[j].Count
 		}
-		return entries[i].Prefix < entries[j].Prefix
+		return rt.LocaleCompare(entries[i].Prefix, entries[j].Prefix) < 0
 	})
 	return entries
 }

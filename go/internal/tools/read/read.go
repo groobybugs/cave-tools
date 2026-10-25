@@ -684,6 +684,13 @@ func listDirectory(ctx context.Context, filePath string, offset float64, limit f
 	if err != nil {
 		return types.ToolResult{}, false
 	}
+	// Node's readdir uses libuv's scandir, which sorts entries bytewise (strcmp)
+	// on POSIX; Go's File.ReadDir preserves filesystem order. The locale sort
+	// below is stable, so names the collator considers equal (canonically
+	// equivalent or otherwise ignorable) would otherwise keep a different order.
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
 
 	rows := make([]directoryRow, 0, len(entries))
 	for _, entry := range entries {
@@ -706,11 +713,11 @@ func listDirectory(ctx context.Context, filePath string, offset float64, limit f
 			rows = append(rows, directoryRow{name: name, kind: "file"})
 		}
 	}
+	// localeCompare on the name first (stable), then directories to the front:
+	// the two-pass form of `a.type === b.type ? a.name.localeCompare(b.name) : ...`.
+	rt.SortStableByLocale(rows, func(row directoryRow) string { return row.name })
 	sort.SliceStable(rows, func(i int, j int) bool {
-		if rows[i].kind == rows[j].kind {
-			return jsLocaleCompare(rows[i].name, rows[j].name) < 0
-		}
-		return rows[i].kind == "directory"
+		return rows[i].kind == "directory" && rows[j].kind != "directory"
 	})
 
 	from, to := jsSliceBounds(offset-1, offset-1+limit, len(rows))

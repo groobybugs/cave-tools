@@ -2,9 +2,10 @@
 //
 // read.ts hands several JSON values straight to JS coercions (String(x),
 // Number(x) || 1, String.prototype.length, Array.prototype.slice,
-// String.prototype.localeCompare). Go needs those exact semantics to keep the
-// tool result byte-identical, so the small helpers below live with the tool
-// rather than in a shared package (compression's equivalents are unexported).
+// Number formatting). Go needs those exact semantics to keep the tool result
+// byte-identical, so the small helpers below live with the tool rather than in
+// a shared package (compression's equivalents are unexported). Name collation
+// itself is shared: see runtime.LocaleCompare.
 
 package read
 
@@ -14,7 +15,6 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/groobybugs/cave-tools/go/internal/jsre"
@@ -310,82 +310,6 @@ func utf16Prefix(value string, n int) string {
 		}
 	}
 	return value
-}
-
-// collationASCII is ICU root-collation order for printable ASCII, probed from
-// Node's localeCompare (see TestJsLocaleCompare). Letters fold to one primary
-// weight, so this string lists them once, lowercase.
-const collationASCII = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789abcdefghijklmnopqrstuvwxyz"
-
-var collationPrimaryWeights = func() map[rune]int {
-	weights := make(map[rune]int, len(collationASCII))
-	for index, r := range collationASCII {
-		weights[r] = index
-		if r >= 'a' && r <= 'z' {
-			weights[unicode.ToUpper(r)] = index
-		}
-	}
-	return weights
-}()
-
-// collationPrimary is one rune's primary weight. Non-ASCII sorts after ASCII
-// by lowercase code point, an approximation of ICU's accent ordering.
-func collationPrimary(r rune) int {
-	if weight, ok := collationPrimaryWeights[r]; ok {
-		return weight
-	}
-	if r < 0x20 {
-		return -100 + int(r)
-	}
-	if r < 0x80 {
-		return 200
-	}
-	return 1000 + int(unicode.ToLower(r))
-}
-
-// jsLocaleCompare mirrors name.localeCompare(name) for the directory listing
-// sort: primary (case-folded, ICU-ordered) first, then lowercase before
-// uppercase.
-func jsLocaleCompare(a string, b string) int {
-	left := []rune(a)
-	right := []rune(b)
-	common := len(left)
-	if len(right) < common {
-		common = len(right)
-	}
-	for i := 0; i < common; i++ {
-		leftWeight := collationPrimary(left[i])
-		rightWeight := collationPrimary(right[i])
-		if leftWeight != rightWeight {
-			return compareInt(leftWeight, rightWeight)
-		}
-	}
-	if len(left) != len(right) {
-		return compareInt(len(left), len(right))
-	}
-	for i := 0; i < common; i++ {
-		if left[i] == right[i] {
-			continue
-		}
-		if unicode.IsLower(left[i]) {
-			return -1
-		}
-		if unicode.IsLower(right[i]) {
-			return 1
-		}
-		return compareInt(int(left[i]), int(right[i]))
-	}
-	return 0
-}
-
-func compareInt(a int, b int) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
 }
 
 // jsSliceBounds applies Array.prototype.slice index normalization for
