@@ -9,8 +9,10 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -133,20 +135,25 @@ func waitForSuffix(t *testing.T, path string, timeout time.Duration) (string, bo
 
 // TestMCPCallWritesStatuslineSuffix proves a tools/call refreshes the badge
 // in-process (no `status --emit-statusline` child) and that the bytes match
-// what the status command would write for the same state.
+// what the CLI writes for the same sandboxed data/config dirs. The CLI runs in
+// a subprocess, so the comparison cannot be satisfied by the same function
+// that wrote the badge.
 func TestMCPCallWritesStatuslineSuffix(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("CAVE_TOOLS_DATA_DIR", filepath.Join(dir, "data"))
+	dataDir := os.Getenv("CAVE_TOOLS_DATA_DIR")
+	if dataDir == "" {
+		t.Fatal("TestMain must pin CAVE_TOOLS_DATA_DIR")
+	}
 	t.Setenv("CAVE_TOOLS_DAEMON", "0")
 	t.Setenv("CAVE_TOOLS_PROFILE", "full")
 	t.Setenv("CAVE_TOOLS_ASCII", "1")
+	t.Setenv("CAVE_TOOLS_STATUS_RTK", "0")
 
 	pipe := startMCPPipe(t)
-	claudeDir := filepath.Join(dir, "claude")
+	claudeDir := filepath.Join(t.TempDir(), "claude")
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
 	pipe.initialize(t)
 
-	source := filepath.Join(dir, "note.txt")
+	source := filepath.Join(t.TempDir(), "note.txt")
 	if err := os.WriteFile(source, []byte("statusline payload\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -158,20 +165,76 @@ func TestMCPCallWritesStatuslineSuffix(t *testing.T) {
 		t.Fatalf("tool call failed: %#v", response)
 	}
 
-	path := filepath.Join(claudeDir, ".cave-tools-statusline-suffix")
-	content, ok := waitForSuffix(t, path, 3*time.Second)
+	path := filepath.Join(claudeDir, statuslineSuffixName)
+	mcpContent, ok := waitForSuffix(t, path, 3*time.Second)
 	if !ok {
 		t.Fatalf("statusline suffix %s was not written", path)
 	}
-	if content == "" {
+	if mcpContent == "" {
 		t.Fatal("statusline suffix is empty")
 	}
-	if !strings.HasPrefix(content, "v") || !strings.Contains(content, "|") {
-		t.Fatalf("suffix = %q, want ASCII badge", content)
+	if !strings.HasPrefix(mcpContent, "v") || !strings.Contains(mcpContent, "|") {
+		t.Fatalf("suffix = %q, want ASCII badge", mcpContent)
 	}
-	if want := statusline.BuildSuffix(); content != want {
-		t.Fatalf("suffix = %q, want %q (status --emit-statusline content)", content, want)
+
+	// Same data dir, different config dir: the real CLI writes the reference
+	// badge in a fresh process.
+	binary := buildCLIBinary(t)
+	cliDir := filepath.Join(t.TempDir(), "claude")
+	command := exec.Command(binary, "status", "--emit-statusline")
+	command.Env = envWithOverrides(map[string]string{
+		"CAVE_TOOLS_DATA_DIR":   dataDir,
+		"CLAUDE_CONFIG_DIR":     cliDir,
+		"CAVE_TOOLS_ASCII":      "1",
+		"CAVE_TOOLS_STATUS_RTK": "0",
+		"CAVE_TOOLS_DAEMON":     "0",
+	})
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("status --emit-statusline: %v\n%s", err, output)
 	}
+	cliContent, err := os.ReadFile(filepath.Join(cliDir, statuslineSuffixName))
+	if err != nil {
+		t.Fatalf("read CLI badge: %v", err)
+	}
+	if string(cliContent) != mcpContent {
+		t.Fatalf("suffix = %q, want %q (status --emit-statusline output)", mcpContent, cliContent)
+	}
+}
+
+const statuslineSuffixName = ".cave-tools-statusline-suffix"
+
+// buildCLIBinary builds the real CLI entry once for the badge comparison.
+func buildCLIBinary(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "cave-tools-go")
+	if goruntime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	command := exec.Command("go", "build", "-o", binary, "./cmd/cave-tools-go")
+	command.Dir = filepath.Join("..", "..")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, output)
+	}
+	return binary
+}
+
+// envWithOverrides returns os.Environ with the given keys replaced, so a
+// subprocess cannot see two values for one key.
+func envWithOverrides(overrides map[string]string) []string {
+	env := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, entry := range os.Environ() {
+		key, _, found := strings.Cut(entry, "=")
+		if found {
+			if _, replaced := overrides[key]; replaced {
+				continue
+			}
+		}
+		env = append(env, entry)
+	}
+	for key, value := range overrides {
+		env = append(env, key+"="+value)
+	}
+	return env
 }
 
 // TestMCPCallStatuslineWriteFailureIsSilent proves an unwritable config dir
