@@ -1353,3 +1353,42 @@ func TestCheckRangeChecksumOrErrorJSUnicodeCase(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckExpectedHashUTF16Length pins the min-length gate of
+// checkExpectedHash to `String.prototype.length` (UTF-16 code units), not
+// UTF-8 bytes. Values measured with node 24.19.0:
+//
+//	"€€€".trim().toLowerCase().length = 3  (9 UTF-8 bytes) -> "at least 8"
+//	"İİİ".trim().toLowerCase().length = 6  (9 UTF-8 bytes) -> "at least 8"
+//
+// (U+0130 lowercases to "i" + U+0307, so three of them are six units.)
+func TestCheckExpectedHashUTF16Length(t *testing.T) {
+	source := []byte("alpha\nbeta\n")
+	cases := []struct {
+		name     string
+		expected any
+		wantText string
+	}{
+		{"euro signs below min", "€€€", "expected_hash must be at least 8 hex characters"},
+		{"dotted I below min", strings.Repeat("\u0130", 3), "expected_hash must be at least 8 hex characters"},
+	}
+	for _, tc := range cases {
+		result := checkExpectedHash(tc.expected, source)
+		if result == nil || !result.IsError {
+			t.Fatalf("%s: want an error, got %+v", tc.name, result)
+		}
+		if got := strings.TrimPrefix(resultText(*result), "Error: "); got != tc.wantText {
+			t.Fatalf("%s: got %q, want %q", tc.name, got, tc.wantText)
+		}
+	}
+
+	// 8 ASCII hex characters still clear the length gate and reach the
+	// mismatch path.
+	okLen := checkExpectedHash("deadbeef", source)
+	if okLen == nil || !okLen.IsError {
+		t.Fatalf("deadbeef: want a mismatch error, got %+v", okLen)
+	}
+	if got := resultText(*okLen); !strings.HasPrefix(strings.TrimPrefix(got, "Error: "), "expected_hash mismatch") {
+		t.Fatalf("deadbeef: got %q, want an expected_hash mismatch", got)
+	}
+}

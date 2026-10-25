@@ -264,7 +264,7 @@ func checkExpectedHash(expected any, sourceBytes []byte) *types.ToolResult {
 	if want == "" {
 		return nil
 	}
-	if len(want) < 8 {
+	if utf16Length(want) < 8 {
 		return errResultPtr("expected_hash must be at least 8 hex characters")
 	}
 	if !reHex.MatchString(want) {
@@ -1340,6 +1340,13 @@ func utf16Length(value string) int {
 }
 
 // utf16Slice mirrors String.prototype.slice over UTF-16 code units.
+//
+// Residual divergence (accepted): when the slice boundary splits a surrogate
+// pair, TS keeps the lone surrogate (e.g. `slice(0, 16)` on 15 ASCII chars plus
+// U+1F600 ends "\ud83d") while utf16.Decode turns the unpaired unit into U+FFFD.
+// Go strings cannot hold a lone surrogate, and encoding/json sanitizes one to
+// U+FFFD on the wire anyway, so both implementations converge to the same
+// observable JSON text. ASCII output (line numbers, hex hashes) is unaffected.
 func utf16Slice(value string, start, end int) string {
 	units := utf16.Encode([]rune(value))
 	length := len(units)
