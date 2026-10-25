@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { TS_ROUTED_COMMANDS } from './impl-routes.mjs';
 
 const HOME = os.homedir();
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -768,6 +769,16 @@ function posixShellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
+// `case` pattern for the TS-routed first arguments. The canonical list lives in
+// ./impl-routes.mjs (shared with src/impl-switch.ts); reject anything that
+// would change shell pattern semantics instead of emitting it.
+for (const command of TS_ROUTED_COMMANDS) {
+  if (!/^[A-Za-z0-9_-]+$/.test(command)) {
+    throw new Error(`unsafe TS-routed command for the launcher shim: ${command}`);
+  }
+}
+const TS_ROUTED_PATTERN = TS_ROUTED_COMMANDS.join('|');
+
 const CAVE_NODE_SHIM = `#!/bin/sh
 ${LAUNCHER_MARKER} — resolve a node >=20 regardless of PATH order or nvm churn.
 NVM_DIR="\${NVM_DIR:-$HOME/.nvm}"
@@ -798,7 +809,17 @@ const CAVE_TOOLS_SHIM = `#!/bin/sh
 ${LAUNCHER_MARKER} — single entry point for every agent and hook.
 # Opt-in Go implementation: select it before starting Node. A missing or
 # non-executable Go binary fails here instead of silently running TypeScript.
-if [ "\${CAVE_TOOLS_IMPL:-}" = "go" ]; then
+# The stdio MCP server (bare or "mcp") and the Node-fetch-backed web tools stay
+# in TypeScript even under the opt-in; everything else may exec Go.
+cave_tools_use_go=1
+if [ "$#" -eq 0 ]; then
+  cave_tools_use_go=0
+else
+  case "$1" in
+    ${TS_ROUTED_PATTERN}) cave_tools_use_go=0 ;;
+  esac
+fi
+if [ "$cave_tools_use_go" = "1" ] && [ "\${CAVE_TOOLS_IMPL:-}" = "go" ]; then
   if [ -n "\${CAVE_TOOLS_GO_BIN:-}" ]; then
     cave_go_bin="$CAVE_TOOLS_GO_BIN"
   else

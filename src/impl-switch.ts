@@ -4,15 +4,40 @@
 // once `CAVE_TOOLS_IMPL=go` is selected, the Go binary receives the original
 // argv/env/cwd and owns stdin/stdout/stderr, exit status and signals. The
 // TypeScript implementation remains the default for unset or any other value.
+//
+// Two surfaces stay in TypeScript even under the opt-in (see
+// scripts/impl-routes.mjs, the single source of truth shared with the POSIX
+// launcher shim generator):
+//   - the stdio MCP server (`mcp` or a bare invocation): long-lived, so there
+//     is no startup win, and it owns the MCP SDK session.
+//   - `webfetch`/`websearch`: they depend on Node fetch/undici behaviour
+//     (Brotli, stacked Content-Encoding, zstd), which the Go port documents as
+//     gaps.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { accessSync, constants, statSync, writeSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TS_ROUTED_COMMANDS } from "../scripts/impl-routes.mjs";
 
 export const IMPL_ENV = "CAVE_TOOLS_IMPL";
 export const GO_BIN_ENV = "CAVE_TOOLS_GO_BIN";
+
+/** First-arg commands that keep running in TypeScript under `CAVE_TOOLS_IMPL=go`. */
+export { TS_ROUTED_COMMANDS };
+
+/**
+ * Whether argv must stay in TypeScript even when Go is selected. Mirrors
+ * src/cli.ts dispatch exactly: no arguments and first token `mcp` start the
+ * stdio MCP server, and `webfetch`/`websearch` are the Node-fetch-backed tool
+ * commands. Everything else (including `__job-worker`, `filter`, `status`,
+ * `raw`, `bash`, `jobs`, daemon control and `tool <name>`) keeps going to Go.
+ */
+export function routesToTypeScript(argv: readonly string[]): boolean {
+  if (argv.length === 0) return true;
+  return TS_ROUTED_COMMANDS.includes(argv[0]);
+}
 
 export interface GoBinaryResolution {
   path: string;
@@ -196,13 +221,16 @@ export function runGoImplementation(options: RunGoOptions): Promise<never> {
 }
 
 /**
- * Entry-point hook. Returns immediately when TypeScript is selected; when Go
- * is selected it only settles by terminating the process with the Go result.
+ * Entry-point hook. Returns immediately when TypeScript is selected, and also
+ * when argv is one of the surfaces that stays in TypeScript under the Go
+ * opt-in. Otherwise it only settles by terminating the process with the Go
+ * result.
  */
 export async function maybeRunGoImplementation(
   argv: string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   if (!shouldUseGo(env)) return;
+  if (routesToTypeScript(argv)) return;
   await runGoImplementation({ argv, env, cwd: process.cwd() });
 }
