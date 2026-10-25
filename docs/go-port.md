@@ -570,24 +570,32 @@ Go serves the short-lived CLI paths. The long-lived stdio MCP server and the
 two Node-fetch-backed web tools stay in TypeScript even when
 `CAVE_TOOLS_IMPL=go`:
 
-| argv first token | Runs | Why |
+| argv form | Runs | Why |
 | --- | --- | --- |
 | *(no arguments)* | TypeScript | a bare invocation starts the stdio MCP server |
 | `mcp` (any trailing args) | TypeScript | long-lived stdio session: no startup win, and the Go compression step is slower |
-| `webfetch` | TypeScript | depends on Node `fetch`/undici behaviour |
-| `websearch` | TypeScript | depends on Node `fetch`/undici behaviour |
-| everything else (`__job-worker`, `filter`, `status`, `raw`, `jobs`, `daemon`, `help`, `tool <name>`, `read`/`bash`/… tool commands, unknown commands) | Go | short-lived; the pre-Node Go exec is the win |
+| `webfetch <url> …` | TypeScript | depends on Node `fetch`/undici behaviour |
+| `websearch <query> …` | TypeScript | depends on Node `fetch`/undici behaviour |
+| `tool webfetch <url> …` | TypeScript | the explicit dispatcher loads the same Node-fetch handler as the direct form |
+| `tool websearch <query> …` | TypeScript | same as `tool webfetch` |
+| everything else (`__job-worker`, `filter`, `status`, `raw`, `jobs`, `daemon`, `help`, `tool <other>`, `read`/`bash`/… tool commands, unknown commands) | Go | short-lived; the pre-Node Go exec is the win |
 
-- The decision is made from the **first argv token exactly as `src/cli.ts`
-  dispatches** (argc 0 is the MCP case); trailing flags and subcommands never
-  change it. `mcp --stdio` is still the MCP server, and `webfetch`/`websearch`
-  route by first token only. Explicit dispatcher forms start with another
-  token, so `cave-tools help webfetch` and `cave-tools tool webfetch …` go to
-  Go like every other `help`/`tool` invocation.
-- Single source of truth: the canonical list lives in
-  `scripts/impl-routes.mjs`. `src/impl-switch.ts` imports it for the runtime
-  check and `scripts/install-agent-instructions.mjs` interpolates the same list
-  into the generated POSIX shim's `case`, so the two cannot drift.
+- The decision is made from the **argv tokens exactly as `src/cli.ts`
+  dispatches** (argc 0 is the MCP case). The first token decides, except for
+  the `tool` dispatcher, where the second token decides whether the target is
+  a TS-routed tool. Trailing flags and subcommands never change the decision:
+  `mcp --stdio` is still the MCP server, `webfetch --help` and
+  `tool webfetch --help` stay in TypeScript, and `tool webfetch <url>` cannot
+  fall through to Go. `cave-tools help webfetch` and `cave-tools tool <other>`
+  still go to Go like every other `help`/`tool` invocation; their output is
+  byte-identical to TypeScript.
+- Single source of truth: the canonical lists live in
+  `scripts/impl-routes.mjs` (`TS_ROUTED_COMMANDS` for the direct commands,
+  `TS_ROUTED_TOOLS` for the tools reachable through `tool <name>`).
+  `src/impl-switch.ts` imports them for the runtime check and
+  `scripts/install-agent-instructions.mjs` interpolates the same lists into the
+  generated POSIX shim's nested `case`, so the two cannot drift.
+
 - Rationale: the MCP server is long-lived, so skipping Node startup buys
   nothing and the Go compression path is slower; `webfetch`/`websearch` depend
   on Node `fetch`/undici semantics, which are the reference behaviour.
@@ -601,12 +609,13 @@ two Node-fetch-backed web tools stay in TypeScript even when
 - Direct `node dist/cli.js` selects Go before CLI command execution (unless
   argv is TS-routed), but static imports still initialize first. It does not
   avoid Node startup. Newly generated POSIX installer shims run the same
-  argc/first-token check and then select Go with `exec` before starting Node;
-  static paths and caller arguments are quoted, including spaces and shell
-  metacharacters.
-- A missing binary exits 127; direct Node reports a non-executable path with
-  126. The POSIX shim reports either missing or non-executable with 127. There
-  is no silent TS retry of a selected Go operation.
+  argc/first-token (plus `tool` second-token) check and then select Go with
+  `exec` before starting Node; static paths and caller arguments are quoted,
+  including spaces and shell metacharacters.
+- A missing binary exits 127; direct Node reports a non-executable path (or a
+  directory) with 126. The POSIX shim deliberately collapses both cases to
+  127, so the same misconfiguration has a different code depending on the
+  entry point. There is no silent TS retry of a selected Go operation.
 - Windows still uses the existing package-manager launcher through Node; no
   pre-Node `.cmd` shim was added. Windows `.exe` resolution is unit-tested,
   not Windows runtime acceptance. Windows signals and named-pipe runtime
