@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 )
 
 // interopDeps locates the built TS tree and node. Both the Go and TS
@@ -45,7 +47,7 @@ func runNode(t *testing.T, nodePath, distDB, dataDir, script string) string {
 
 	cmd := exec.CommandContext(ctx, nodePath, "--input-type=module", "-e", script)
 	cmd.Dir = repoRoot(t)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(testenv.Environ(),
 		"CAVE_TOOLS_DATA_DIR="+dataDir,
 		"CLAUDE_CONFIG_DIR="+filepath.Join(filepath.Dir(dataDir), "claude"),
 		"CAVE_DIST_DB="+distDB,

@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 )
 
 // tsMCPProcess is a raw JSON-RPC client over the built TS MCP stdio server.
@@ -35,7 +37,7 @@ func startTSMCP(t *testing.T, root, cwd, dataDir, profile string) *tsMCPProcess 
 	}
 	cmd := exec.Command(node, cli, "mcp")
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(testenv.Environ(),
 		"CAVE_TOOLS_DATA_DIR="+dataDir,
 		"CAVE_TOOLS_DAEMON=0",
 		"CAVE_TOOLS_PROFILE="+profile,

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 )
 
 // outcome is one process run's observable result.
@@ -277,7 +279,7 @@ func runProcess(t *testing.T, binary string, prefix []string, testCase parityCas
 // dir and no daemon, so runs never read or write the developer's state.
 func isolatedEnv(dataDir string, extra map[string]string) []string {
 	env := map[string]string{}
-	for _, entry := range os.Environ() {
+	for _, entry := range testenv.Scrub(os.Environ()) {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue

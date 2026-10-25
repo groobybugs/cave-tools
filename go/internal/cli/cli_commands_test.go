@@ -15,6 +15,7 @@ import (
 
 	rt "github.com/groobybugs/cave-tools/go/internal/runtime"
 	"github.com/groobybugs/cave-tools/go/internal/storage"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 	"github.com/groobybugs/cave-tools/go/internal/tools/bash"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
@@ -189,7 +190,7 @@ func TestInitInstructionsMatchTypeScript(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(nodePath, tsCLI, "init")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(testenv.Environ(),
 		"CAVE_TOOLS_DATA_DIR="+t.TempDir(),
 		"CLAUDE_CONFIG_DIR="+t.TempDir(),
 	)

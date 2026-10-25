@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 )
 
 // Differential harness: runs the TypeScript handler from dist/ and the Go
@@ -69,7 +70,7 @@ func runTS(t *testing.T, root string, args map[string]any) string {
 	}
 	command := exec.Command("node", runner, filepath.Join(root, "dist/tools/compress.js"), "compressTool")
 	command.Stdin = bytes.NewReader(encoded)
-	command.Env = append(os.Environ(), "CAVE_TOOLS_DATA_DIR="+os.Getenv("CAVE_TOOLS_DATA_DIR"))
+	command.Env = append(testenv.Environ(), "CAVE_TOOLS_DATA_DIR="+os.Getenv("CAVE_TOOLS_DATA_DIR"))
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -189,6 +190,7 @@ import(path).then((mod) => {
 		t.Fatalf("runner: %v", err)
 	}
 	command := exec.Command("node", runner, filepath.Join(root, toolPath), exportName)
+	command.Env = testenv.Environ()
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

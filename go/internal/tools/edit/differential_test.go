@@ -22,6 +22,7 @@ import (
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
 	"github.com/groobybugs/cave-tools/go/internal/runtime"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 	"github.com/groobybugs/cave-tools/go/internal/tools"
 	"github.com/groobybugs/cave-tools/go/internal/tools/applypatch"
 	"github.com/groobybugs/cave-tools/go/internal/tools/write"
@@ -448,7 +449,7 @@ func runDifferentialPhase(t *testing.T, dist, nodePath, mode string) {
 	dataDir := t.TempDir()
 	cmd := exec.Command(nodePath, scriptPath, specPath)
 	cmd.Dir = tsDir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(testenv.Environ(),
 		"CAVE_TOOLS_DATA_DIR="+dataDir,
 		"CLAUDE_CONFIG_DIR="+filepath.Join(dataDir, "claude"),
 		"CAVE_TOOLS_MODE="+mode,

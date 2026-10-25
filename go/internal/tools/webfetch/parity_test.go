@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
 
@@ -93,7 +94,7 @@ func runTS(t *testing.T, root, toolPath, exportName string, args map[string]any,
 	}
 	command := exec.Command("node", writeRunner(t), filepath.Join(root, toolPath), exportName)
 	command.Stdin = bytes.NewReader(encoded)
-	command.Env = append(os.Environ(),
+	command.Env = append(testenv.Environ(),
 		"CAVE_TOOLS_DATA_DIR="+os.Getenv("CAVE_TOOLS_DATA_DIR"),
 		"PARITY_FETCH_BASE="+fetchBase,
 	)
@@ -248,6 +249,7 @@ import(path).then((mod) => {
 		t.Fatalf("runner: %v", err)
 	}
 	command := exec.Command("node", runner, filepath.Join(root, toolPath), exportName)
+	command.Env = testenv.Environ()
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -281,6 +283,7 @@ func runNodeScript(t *testing.T, script string, args ...string) string {
 		t.Fatalf("probe: %v", err)
 	}
 	command := exec.Command("node", append([]string{path}, args...)...)
+	command.Env = testenv.Environ()
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

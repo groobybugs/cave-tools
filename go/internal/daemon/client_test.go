@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/groobybugs/cave-tools/go/internal/runtime"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
 
@@ -446,6 +447,7 @@ func TestClientToTSDaemon(t *testing.T) {
 	var outputMu sync.Mutex
 	daemon := exec.Command(node, filepath.Join(dist, "cli.js"), "daemon", "start")
 	daemon.Dir = t.TempDir()
+	daemon.Env = testenv.Environ()
 	daemon.Stdout = &lockedWriter{mu: &outputMu, out: &output}
 	daemon.Stderr = &lockedWriter{mu: &outputMu, out: &output}
 	if err := daemon.Start(); err != nil {
@@ -453,7 +455,7 @@ func TestClientToTSDaemon(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		stop := exec.Command(node, filepath.Join(dist, "cli.js"), "daemon", "stop")
-		stop.Env = os.Environ()
+		stop.Env = testenv.Environ()
 		_ = stop.Run()
 		waitCommand(t, daemon)
 		if t.Failed() {
@@ -473,7 +475,7 @@ func TestClientToTSDaemon(t *testing.T) {
 	}, &runtime.CallContext{
 		SessionID: "go-client",
 		Cwd:       workDir,
-		Env:       runtime.EnvFromEnviron(os.Environ()),
+		Env:       testenv.ScrubMap(runtime.EnvFromEnviron(os.Environ())),
 	})
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -563,7 +565,7 @@ console.log(JSON.stringify({ outcome, tools: tools.map((tool) => tool.name) }));
 client.close();
 `
 	cmd := exec.Command(node, "--input-type=module", "-e", script)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(testenv.Environ(),
 		"CT_DAEMON_CLIENT="+filepath.Join(dist, "daemon-client.js"),
 		"CT_CWD="+workDir,
 	)

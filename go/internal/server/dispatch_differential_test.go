@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	callruntime "github.com/groobybugs/cave-tools/go/internal/runtime"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 )
 
 // TestDispatchNilArgsDifferential pins missing/null argument behavior against
@@ -60,7 +61,7 @@ process.stdout.write(JSON.stringify(out));
 `
 	cmd := exec.Command(node, "--input-type=module", "-e", script, string(namesJSON), filepath.Join(root, "dist", "dispatch.js"))
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "CAVE_TOOLS_DATA_DIR="+tsData, "CAVE_TOOLS_DAEMON=0")
+	cmd.Env = append(testenv.Environ(), "CAVE_TOOLS_DATA_DIR="+tsData, "CAVE_TOOLS_DAEMON=0")
 	output, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("node: %v", err)
@@ -170,7 +171,7 @@ process.stdout.write(JSON.stringify(out));
 `
 	cmd := exec.Command(node, "--input-type=module", "-e", script, string(callsJSON), filepath.Join(root, "dist", "dispatch.js"))
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "CAVE_TOOLS_DATA_DIR="+tsData, "CAVE_TOOLS_DAEMON=0")
+	cmd.Env = append(testenv.Environ(), "CAVE_TOOLS_DATA_DIR="+tsData, "CAVE_TOOLS_DAEMON=0")
 	output, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("node: %v", err)

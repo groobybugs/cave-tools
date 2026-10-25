@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 	"github.com/groobybugs/cave-tools/go/internal/types"
 )
 
@@ -230,7 +231,7 @@ func TestHandlerParity(t *testing.T) {
 	}
 	cmd := exec.Command(node, script)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(testenv.Environ(),
 		"CAVE_TOOLS_DATA_DIR="+dir,
 		"CLAUDE_CONFIG_DIR="+filepath.Join(dir, "claude"),
 	)

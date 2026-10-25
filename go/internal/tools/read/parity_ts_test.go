@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/groobybugs/cave-tools/go/internal/compression"
+	"github.com/groobybugs/cave-tools/go/internal/testenv"
 )
 
 // This file is the handler-level differential required by the wave-3 task: the
@@ -389,19 +390,15 @@ func runScenarioInGo(t *testing.T, scenario parityScenario, root string) []strin
 }
 
 // isolatedEnv is the test process environment without cave-tools state, so the
-// node child never reads the developer's registry or stats.
+// node child never reads the developer's registry or stats and never reports a
+// subagent-like signal it inherited from the parent shell.
 func isolatedEnv() []string {
 	forbidden := map[string]bool{
-		"CAVE_TOOLS_DATA_DIR":    true,
-		"CLAUDE_CONFIG_DIR":      true,
-		"CAVE_TOOLS_FORCE_FRESH": true,
-		"CLINE_TASK_ID":          true,
-		"CLAUDE_CODE_SUBAGENT":   true,
-		"ANTHROPIC_SUBAGENT":     true,
-		"CURSOR_TASK_ID":         true,
+		"CAVE_TOOLS_DATA_DIR": true,
+		"CLAUDE_CONFIG_DIR":   true,
 	}
 	env := make([]string, 0, len(os.Environ()))
-	for _, entry := range os.Environ() {
+	for _, entry := range testenv.Scrub(os.Environ()) {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok && forbidden[key] {
 			continue
