@@ -424,6 +424,8 @@ func TestClientUnavailableSocketDir(t *testing.T) {
 // TestClientToTSDaemon is the Go-client -> TypeScript-daemon differential:
 // same dist-derived key, socket path and NDJSON protocol, real TS dispatch.
 func TestClientToTSDaemon(t *testing.T) {
+	// Both daemon start and stop must use the TypeScript reference.
+	t.Setenv("CAVE_TOOLS_IMPL", "")
 	if pathsPlatform == "win32" {
 		t.Skip("unix-socket interop test is not available on Windows")
 	}

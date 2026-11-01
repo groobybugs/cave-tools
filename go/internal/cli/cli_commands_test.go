@@ -172,6 +172,8 @@ func TestInitWritesInstructions(t *testing.T) {
 // TestInitInstructionsMatchTypeScript pins init output to the TS reference.
 // Skips when node or the built dist/ tree is missing.
 func TestInitInstructionsMatchTypeScript(t *testing.T) {
+	// The reference must stay in TypeScript even when the host uses Go.
+	t.Setenv("CAVE_TOOLS_IMPL", "")
 	nodePath, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not found on PATH")
