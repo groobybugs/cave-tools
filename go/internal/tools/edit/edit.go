@@ -32,7 +32,9 @@ var (
 	reNonWord = jsre.MustCompile(`[^a-zA-Z0-9_]`, "")
 )
 
-// editModeRequirements is the shared str/range/delete/move anyOf block.
+// editModeRequirements is the str/range/delete/move anyOf block for batch
+// items. The root schema stays a plain object (strict providers such as xAI
+// reject a root anyOf); handle validates the single-edit and batch shapes.
 // port of src/tools/edit.ts:editModeRequirements
 const editModeRequirements = `"anyOf": [
 				{"required": ["old_string", "new_string"], "properties": {"old_string": {"minLength": 1}}},
@@ -126,33 +128,7 @@ var Tool = types.ToolDefinition{
 				},
 				"description": "Non-empty batch; each item needs a target and an edit mode"
 			}
-		},
-		"anyOf": [
-			{
-				"required": ["file_path"],
-				"not": {"required": ["edits"]},
-				"properties": {"file_path": {"minLength": 1}},
-				` + editModeRequirements + `
-			},
-			{
-				"required": ["edits"],
-				"not": {"anyOf": [
-					{"required": ["old_string"]},
-					{"required": ["new_string"]},
-					{"required": ["replace_all"]},
-					{"required": ["start_line"]},
-					{"required": ["end_line"]},
-					{"required": ["content"]},
-					{"required": ["delete"]},
-					{"required": ["insert_before"]},
-					{"required": ["expected_range_checksum"]}
-				]},
-				"anyOf": [
-					{"required": ["file_path"], "properties": {"file_path": {"minLength": 1}}},
-					{"properties": {"edits": {"items": {"required": ["file_path"], "properties": {"file_path": {"minLength": 1}}}}}}
-				]
-			}
-		]
+		}
 	}`),
 	Handler: handle,
 }

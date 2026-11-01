@@ -113,3 +113,24 @@ func TestToolDefinitionDifferential(t *testing.T) {
 		t.Fatalf("TS tool order %v != ToolNames %v", tsNames, ToolNames)
 	}
 }
+
+// TestToolSchemasRootIsPlainObject keeps every advertised inputSchema root a
+// plain object. Strict providers (xAI/grok) refuse to sample when the root is
+// a union: "tool parameter root must be an object type (root schema is an
+// anyOf/oneOf union with a non-object branch)". Unions may live in properties.
+func TestToolSchemasRootIsPlainObject(t *testing.T) {
+	for _, tool := range AllTools {
+		var schema map[string]any
+		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+			t.Fatalf("%s inputSchema is not a JSON object: %v", tool.Name, err)
+		}
+		if schema["type"] != "object" {
+			t.Errorf("%s inputSchema root type = %v, want object", tool.Name, schema["type"])
+		}
+		for _, key := range []string{"anyOf", "oneOf", "allOf", "not", "enum", "if", "then", "else"} {
+			if _, ok := schema[key]; ok {
+				t.Errorf("%s inputSchema root has %q; strict providers reject root combinators", tool.Name, key)
+			}
+		}
+	}
+}

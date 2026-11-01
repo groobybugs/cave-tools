@@ -240,8 +240,9 @@ function isToolResult(v: unknown): v is ToolResult {
   );
 }
 
-// Requirements shared by single edits and batch items. Handlers still validate
-// semantic conflicts, proof freshness, and bounds against the actual file.
+// Edit-mode requirements for batch items. The root schema stays a plain object
+// (strict providers such as xAI reject a root anyOf); handlers validate the
+// single-edit and batch shapes, proof freshness, and bounds against the file.
 const editModeRequirements = {
   anyOf: [
     { required: ["old_string", "new_string"], properties: { old_string: { minLength: 1 } } },
@@ -336,26 +337,6 @@ export const editTool: Tool & {
         description: "Non-empty batch; each item needs a target and an edit mode",
       },
     },
-    anyOf: [
-      {
-        required: ["file_path"],
-        not: { required: ["edits"] },
-        properties: { file_path: { minLength: 1 } },
-        ...editModeRequirements,
-      },
-      {
-        required: ["edits"],
-        not: { anyOf: editOperationKeys.map((key) => ({ required: [key] })) },
-        anyOf: [
-          { required: ["file_path"], properties: { file_path: { minLength: 1 } } },
-          {
-            properties: {
-              edits: { items: { required: ["file_path"], properties: { file_path: { minLength: 1 } } } },
-            },
-          },
-        ],
-      }
-    ],
   },
   handler: async (args) => {
     if (!isRecord(args)) {

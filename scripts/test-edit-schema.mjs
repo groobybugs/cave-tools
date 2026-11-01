@@ -68,8 +68,23 @@ try {
       `batch top-level operation ${key}`, { file_path: a, [key]: value, edits: [str] }, false,
     ]),
   ];
+  // The root stays a plain object: strict providers (xAI/grok) reject a root
+  // anyOf/oneOf. Shape rules that lived there (path, mode, single vs batch)
+  // are enforced by the handler; the schema still rejects these type errors.
+  const schemaRejects = new Set([
+    "null new string", "fractional lines", "empty batch", "batch missing item replacement",
+    "batch missing item mode", "batch item null", "wrong batch type",
+  ]);
+  const assertPlainObjectRoot = (schema, label) => {
+    assert.equal(schema.type, "object", `${label}: root type`);
+    for (const key of ["anyOf", "oneOf", "allOf", "not"]) {
+      assert.equal(key in schema, false, `${label}: root ${key}`);
+    }
+    checks++;
+  };
+  assertPlainObjectRoot(editTool.inputSchema, "local schema");
   for (const [name, input, valid] of cases) {
-    assert.equal(validate(input).valid, valid, name);
+    assert.equal(validate(input).valid, valid || !schemaRejects.has(name), name);
     checks++;
   }
 
@@ -89,9 +104,10 @@ try {
     const listed = await client.listTools();
     const advertised = listed.tools.find((tool) => tool.name === "cave__edit");
     assert.ok(advertised, "MCP advertises cave__edit");
+    assertPlainObjectRoot(advertised.inputSchema, "MCP schema");
     const wireValidate = new AjvJsonSchemaValidator().getValidator(advertised.inputSchema);
     for (const [name, input, valid] of cases) {
-      assert.equal(wireValidate(input).valid, valid, `MCP schema: ${name}`);
+      assert.equal(wireValidate(input).valid, valid || !schemaRejects.has(name), `MCP schema: ${name}`);
       checks++;
     }
     checks++;

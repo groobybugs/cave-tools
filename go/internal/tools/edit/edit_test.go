@@ -1244,9 +1244,10 @@ func TestEditSchemaJSON(t *testing.T) {
 			t.Fatalf("properties.%s missing", key)
 		}
 	}
-	anyOf, _ := schema["anyOf"].([]any)
-	if len(anyOf) != 2 {
-		t.Fatalf("anyOf length = %d", len(anyOf))
+	for _, key := range []string{"anyOf", "oneOf", "allOf", "not"} {
+		if _, ok := schema[key]; ok {
+			t.Fatalf("root %s must be absent; xAI rejects root unions", key)
+		}
 	}
 	edits, _ := properties["edits"].(map[string]any)
 	if edits["type"] != "array" || edits["minItems"] != float64(1) {
@@ -1256,12 +1257,6 @@ func TestEditSchemaJSON(t *testing.T) {
 	itemAnyOf, _ := items["anyOf"].([]any)
 	if len(itemAnyOf) != 4 {
 		t.Fatalf("edits.items.anyOf length = %d", len(itemAnyOf))
-	}
-	second, _ := anyOf[1].(map[string]any)
-	notBlock, _ := second["not"].(map[string]any)
-	notAnyOf, _ := notBlock["anyOf"].([]any)
-	if len(notAnyOf) != len(editOperationKeys) {
-		t.Fatalf("top-level not.anyOf length = %d", len(notAnyOf))
 	}
 	if name := Tool.Name; name != "cave__edit" {
 		t.Fatalf("name = %q", name)
